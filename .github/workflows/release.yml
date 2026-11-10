@@ -1,0 +1,46 @@
+name: Publish GitHub Release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create or Update Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract version from package.json
+        id: pkg
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=v$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Publish Release to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.pkg.outputs.tag }}
+          name: "NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 1050)"
+          body: |
+            ### NeuroVeil VPN ${{ steps.pkg.outputs.tag }}
+            - Официальная сборка клиента NeuroVeil VPN (${{ steps.pkg.outputs.tag }}).
+            - Поддержка AmneziaWG 3.1 (Header Protection + Anti-DPI), VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks и SSH-туннеля.
+            - Автоматическое обновление через Центр обновлений приложения.
+          draft: false
+          prerelease: false
+          files: |
+            NeuroVeil.exe
+            NeuroVeil_VPN_v*_Setup.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
