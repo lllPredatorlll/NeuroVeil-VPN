@@ -1,0 +1,27 @@
+# Зависимости и кэш сборки
+node_modules/
+dist/
+target/
+target_*/
+src-tauri/target/
+src-tauri/target_*/
+src-tauri/WixTools/
+
+# Локальные данные пользователя, конфиги и ключи (ВАЖНО: не выгружать личные профили и пароли!)
+data/
+state.json
+*.conf
+*.key
+*.pem
+*.log
+
+# Временные и дублирующиеся файлы
+*.old.exe
+NeuroVeil_v*.exe
+NeuroVeil-Portable-v0.4.8/
+
+# Папки IDE
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
