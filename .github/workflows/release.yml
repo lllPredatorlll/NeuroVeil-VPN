@@ -31,7 +31,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.tag }}
-          name: "NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 1050)"
+          name: "NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 1051)"
           body: |
             ### NeuroVeil VPN ${{ steps.pkg.outputs.tag }}
             - Официальная сборка клиента NeuroVeil VPN (${{ steps.pkg.outputs.tag }}).

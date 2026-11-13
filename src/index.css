@@ -284,38 +284,67 @@
   background-color: #f8fafc !important;
 }
 
-/* High contrast & crisp text protection on buttons, chips, and toasts */
+/* Elements that must always keep white text (toasts, solid dark action buttons, tooltips) */
 [data-theme="nordic_frost"] .toast-notice,
 [data-theme="nordic_frost"] .toast-notice *,
 [data-theme="cyber_quartz"] .toast-notice,
-[data-theme="cyber_quartz"] .toast-notice * {
+[data-theme="cyber_quartz"] .toast-notice *,
+[data-theme="nordic_frost"] .keep-white,
+[data-theme="nordic_frost"] .keep-white *,
+[data-theme="cyber_quartz"] .keep-white,
+[data-theme="cyber_quartz"] .keep-white * {
   color: #ffffff !important;
 }
 
-[data-theme="nordic_frost"] button[class*="bg-cyan"],
-[data-theme="nordic_frost"] button[class*="bg-indigo"],
-[data-theme="nordic_frost"] button[class*="bg-emerald"],
-[data-theme="nordic_frost"] button[class*="bg-rose"],
-[data-theme="nordic_frost"] button[class*="from-"],
-[data-theme="cyber_quartz"] button[class*="bg-cyan"],
-[data-theme="cyber_quartz"] button[class*="bg-indigo"],
-[data-theme="cyber_quartz"] button[class*="bg-emerald"],
-[data-theme="cyber_quartz"] button[class*="bg-rose"],
-[data-theme="cyber_quartz"] button[class*="from-"] {
+/* Primary solid action buttons keep crisp white text */
+[data-theme="nordic_frost"] button.bg-cyan-600,
+[data-theme="nordic_frost"] button.bg-cyan-600 *,
+[data-theme="nordic_frost"] button.bg-emerald-600,
+[data-theme="nordic_frost"] button.bg-emerald-600 *,
+[data-theme="nordic_frost"] button.bg-rose-600,
+[data-theme="nordic_frost"] button.bg-rose-600 *,
+[data-theme="cyber_quartz"] button.bg-cyan-600,
+[data-theme="cyber_quartz"] button.bg-cyan-600 *,
+[data-theme="cyber_quartz"] button.bg-emerald-600,
+[data-theme="cyber_quartz"] button.bg-emerald-600 *,
+[data-theme="cyber_quartz"] button.bg-rose-600,
+[data-theme="cyber_quartz"] button.bg-rose-600 * {
   color: #ffffff !important;
 }
 
-[data-theme="nordic_frost"] button[class*="bg-cyan"] *,
-[data-theme="nordic_frost"] button[class*="bg-indigo"] *,
-[data-theme="nordic_frost"] button[class*="bg-emerald"] *,
-[data-theme="nordic_frost"] button[class*="bg-rose"] *,
-[data-theme="nordic_frost"] button[class*="from-"] *,
-[data-theme="cyber_quartz"] button[class*="bg-cyan"] *,
-[data-theme="cyber_quartz"] button[class*="bg-indigo"] *,
-[data-theme="cyber_quartz"] button[class*="bg-emerald"] *,
-[data-theme="cyber_quartz"] button[class*="bg-rose"] *,
-[data-theme="cyber_quartz"] button[class*="from-"] * {
-  color: #ffffff !important;
+/* Form inputs & textareas in light themes */
+[data-theme="nordic_frost"] input,
+[data-theme="nordic_frost"] select,
+[data-theme="nordic_frost"] textarea,
+[data-theme="cyber_quartz"] input,
+[data-theme="cyber_quartz"] select,
+[data-theme="cyber_quartz"] textarea {
+  color: #0f172a !important;
+  background-color: #f1f5f9 !important;
+  border-color: #cbd5e1 !important;
+}
+
+[data-theme="nordic_frost"] input::placeholder,
+[data-theme="nordic_frost"] textarea::placeholder,
+[data-theme="cyber_quartz"] input::placeholder,
+[data-theme="cyber_quartz"] textarea::placeholder {
+  color: #94a3b8 !important;
+}
+
+/* Sidebar navigation buttons in light themes */
+[data-theme="nordic_frost"] aside button,
+[data-theme="cyber_quartz"] aside button {
+  color: #334155 !important;
+}
+
+[data-theme="nordic_frost"] aside button:hover,
+[data-theme="cyber_quartz"] aside button:hover {
+  color: #0f172a !important;
+}
+
+[data-theme="nordic_frost"] aside button[class*="text-cyan-300"],
+[data-theme="cyber_quartz"] aside button[class*="text-cyan-300"] {
+  color: #0284c7 !important;
 }
 
 @keyframes tabContentEnter {

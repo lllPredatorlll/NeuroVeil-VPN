@@ -1,6 +1,6 @@
 [package]
 name = "neuroveil-vpn"
-version = "1.0.2"
+version = "1.0.3"
 description = "NeuroVeil VPN Client (AmneziaWG 3.1, VLESS Reality & QUIC over sing-box)"
 authors = ["vlad"]
 edition = "2021"

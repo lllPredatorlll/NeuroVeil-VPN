@@ -15,13 +15,15 @@ state.json
 *.pem
 *.log
 
-# Временные и дублирующиеся файлы
+# Портативная сборка и временные/дублирующиеся файлы
+NeuroVeil-Portable*/
 *.old.exe
 NeuroVeil_v*.exe
-NeuroVeil-Portable-v0.4.8/
 
 # Папки IDE
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+scratch/
+

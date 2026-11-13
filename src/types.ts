@@ -4,6 +4,7 @@ export interface VpnProfile {
   protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "ssh";
   server: string;
   port: number;
+  original_port?: number | null;
   sni: string;
   insecure: boolean;
   password: string;

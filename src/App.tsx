@@ -54,6 +54,9 @@ import {
   Save,
   Gamepad2,
   Bookmark,
+  RotateCcw,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import QRCode from "qrcode";
 import appIconLogo from "./assets/app-icon.png";
@@ -63,6 +66,7 @@ import {
   AppPersistentState,
   AppUpdateInfo,
   DeployResult,
+  PortProbeResult,
   RoutingConfig,
   RoutingPreset,
   RunningProcessInfo,
@@ -120,6 +124,25 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<
     "dashboard" | "vps" | "profiles" | "routing" | "settings" | "about"
   >("dashboard");
+
+  // Sidebar Collapse state (persisted in localStorage)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("neuroveil_sidebar_collapsed") === "true";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("neuroveil_sidebar_collapsed", String(next));
+      } catch {}
+      return next;
+    });
+  };
 
   // Window Opacity State (70% - 100%)
   const [windowOpacity, setWindowOpacity] = useState<number>(() => {
@@ -216,6 +239,8 @@ export default function App() {
     const themeName = THEMES.find((t) => t.id === themeId)?.name || themeId;
     showNotice("success", `Тема «${themeName}» успешно применена!`);
   };
+
+  const isLightTheme = currentThemeId === "nordic_frost" || currentThemeId === "cyber_quartz";
 
   const cssVarsStyle = {
     "--bg-app": currentTheme.vars.bgApp,
@@ -524,6 +549,12 @@ export default function App() {
   const [newPresetName, setNewPresetName] = useState("");
   const [newPresetOutbound, setNewPresetOutbound] = useState<"direct" | "proxy">("direct");
   const [isApplyingPreset, setIsApplyingPreset] = useState(false);
+
+  // Listening Port Detection state
+  const [isProbingListeningPorts, setIsProbingListeningPorts] = useState(false);
+  const [isApplyingListeningPort, setIsApplyingListeningPort] = useState(false);
+  const [listeningProbeResults, setListeningProbeResults] = useState<Record<string, PortProbeResult[]>>({});
+  const [probedHistoryPorts, setProbedHistoryPorts] = useState<Record<string, number[]>>({});
 
   // In-app Config Editor Modal State
   const [editingProfile, setEditingProfile] = useState<VpnProfile | null>(null);
@@ -1915,6 +1946,120 @@ export default function App() {
     }
   };
 
+  const handleProbeListeningPorts = async (resetHistory = false) => {
+    if (!selectedProfile) {
+      showNotice("error", "Профиль подключения не выбран");
+      return;
+    }
+    setIsProbingListeningPorts(true);
+    try {
+      const prevExcluded = resetHistory ? [] : (probedHistoryPorts[selectedProfile.id] || []);
+      showNotice(
+        "info",
+        prevExcluded.length > 0
+          ? `Поиск следующих 28 портов для «${selectedProfile.name}» (ранее проверено ${prevExcluded.length})...`
+          : `Поиск 28 рабочих портов на сервере «${selectedProfile.name}» (${selectedProfile.server})...`
+      );
+
+      const results = await invoke<PortProbeResult[]>("probe_profile_ports", {
+        profileId: selectedProfile.id,
+        profile: selectedProfile,
+        customPorts: null,
+        excludePorts: prevExcluded,
+      });
+
+      setListeningProbeResults((prev) => ({
+        ...prev,
+        [selectedProfile.id]: results,
+      }));
+
+      const newHistory = [...prevExcluded, ...results.map((r) => r.port)];
+      setProbedHistoryPorts((prev) => ({
+        ...prev,
+        [selectedProfile.id]: newHistory,
+      }));
+
+      const reachableCount = results.filter((r) => r.reachable).length;
+      if (reachableCount > 0) {
+        showNotice(
+          "success",
+          `Найдено ${reachableCount} работающих портов из ${results.length}! Нажмите на порт для применения.`
+        );
+      } else {
+        showNotice(
+          "info",
+          `Проверено ${results.length} портов: ни один не ответил. Если NAT-переадресация на VPS отключена, работает только исходный порт (${selectedProfile.original_port || selectedProfile.port}).`
+        );
+      }
+    } catch (err: any) {
+      showNotice("error", `Ошибка проверки портов: ${String(err)}`);
+    } finally {
+      setIsProbingListeningPorts(false);
+    }
+  };
+
+  const handleResetPortHistory = async () => {
+    if (!selectedProfile) return;
+    setProbedHistoryPorts((prev) => ({
+      ...prev,
+      [selectedProfile.id]: [],
+    }));
+    await handleProbeListeningPorts(true);
+  };
+
+  const handleApplyListeningPort = async (newPort: number) => {
+    if (!selectedProfile) {
+      showNotice("error", "Профиль подключения не выбран");
+      return;
+    }
+    if (selectedProfile.port === newPort) {
+      showNotice("info", `Порт ${newPort} уже установлен в конфиге «${selectedProfile.name}»`);
+      return;
+    }
+
+    const currentResults = listeningProbeResults[selectedProfile.id] || [];
+    const probeItem = currentResults.find((r) => r.port === newPort);
+    if (probeItem && !probeItem.reachable) {
+      const confirmed = window.confirm(
+        `⚠️ Внимание: порт ${newPort} не ответил на проверку (вероятно закрыт или заблокирован).\n\nПодключение через него может зависнуть на этапе рукопожатия. Всё равно применить к «${selectedProfile.name}»?`
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setIsApplyingListeningPort(true);
+    const updatedProfile: VpnProfile = {
+      ...selectedProfile,
+      port: newPort,
+      original_port: selectedProfile.original_port || selectedProfile.port,
+    };
+
+    try {
+      const updatedList = await invoke<VpnProfile[]>("add_or_update_profile", {
+        profile: updatedProfile,
+      });
+      setProfiles(updatedList);
+
+      if (status.connected && status.active_profile_id === selectedProfile.id) {
+        showNotice("info", `Переподключение VPN на порт ${newPort}...`);
+        const st = await invoke<VpnStatus>("connect_vpn", {
+          profileId: updatedProfile.id,
+          mode: routing.mode,
+          splitTunneling: routing.split_tunneling,
+        });
+        setStatus(st);
+        showNotice("success", `⚡ Порт ${newPort} успешно применен к «${selectedProfile.name}», VPN переподключен!`);
+      } else {
+        showNotice("success", `Порт прослушивания ${newPort} применен к конфигу «${selectedProfile.name}»`);
+      }
+    } catch (err: any) {
+      showNotice("error", `Ошибка применения порта: ${String(err)}`);
+    } finally {
+      setIsApplyingListeningPort(false);
+    }
+  };
+
   const renderProtocolBadge = (protocol: string, version?: string | null) => {
     const p = (protocol || "").toLowerCase();
     let label = "PROXY";
@@ -1968,39 +2113,80 @@ export default function App() {
         ...cssVarsStyle,
         opacity: windowOpacity / 100,
       }}
-      className="flex h-screen w-screen overflow-hidden text-slate-100 select-none bg-[#090d16] transition-opacity duration-150 relative"
+      className={`flex h-screen w-screen overflow-hidden ${
+        isLightTheme ? "text-slate-900" : "text-slate-100"
+      } select-none bg-[#090d16] transition-opacity duration-150 relative`}
     >
-      {/* Sidebar - starts from the very top (pt-2.5) */}
+      {/* Sidebar - collapsible (w-64 vs w-[68px]) */}
       <aside
         style={{ borderRightColor: "var(--color-accent-border)" }}
-        className="w-64 bg-[#0d1322] border-r flex flex-col justify-between p-3.5 pt-2.5 shrink-0 transition-colors duration-300 z-20"
+        className={`${
+          sidebarCollapsed ? "w-[68px] px-2" : "w-64 px-3.5"
+        } bg-[#0d1322] border-r flex flex-col justify-between py-2.5 shrink-0 transition-all duration-200 z-20`}
       >
         <div>
-          {/* Brand Header - lifted to the top! Drag region */}
-          <div
-            onMouseDown={handleMouseDownDrag}
-            onDoubleClick={handleDoubleClickMaximize}
-            data-tauri-drag-region
-            className="flex items-center gap-3 px-1 py-1.5 mb-5 cursor-default select-none"
-          >
-            <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 relative group transition-all duration-300">
-              <img
-                src={appIconLogo}
-                alt="NeuroVeil VPN"
-                className="w-full h-full object-cover rounded-lg pointer-events-none"
-              />
-            </div>
-            <div className="pointer-events-none min-w-0">
-              <div className="flex items-center gap-2">
-                <h1 className="font-bold text-base tracking-tight text-white leading-none">
-                  NeuroVeil VPN
-                </h1>
-                <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                  v1.0.2 build 1050
-                </span>
+          {/* Brand Header & Collapse Toggle */}
+          {sidebarCollapsed ? (
+            <div className="flex flex-col items-center gap-2 mb-4">
+              <div
+                onMouseDown={handleMouseDownDrag}
+                onDoubleClick={handleDoubleClickMaximize}
+                data-tauri-drag-region
+                className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 cursor-default"
+                title="NeuroVeil VPN"
+              >
+                <img
+                  src={appIconLogo}
+                  alt="NeuroVeil VPN"
+                  className="w-full h-full object-cover rounded-lg pointer-events-none"
+                />
               </div>
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 transition cursor-pointer"
+                title="Развернуть меню разделов"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
             </div>
-          </div>
+          ) : (
+            <div className="flex items-center justify-between gap-2 px-1 py-1 mb-4 select-none">
+              <div
+                onMouseDown={handleMouseDownDrag}
+                onDoubleClick={handleDoubleClickMaximize}
+                data-tauri-drag-region
+                className="flex items-center gap-2.5 min-w-0 flex-1 cursor-default"
+              >
+                <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0">
+                  <img
+                    src={appIconLogo}
+                    alt="NeuroVeil VPN"
+                    className="w-full h-full object-cover rounded-lg pointer-events-none"
+                  />
+                </div>
+                <div className="pointer-events-none min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <h1 className="font-bold text-sm tracking-tight text-white leading-none truncate">
+                      NeuroVeil VPN
+                    </h1>
+                  </div>
+                  <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 mt-1 inline-block">
+                    v1.0.3
+                  </span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={toggleSidebar}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 transition cursor-pointer shrink-0"
+                title="Свернуть меню (оставить только иконки)"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+            </div>
+          )}
 
           {/* Nav Links with Seamless Sliding Tab Connector */}
           <nav className="relative flex flex-col gap-1.5">
@@ -2022,9 +2208,11 @@ export default function App() {
                 borderLeft: "1px solid var(--color-accent-border)",
                 borderBottom: "1px solid var(--color-accent-border)",
               }}
-              className="pointer-events-none absolute top-0 left-0 -right-[15px] h-[42px] rounded-l-2xl z-0"
+              className={`pointer-events-none absolute top-0 left-0 ${
+                sidebarCollapsed ? "-right-[9px]" : "-right-[15px]"
+              } h-[42px] rounded-l-2xl z-0`}
             >
-              {/* Top-Right Concave Curve ("Ушко" сверху) */}
+              {/* Top-Right Concave Curve */}
               <svg
                 width="14"
                 height="14"
@@ -2043,7 +2231,7 @@ export default function App() {
                 />
               </svg>
 
-              {/* Bottom-Right Concave Curve ("Ушко" снизу) */}
+              {/* Bottom-Right Concave Curve */}
               <svg
                 width="14"
                 height="14"
@@ -2065,139 +2253,178 @@ export default function App() {
 
             <button
               onClick={() => setActiveTab("dashboard")}
-              className={`relative z-10 w-full h-[42px] flex items-center justify-between px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? t.navDashboard : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "dashboard"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Power className="w-4 h-4" />
-                {t.navDashboard}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Power className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navDashboard}</span>}
               </span>
-              <span
-                className={`w-2 h-2 rounded-full ${
-                  status.connected
-                    ? status.is_handshaking
-                      ? "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-ping"
-                      : "bg-emerald-400 shadow-[0_0_8px_#34d399]"
-                    : "bg-slate-600"
-                }`}
-              />
+              {!sidebarCollapsed && (
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    status.connected
+                      ? status.is_handshaking
+                        ? "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-ping"
+                        : "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                      : "bg-slate-600"
+                  }`}
+                />
+              )}
             </button>
 
             <button
               onClick={() => setActiveTab("vps")}
-              className={`relative z-10 w-full h-[42px] flex items-center justify-between px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? `${t.navVps} (SSH)` : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "vps"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Server className="w-4 h-4" />
-                {t.navVps}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Server className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navVps}</span>}
               </span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                SSH
-              </span>
+              {!sidebarCollapsed && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                  SSH
+                </span>
+              )}
             </button>
 
             <button
               onClick={() => setActiveTab("profiles")}
-              className={`relative z-10 w-full h-[42px] flex items-center justify-between px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? `${t.navProfiles} (${profiles.length})` : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "profiles"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Smartphone className="w-4 h-4" />
-                {t.navProfiles}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Smartphone className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navProfiles}</span>}
               </span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
-                {profiles.length}
-              </span>
+              {!sidebarCollapsed && (
+                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
+                  {profiles.length}
+                </span>
+              )}
             </button>
 
             <button
               onClick={() => setActiveTab("routing")}
-              className={`relative z-10 w-full h-[42px] flex items-center justify-between px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? t.navRouting : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "routing"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Globe className="w-4 h-4" />
-                {t.navRouting}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Globe className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navRouting}</span>}
               </span>
             </button>
 
             <button
               onClick={() => setActiveTab("settings")}
-              className={`relative z-10 w-full h-[42px] flex items-center px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? t.navSettings : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "settings"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Settings className="w-4 h-4" />
-                {t.navSettings}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Settings className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navSettings}</span>}
               </span>
             </button>
 
             <button
               onClick={() => setActiveTab("about")}
-              className={`relative z-10 w-full h-[42px] flex items-center justify-between px-3.5 rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              title={sidebarCollapsed ? t.navAbout : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
                 activeTab === "about"
                   ? "text-cyan-300 font-semibold"
                   : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
               }`}
             >
-              <span className="flex items-center gap-3">
-                <Info className="w-4 h-4" />
-                {t.navAbout}
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Info className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navAbout}</span>}
               </span>
             </button>
           </nav>
         </div>
 
         {/* Bottom Core Status Card */}
-        <div className="p-3.5 rounded-xl bg-[#131c31]/80 border border-slate-800 space-y-2">
-          <div className="flex items-center justify-between text-xs">
-            <span className="text-slate-400">Ядро sing-box:</span>
+        {!sidebarCollapsed ? (
+          <div className="p-3 rounded-xl bg-[#131c31]/80 border border-slate-800 space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-400">Ядро sing-box:</span>
+              <span
+                className={`font-medium flex items-center gap-1 ${
+                  status.singbox_installed ? "text-emerald-400" : "text-amber-400"
+                }`}
+              >
+                {status.singbox_installed ? (
+                  <>
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Готово
+                  </>
+                ) : (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5" /> Не скачано
+                  </>
+                )}
+              </span>
+            </div>
+            <div className="text-[11px] text-slate-500 truncate" title={status.singbox_version}>
+              {status.singbox_version}
+            </div>
+            {!status.singbox_installed && (
+              <button
+                onClick={handleDownloadCore}
+                disabled={downloadingCore}
+                className="w-full py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-semibold text-white transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                {downloadingCore ? "Загрузка..." : "Скачать sing-box"}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div
+            className="p-2.5 rounded-xl bg-[#131c31]/80 border border-slate-800 flex items-center justify-center cursor-default"
+            title={`Ядро sing-box: ${status.singbox_installed ? "Готово (" + (status.singbox_version || "") + ")" : "Не скачано"}`}
+          >
             <span
-              className={`font-medium flex items-center gap-1 ${
-                status.singbox_installed ? "text-emerald-400" : "text-amber-400"
+              className={`w-3 h-3 rounded-full ${
+                status.singbox_installed
+                  ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                  : "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-pulse"
               }`}
-            >
-              {status.singbox_installed ? (
-                <>
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Готово
-                </>
-              ) : (
-                <>
-                  <AlertTriangle className="w-3.5 h-3.5" /> Не скачано
-                </>
-              )}
-            </span>
+            />
           </div>
-          <div className="text-[11px] text-slate-500 truncate" title={status.singbox_version}>
-            {status.singbox_version}
-          </div>
-          {!status.singbox_installed && (
-            <button
-              onClick={handleDownloadCore}
-              disabled={downloadingCore}
-              className="w-full py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-semibold text-white transition flex items-center justify-center gap-1.5"
-            >
-              <Download className="w-3.5 h-3.5" />
-              {downloadingCore ? "Загрузка..." : "Скачать sing-box"}
-            </button>
-          )}
-        </div>
+        )}
       </aside>
 
       {/* Main Content Area */}
@@ -2327,19 +2554,19 @@ export default function App() {
                 </div>
               )}
 
-              <div className="grid grid-cols-12 gap-6">
-                {/* Left Column: Big Rectangular Power Button & Active Status */}
-                <div className="col-span-5 p-6 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-col items-center justify-center relative overflow-hidden">
-                  {/* Modern Rectangular Button */}
+              <div className="grid grid-cols-12 gap-4">
+                {/* Left Column: Power Button & Speed Meter */}
+                <div className="col-span-5 p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-col justify-between space-y-2.5 relative overflow-hidden">
+                  {/* Modern Main Action Button - Fills the top space completely */}
                   <button
                     onClick={handleToggleConnect}
                     disabled={connecting || reconnectCooldown}
-                    className={`w-full max-w-[280px] h-28 rounded-2xl p-4 flex items-center justify-between gap-4 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-xl ${
+                    className={`w-full h-[64px] rounded-xl px-3.5 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
                       status.connected
                         ? status.is_handshaking
-                          ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-2 ring-amber-500/30"
-                          : "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25 ring-2 ring-emerald-500/20"
-                        : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 hover:from-cyan-900/40 hover:to-indigo-900/40 text-slate-200 hover:text-white border-slate-700 hover:border-cyan-500/50"
+                          ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-1 ring-amber-500/30"
+                          : "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25 ring-1 ring-emerald-500/20"
+                        : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 hover:from-cyan-900/40 hover:to-indigo-900/40 text-white border-slate-700 hover:border-cyan-500/50"
                     }`}
                   >
                     {status.connected && (
@@ -2350,127 +2577,97 @@ export default function App() {
                       />
                     )}
 
-                    <div className="flex items-center gap-3.5 relative z-10 w-full justify-center">
-                      <div
-                        className={`w-14 h-14 rounded-xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
-                          status.connected
-                            ? status.is_handshaking
-                              ? "bg-amber-500 text-white shadow-amber-700/50"
-                              : "bg-emerald-500 text-white shadow-emerald-700/50"
-                            : "bg-slate-700/80 group-hover:bg-cyan-500 text-slate-300 group-hover:text-white"
-                        }`}
-                      >
-                        {connecting ? (
-                          <RefreshCw className="w-7 h-7 animate-spin text-cyan-300" />
-                        ) : status.connected ? (
-                          status.is_handshaking ? (
-                            <Activity className="w-7 h-7 animate-pulse text-amber-100" />
+                    <div className="flex items-center gap-3 relative z-10 w-full justify-between">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
+                            status.connected
+                              ? status.is_handshaking
+                                ? "bg-amber-500 text-white shadow-amber-700/50"
+                                : "bg-emerald-500 text-white shadow-emerald-700/50"
+                              : "bg-slate-700/80 group-hover:bg-cyan-500 text-white"
+                          }`}
+                        >
+                          {connecting ? (
+                            <RefreshCw className="w-5 h-5 animate-spin text-cyan-300" />
+                          ) : status.connected ? (
+                            status.is_handshaking ? (
+                              <Activity className="w-5 h-5 animate-pulse text-amber-100" />
+                            ) : (
+                              <ShieldCheck className="w-5 h-5" />
+                            )
                           ) : (
-                            <ShieldCheck className="w-7 h-7" />
-                          )
-                        ) : (
-                          <Shield className="w-7 h-7" />
-                        )}
+                            <Shield className="w-5 h-5" />
+                          )}
+                        </div>
+                        <div className="text-left min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
+                            {connecting
+                              ? "Подождите..."
+                              : reconnectCooldown
+                              ? "Защитная пауза WireGuard"
+                              : status.connected
+                              ? status.is_handshaking
+                                ? "Рукопожатие WireGuard"
+                                : status.active_profile_name || "VPN Подключен"
+                              : "VPN Выключен"}
+                          </div>
+                          <div className="text-sm font-bold text-white leading-tight truncate mt-0.5">
+                            {connecting
+                              ? "ИНИЦИАЛИЗАЦИЯ..."
+                              : reconnectCooldown
+                              ? "ПАУЗА..."
+                              : status.connected
+                              ? status.is_handshaking
+                                ? "ОТКЛЮЧИТЬ"
+                                : "ОТКЛЮЧИТЬ"
+                              : "ПОДКЛЮЧИТЬСЯ"}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-left">
-                        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200">
-                          {connecting
-                            ? "Подождите..."
-                            : reconnectCooldown
-                            ? "Защитная пауза"
-                            : status.connected
-                            ? status.is_handshaking
-                              ? "Рукопожатие WireGuard"
-                              : "VPN Подключен"
-                            : "VPN Отключен"}
-                        </div>
-                        <div className="text-base font-bold text-white mt-0.5 leading-tight">
-                          {connecting
-                            ? "Инициализация"
-                            : reconnectCooldown
-                            ? "ПАУЗА..."
-                            : status.connected
-                            ? status.is_handshaking
-                              ? "ОТКЛЮЧИТЬ"
-                              : "ОТКЛЮЧИТЬ"
-                            : "ПОДКЛЮЧИТЬСЯ"}
-                        </div>
+
+                      <div className="shrink-0 flex items-center gap-1.5 pl-2">
+                        <span
+                          className={`w-2.5 h-2.5 rounded-full ${
+                            status.connected
+                              ? status.is_handshaking
+                                ? "bg-amber-300 animate-ping"
+                                : "bg-emerald-300 shadow-[0_0_8px_#34d399]"
+                              : "bg-slate-500"
+                          }`}
+                        />
                       </div>
                     </div>
                   </button>
 
-                  <div className="mt-5 text-center">
-                    {status.connected ? (
-                      status.is_handshaking ? (
-                        <div className="space-y-1">
-                          <div className="text-sm font-bold text-amber-300 flex items-center justify-center gap-1.5 animate-pulse">
-                            <Activity className="w-4 h-4 text-amber-400" />
-                            <span>{status.handshake_status || "Установка соединения (рукопожатие WireGuard)..."}</span>
-                          </div>
-                          <div className="text-[11px] text-amber-200/80 max-w-xs mx-auto leading-relaxed">
-                            Ожидание первого ответа сервера. При быстрых повторных переключениях подождите ~20 сек для сброса защиты сервера.
-                          </div>
-                        </div>
-                      ) : (
-                        <div>
-                          <div className="text-base font-semibold text-white">
-                            {status.active_profile_name || "Защищенное соединение"}
-                          </div>
-                          <div className="text-xs text-slate-400 mt-1">
-                            Протокол: {(status.active_protocol || "").toUpperCase()} • Режим: {status.mode === "tun" ? "TUN (Весь ПК)" : "Системный прокси"}
-                          </div>
-                        </div>
-                      )
-                    ) : (
-                      <div>
-                        <div className="text-base font-semibold text-white">VPN Отключен</div>
-                        <div className="text-xs text-slate-400 mt-1">
-                          {reconnectCooldown
-                            ? "Защита токенов WireGuard: повторное подключение доступно через 2 секунды"
-                            : "Нажмите на прямоугольную кнопку для запуска туннеля"}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Live Speed Meter */}
-                  <div className="grid grid-cols-2 gap-3 w-full mt-6 pt-5 border-t border-slate-800/80">
-                    <div className="p-3 rounded-xl bg-[#0b101d] border border-slate-800/70 flex items-center gap-3">
-                      <div className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400">
-                        <Download className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-slate-400">Скачивание</div>
-                        <div className="text-sm font-bold text-white">
+                  {/* Compact Live Speed Meter */}
+                  <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-800/80">
+                    <div className="px-2 py-1 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
+                      <Download className="w-3 h-3 text-cyan-400 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-[9px] text-slate-400 leading-none">Входящий</div>
+                        <div className="text-[11px] font-bold text-white truncate font-mono mt-0.5">
                           {formatBytes(status.down_speed)}/с
-                        </div>
-                        <div className="text-[10px] text-slate-500">
-                          Всего: {formatBytes(status.down_bytes)}
                         </div>
                       </div>
                     </div>
 
-                    <div className="p-3 rounded-xl bg-[#0b101d] border border-slate-800/70 flex items-center gap-3">
-                      <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400">
-                        <Upload className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-slate-400">Отдача</div>
-                        <div className="text-sm font-bold text-white">
+                    <div className="px-2 py-1 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
+                      <Upload className="w-3 h-3 text-indigo-400 shrink-0" />
+                      <div className="min-w-0">
+                        <div className="text-[9px] text-slate-400 leading-none">Исходящий</div>
+                        <div className="text-[11px] font-bold text-white truncate font-mono mt-0.5">
                           {formatBytes(status.up_speed)}/с
-                        </div>
-                        <div className="text-[10px] text-slate-500">
-                          Всего: {formatBytes(status.up_bytes)}
                         </div>
                       </div>
                     </div>
                   </div>
                 </div>
 
-                {/* Right Column: Server Selector & Network Mode Controls */}
-                <div className="col-span-7 flex flex-col justify-between space-y-4">
-                  {/* Active Profile Selection Card with On-the-Fly Protocol List */}
-                  <div className="p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
+                {/* Right Column: Server Selector */}
+                <div className="col-span-7">
+                  {/* Active Profile Selection Card */}
+                  <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-2.5">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                         <Layers className="w-3.5 h-3.5 text-cyan-400" />
@@ -2479,13 +2676,13 @@ export default function App() {
                       <div className="flex items-center gap-3">
                         <button
                           onClick={() => setActiveTab("profiles")}
-                          className="text-xs text-slate-400 hover:text-slate-200 font-medium transition"
+                          className="text-xs text-slate-400 hover:text-slate-200 font-medium transition cursor-pointer"
                         >
-                          Управление ключами ({effectiveDashboardProfiles.length})
+                          Управление ({effectiveDashboardProfiles.length})
                         </button>
                         <button
                           onClick={() => setActiveTab("vps")}
-                          className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1"
+                          className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 cursor-pointer"
                         >
                           <Plus className="w-3.5 h-3.5" /> Добавить VPS
                         </button>
@@ -2493,27 +2690,27 @@ export default function App() {
                     </div>
 
                     {!selectedProfile ? (
-                      <div className="p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2">
+                      <div className="p-3 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-1.5">
                         <p className="text-xs text-slate-400">
-                          Нет сохраненных профилей. Разверните сервер автоматически по SSH или импортируйте ссылку.
+                          Нет сохраненных профилей.
                         </p>
                         <div className="flex justify-center gap-2">
                           <button
                             onClick={() => setActiveTab("vps")}
-                            className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition"
+                            className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition"
                           >
-                            Автодеплой на VPS
+                            Автодеплой
                           </button>
                           <button
                             onClick={() => setActiveTab("profiles")}
-                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
+                            className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
                           >
-                            Добавить вручную
+                            Вручную
                           </button>
                         </div>
                       </div>
                     ) : (
-                      <div className="max-h-[220px] overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                      <div className="max-h-[108px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
                         {effectiveDashboardProfiles.map((p) => {
                           const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
                           const isLiveConnected = status.connected && status.active_profile_id === p.id;
@@ -2522,31 +2719,31 @@ export default function App() {
                             <div
                               key={p.id}
                               onClick={() => handleQuickSwitchProfile(p.id)}
-                              className={`p-3 rounded-xl border cursor-pointer transition flex items-center justify-between gap-3 group ${
+                              className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2.5 group ${
                                 isCurrentSelected
-                                  ? "bg-cyan-500/10 border-cyan-500/60 shadow-md ring-1 ring-cyan-500/30"
+                                  ? "bg-cyan-500/10 border-cyan-500/60 shadow-sm ring-1 ring-cyan-500/30"
                                   : "bg-[#0b101d] border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
                               }`}
                             >
-                              <div className="flex items-center gap-3 min-w-0">
+                              <div className="flex items-center gap-2.5 min-w-0">
                                 {renderProtocolBadge(p.protocol, p.awg_version)}
 
                                 <div className="min-w-0">
-                                  <div className="text-xs font-bold text-white flex items-center gap-2 truncate">
-                                    <span>{p.name}</span>
+                                  <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                                    <span className="truncate">{p.name}</span>
                                     {isLiveConnected && (
-                                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono font-medium">
+                                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono font-medium shrink-0">
                                         В эфире
                                       </span>
                                     )}
                                   </div>
-                                  <div className="text-[11px] text-slate-400 font-mono truncate flex items-center gap-2 flex-wrap">
+                                  <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
                                     <span>
                                       {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
                                     </span>
                                     <span
-                                      className="text-[10px] px-1.5 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono inline-flex items-center gap-1"
-                                      title={`Трафик конфигурации: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}, Всего ${formatBytes((p.total_up_bytes || 0) + (p.total_down_bytes || 0))}`}
+                                      className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono"
+                                      title={`Трафик: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}`}
                                     >
                                       ↓{formatBytes(p.total_down_bytes || 0)} • ↑{formatBytes(p.total_up_bytes || 0)}
                                     </span>
@@ -2556,7 +2753,7 @@ export default function App() {
 
                               <div className="flex items-center gap-2 shrink-0">
                                 {p.ping_ms != null ? (
-                                  <span className="text-[11px] font-mono text-emerald-400">
+                                  <span className="text-[10px] font-mono text-emerald-400 font-semibold">
                                     {p.ping_ms} мс
                                   </span>
                                 ) : (
@@ -2567,14 +2764,14 @@ export default function App() {
                                       handlePingProfile(p.id);
                                     }}
                                     disabled={pingingId === p.id}
-                                    className="text-[10px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition"
+                                    className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition"
                                   >
                                     {pingingId === p.id ? "..." : "Пинг"}
                                   </button>
                                 )}
 
                                 <div
-                                  className={`w-4 h-4 rounded-full border flex items-center justify-center transition-colors ${
+                                  className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
                                     isCurrentSelected
                                       ? isLiveConnected
                                         ? "border-emerald-400 bg-emerald-500"
@@ -2590,85 +2787,6 @@ export default function App() {
                         })}
                       </div>
                     )}
-                  </div>
-
-                  {/* Network Mode & Split Tunneling Card */}
-                  <div className="p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                      Режим работы сети
-                    </span>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        onClick={() => handleQuickSwitchMode("system_proxy")}
-                        className={`p-3 rounded-xl border text-left transition ${
-                          routing.mode === "system_proxy"
-                            ? "bg-cyan-500/15 border-cyan-500/50 text-white"
-                            : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-bold">System Proxy</span>
-                          <Globe className="w-4 h-4 text-cyan-400" />
-                        </div>
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                          Легкий режим без прав администратора (браузеры, Telegram, Discord).
-                        </p>
-                      </button>
-
-                      <button
-                        onClick={() => handleQuickSwitchMode("tun")}
-                        className={`p-3 rounded-xl border text-left transition ${
-                          routing.mode === "tun"
-                            ? "bg-cyan-500/15 border-cyan-500/50 text-white"
-                            : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between mb-1">
-                          <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
-                          <Zap className="w-4 h-4 text-indigo-400" />
-                        </div>
-                        <p className="text-[11px] text-slate-400 leading-relaxed">
-                          Перехватывает весь трафик ПК, включая игры и любые приложения.
-                        </p>
-                      </button>
-                    </div>
-
-                    {/* Split Tunneling Status & Link to Routing tab */}
-                    <div className="pt-2.5 flex items-center justify-between border-t border-slate-800/80 text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-400">Раздельное туннелирование:</span>
-                        <span
-                          className={`font-semibold flex items-center gap-1.5 ${
-                            (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling)
-                              ? "text-cyan-400"
-                              : "text-slate-400"
-                          }`}
-                        >
-                          {(selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) ? (
-                            <>
-                              <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
-                              Включено для «{selectedProfile?.name || "профиля"}»
-                            </>
-                          ) : (
-                            <>
-                              <span className="w-2 h-2 rounded-full bg-slate-600" />
-                              Выключено (Весь трафик в VPN)
-                            </>
-                          )}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (selectedProfileId) switchRoutingProfile(selectedProfileId);
-                          setActiveTab("routing");
-                        }}
-                        className="text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 transition cursor-pointer"
-                      >
-                        {t.manageRoutingLink}
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
@@ -2798,6 +2916,195 @@ export default function App() {
                     Восстановить стандартные
                   </button>
                 </div>
+              </div>
+
+              {/* LISTENING PORT DETECTOR (Dashboard) */}
+              <div className="p-4 rounded-2xl bg-[#111827] border border-cyan-500/30 shadow-[0_0_20px_-10px_rgba(6,182,212,0.15)] space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-400">
+                      <Radio className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="text-xs font-bold uppercase tracking-wider text-white flex flex-wrap items-center gap-2">
+                        <span>Определение порта прослушивания</span>
+                        {selectedProfile && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
+                            Порт: {selectedProfile.port}
+                          </span>
+                        )}
+                        {selectedProfile && selectedProfile.original_port && selectedProfile.port !== selectedProfile.original_port && (
+                          <button
+                            type="button"
+                            onClick={() => handleApplyListeningPort(selectedProfile.original_port!)}
+                            disabled={isApplyingListeningPort}
+                            className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1 transition cursor-pointer select-none"
+                            title={`Вернуть исходный рабочий порт сервера (${selectedProfile.original_port})`}
+                          >
+                            <RotateCcw className="w-2.5 h-2.5" />
+                            <span>Вернуть исходный порт ({selectedProfile.original_port})</span>
+                          </button>
+                        )}
+                        {(probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-mono">
+                            Всего проверено: {(probedHistoryPorts[selectedProfile?.id || ""] || []).length}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-400">
+                        Поиск работающих портов прослушивания и быстрое применение к выбранному конфигу
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    {(probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleResetPortHistory}
+                        disabled={isProbingListeningPorts}
+                        className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
+                        title="Сбросить историю и начать поиск портов с начала"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => handleProbeListeningPorts(false)}
+                      disabled={isProbingListeningPorts || !selectedProfile}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer select-none shadow-md ${
+                        isProbingListeningPorts
+                          ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 cursor-wait"
+                          : "bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-cyan-500/20 active:scale-95"
+                      }`}
+                      title={
+                        (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0
+                          ? "Найти следующие 28 уникальных портов, которые еще не отображались"
+                          : "Выполнить поиск 28 работающих портов на сервере для выбранного профиля"
+                      }
+                    >
+                      {isProbingListeningPorts ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Поиск новых портов...</span>
+                        </>
+                      ) : (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 ? (
+                        <>
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Определить еще порты ⚡</span>
+                        </>
+                      ) : (
+                        <>
+                          <Search className="w-3.5 h-3.5" />
+                          <span>Определить рабочий порт</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Render Port Icons */}
+                {isProbingListeningPorts ? (
+                  <div className="p-4 rounded-xl bg-[#0b101d] border border-cyan-500/20 flex items-center justify-center gap-2.5 text-xs text-cyan-300 animate-pulse">
+                    <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
+                    <span>
+                      Тестирование 28 портов сервера {selectedProfile ? `«${selectedProfile.name}» (${selectedProfile.server})` : ""}...
+                    </span>
+                  </div>
+                ) : listeningProbeResults[selectedProfile?.id || ""] && listeningProbeResults[selectedProfile?.id || ""].length > 0 ? (
+                  <div className="space-y-2 pt-1">
+                    {listeningProbeResults[selectedProfile?.id || ""].filter((r) => r.reachable).length === 0 && (
+                      <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200">
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <div className="space-y-1">
+                          <div className="font-semibold text-amber-300">Сервер не отвечает на проверенные порты</div>
+                          <div className="text-[11px] text-amber-300/80 leading-relaxed">
+                            Возможно, сервер выключен или на VPS не настроена переадресация портов (NAT iptables).
+                            {selectedProfile?.original_port && selectedProfile.port !== selectedProfile.original_port && (
+                              <span> Рекомендуется вернуть исходный порт сервера: <strong className="text-white">{selectedProfile.original_port}</strong>.</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#10b981]" />
+                        Нажмите на иконку порта для применения к конфигу:
+                      </span>
+                      <span className="text-[10px] text-slate-400 font-mono">
+                        Отображено: {listeningProbeResults[selectedProfile?.id || ""].length} • Работает: <span className="text-emerald-400 font-bold">{listeningProbeResults[selectedProfile?.id || ""].filter((r) => r.reachable).length}</span>
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 max-h-56 overflow-y-auto pr-1">
+                      {listeningProbeResults[selectedProfile?.id || ""].map((res) => {
+                        const isCurrent = selectedProfile?.port === res.port;
+                        const isReachable = res.reachable;
+                        return (
+                          <button
+                            key={res.port}
+                            type="button"
+                            onClick={() => handleApplyListeningPort(res.port)}
+                            disabled={isApplyingListeningPort}
+                            className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
+                              isCurrent
+                                ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 border-cyan-400 text-white shadow-md shadow-cyan-500/25 ring-1 ring-cyan-400"
+                                : isReachable
+                                ? "bg-[#0b101d] border-emerald-500/35 hover:border-emerald-400 text-emerald-200 hover:text-white hover:bg-emerald-500/10 hover:shadow-sm"
+                                : "bg-[#080d18] border-slate-800/80 text-slate-500 hover:border-slate-700 hover:text-slate-400 opacity-60"
+                            }`}
+                            title={`${res.port}: ${res.message}${res.latency_ms ? ` (${res.latency_ms} мс)` : ""}. Нажмите для применения к «${selectedProfile?.name}»`}
+                          >
+                            {isCurrent ? (
+                              <div className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
+                                <Check className="w-2.5 h-2.5 text-cyan-300" />
+                              </div>
+                            ) : isReachable ? (
+                              <div className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                                <Zap className="w-2.5 h-2.5 text-emerald-400" />
+                              </div>
+                            ) : (
+                              <div className="w-4 h-4 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0">
+                                <XCircle className="w-2.5 h-2.5 text-slate-500" />
+                              </div>
+                            )}
+
+                            <div className="flex flex-col items-start leading-tight">
+                              <span className="font-mono font-bold text-[12px] tracking-wide">
+                                {res.port}
+                              </span>
+                              {res.latency_ms != null && isReachable && (
+                                <span className="text-[9px] text-emerald-400 font-mono">
+                                  {res.latency_ms} мс
+                                </span>
+                              )}
+                            </div>
+
+                            {isCurrent && (
+                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold uppercase tracking-wider ml-0.5">
+                                Активен
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 rounded-xl bg-[#0b101d]/60 border border-slate-800/60 flex items-center justify-between text-xs text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <Radio className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                      <span>
+                        {selectedProfile
+                          ? `Текущий порт конфига «${selectedProfile.name}»: ${selectedProfile.port}. Нажмите кнопку «Определить рабочий порт» для поиска открытых портов.`
+                          : "Выберите профиль подключения для определения портов"}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -6305,6 +6612,101 @@ export default function App() {
               <p className="text-xs text-slate-400 mt-1">{t.settingsSubtitle}</p>
             </div>
 
+            {/* NETWORK OPERATING MODE SECTION (Moved from Connection tab) */}
+            <div
+              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              style={{ backgroundColor: currentTheme.styles.cardBg }}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <Globe className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Режим работы сети</h3>
+                    <p className="text-[11px] text-slate-400">
+                      Выбор способа перехвата сетевого трафика в Windows
+                    </p>
+                  </div>
+                </div>
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
+                  {routing.mode === "tun" ? "TUN-режим (Вирт. адаптер)" : "System Proxy (Прокси Windows)"}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleQuickSwitchMode("system_proxy")}
+                  className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+                    routing.mode === "system_proxy"
+                      ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
+                      : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold">System Proxy</span>
+                    <Globe className="w-4 h-4 text-cyan-400" />
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Легкий режим без прав администратора (браузеры, Telegram, Discord).
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleQuickSwitchMode("tun")}
+                  className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+                    routing.mode === "tun"
+                      ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
+                      : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
+                    <Zap className="w-4 h-4 text-indigo-400" />
+                  </div>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Перехватывает весь трафик ПК, включая игры и любые приложения.
+                  </p>
+                </button>
+              </div>
+
+              {/* Split Tunneling Status & Link to Routing tab */}
+              <div className="pt-2.5 flex items-center justify-between border-t border-slate-800/80 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400">Раздельное туннелирование:</span>
+                  <span
+                    className={`font-semibold flex items-center gap-1.5 ${
+                      (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling)
+                        ? "text-cyan-400"
+                        : "text-slate-400"
+                    }`}
+                  >
+                    {(selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) ? (
+                      <>
+                        <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
+                        Включено для «{selectedProfile?.name || "профиля"}»
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-2 h-2 rounded-full bg-slate-600" />
+                        Выключено (Весь трафик в VPN)
+                      </>
+                    )}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (selectedProfileId) switchRoutingProfile(selectedProfileId);
+                    setActiveTab("routing");
+                  }}
+                  className="text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 transition cursor-pointer"
+                >
+                  {t.manageRoutingLink}
+                </button>
+              </div>
+            </div>
+
             {/* SECURITY & KILL SWITCH SECTION */}
             <div
               className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
@@ -6871,7 +7273,7 @@ export default function App() {
             {/* Bottom Footer Bar */}
             <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800/60 text-[11px] text-slate-400 flex items-center justify-between">
               <div>
-                <span className="font-semibold text-slate-300">NeuroVeil VPN v1.0.2 (Build 1050)</span> — Next-Gen High-Speed VPN Client
+                <span className="font-semibold text-slate-300">NeuroVeil VPN v1.0.3 (Build 1051)</span> — Next-Gen High-Speed VPN Client
               </div>
               <div className="text-slate-500 font-mono text-[10px]">
                 Port: 8443 (Hy2) • 9443 (TUIC) • Динамический UDP (Amnezia 3.1) • Tray & Autostart Active
@@ -6896,7 +7298,7 @@ export default function App() {
                 </p>
               </div>
               <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                Версия: 1.0.2 build 1050
+                Версия: 1.0.3 build 1051
               </span>
             </div>
 
@@ -7140,7 +7542,7 @@ export default function App() {
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-bold text-white">
-                      NeuroVeil VPN v1.0.2 (Build 1050)
+                      NeuroVeil VPN v1.0.3 (Build 1051)
                     </span>
                     <button
                       type="button"

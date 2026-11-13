@@ -7,6 +7,8 @@ pub struct VpnProfile {
     pub protocol: String, // "hysteria2" | "tuic"
     pub server: String,
     pub port: u16,
+    #[serde(default)]
+    pub original_port: Option<u16>,
     pub sni: String,
     pub insecure: bool,
     pub password: String,
@@ -114,6 +116,7 @@ impl Default for VpnProfile {
             protocol: "amneziawg".to_string(),
             server: String::new(),
             port: 51820,
+            original_port: None,
             sni: String::new(),
             insecure: false,
             password: String::new(),

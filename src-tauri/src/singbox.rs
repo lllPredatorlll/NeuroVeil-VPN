@@ -588,7 +588,8 @@ fn detect_physical_ipv4(server_ip: &str) -> Option<String> {
     None
 }
 
-fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str>) -> Value {
+fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str>, override_port: Option<u16>) -> Value {
+    let effective_port = override_port.unwrap_or(profile.port);
     let mut out = if profile.protocol == "vless" {
         let flow = profile.reality_flow.as_deref().unwrap_or("xtls-rprx-vision");
         let tls_frag = profile.tls_fragment.unwrap_or(true);
@@ -609,7 +610,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "type": "vless",
             "tag": tag,
             "server": profile.server,
-            "server_port": profile.port,
+            "server_port": effective_port,
             "uuid": profile.uuid.clone().unwrap_or_else(|| profile.password.clone()),
             "flow": flow,
             "tls": tls_obj
@@ -643,7 +644,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "type": "tuic",
             "tag": tag,
             "server": profile.server,
-            "server_port": profile.port,
+            "server_port": effective_port,
             "uuid": profile.uuid.clone().unwrap_or_else(|| Uuid::new_v4().to_string()),
             "password": profile.password,
             "congestion_control": "bbr",
@@ -658,7 +659,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "type": "shadowsocks",
             "tag": tag,
             "server": profile.server,
-            "server_port": profile.port,
+            "server_port": effective_port,
             "method": method,
             "password": profile.password
         });
@@ -683,7 +684,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "type": "ssh",
             "tag": tag,
             "server": profile.server,
-            "server_port": profile.port,
+            "server_port": effective_port,
             "user": user,
             "client_version": "SSH-2.0-OpenSSH_9.0"
         });
@@ -712,7 +713,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "type": "hysteria2",
             "tag": tag,
             "server": profile.server,
-            "server_port": profile.port,
+            "server_port": effective_port,
             "up_mbps": profile.up_mbps.max(10),
             "down_mbps": profile.down_mbps.max(50),
             "password": profile.password,
@@ -726,14 +727,16 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
                 });
             }
         }
-        if let Some(ref hp) = profile.hop_ports {
-            let clean_hp = hp.trim();
-            if !clean_hp.is_empty() {
-                if let Some(obj) = hy2.as_object_mut() {
-                    obj.remove("server_port");
-                    obj.insert("server_ports".to_string(), json!([clean_hp]));
-                    let interval = profile.hop_interval.as_deref().unwrap_or("30s");
-                    obj.insert("hop_interval".to_string(), json!(interval));
+        if override_port.is_none() {
+            if let Some(ref hp) = profile.hop_ports {
+                let clean_hp = hp.trim();
+                if !clean_hp.is_empty() {
+                    if let Some(obj) = hy2.as_object_mut() {
+                        obj.remove("server_port");
+                        obj.insert("server_ports".to_string(), json!([clean_hp]));
+                        let interval = profile.hop_interval.as_deref().unwrap_or("30s");
+                        obj.insert("hop_interval".to_string(), json!(interval));
+                    }
                 }
             }
         }
@@ -745,45 +748,150 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
     out
 }
 
-pub fn get_awg_candidate_ports(profile: &VpnProfile) -> Vec<u16> {
-    let mut ports: Vec<u16> = Vec::new();
-    ports.push(profile.port);
+fn random_u16_in_range(min: u16, max: u16) -> u16 {
+    if min >= max {
+        return min;
+    }
+    let u = Uuid::new_v4();
+    let b = u.as_bytes();
+    let n = u32::from_ne_bytes([b[0], b[1], b[2], b[3]]);
+    (min as u32 + (n % ((max - min) as u32 + 1))) as u16
+}
 
-    if let Some(ref hop) = profile.awg_hop_ports {
-        for part in hop.split(',') {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
+pub fn get_profile_candidate_ports(
+    profile: &VpnProfile,
+    custom_ports: Option<Vec<u16>>,
+    exclude_ports: Option<Vec<u16>>,
+    target_count: usize,
+) -> Vec<u16> {
+    let mut ports: Vec<u16> = Vec::new();
+    let excluded = exclude_ports.unwrap_or_default();
+
+    if let Some(custom) = custom_ports {
+        for p in custom {
+            if p > 0 && !ports.contains(&p) && !excluded.contains(&p) {
+                ports.push(p);
             }
-            if let Some((start_s, end_s)) = p.split_once(':').or_else(|| p.split_once('-')) {
-                if let (Ok(s), Ok(e)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
-                    let (min_p, max_p) = if s <= e { (s, e) } else { (e, s) };
-                    let range_size = max_p.saturating_sub(min_p) as usize;
-                    if range_size > 0 {
-                        let step = (range_size / 12).max(1);
-                        let mut curr = min_p;
-                        while curr <= max_p && ports.len() < 16 {
-                            if !ports.contains(&curr) {
-                                ports.push(curr);
-                            }
-                            curr = curr.saturating_add(step as u16);
+        }
+        if !ports.is_empty() {
+            return ports;
+        }
+    }
+
+    let is_udp = is_awg_protocol(&profile.protocol) || profile.protocol == "hysteria2" || profile.protocol == "tuic";
+
+    // 1. If primary/original port or profile port is not yet excluded and not in list, add it first
+    let primary_port = profile.original_port.unwrap_or(profile.port);
+    if primary_port > 0 && !excluded.contains(&primary_port) && !ports.contains(&primary_port) {
+        ports.push(primary_port);
+    }
+    if profile.port > 0 && profile.port != primary_port && !excluded.contains(&profile.port) && !ports.contains(&profile.port) {
+        ports.push(profile.port);
+    }
+
+    // 2. Collect any explicitly specified hop ranges
+    let mut ranges: Vec<(u16, u16)> = Vec::new();
+    let hop_candidates = [profile.awg_hop_ports.as_deref(), profile.hop_ports.as_deref()];
+    for hop_opt in hop_candidates {
+        if let Some(hop) = hop_opt {
+            for part in hop.split(',') {
+                let p = part.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                if let Some((start_s, end_s)) = p.split_once(':').or_else(|| p.split_once('-')) {
+                    if let (Ok(s), Ok(e)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
+                        let (min_p, max_p) = if s <= e { (s, e) } else { (e, s) };
+                        if min_p > 0 && max_p > 0 {
+                            ranges.push((min_p, max_p));
                         }
                     }
-                }
-            } else if let Ok(port_num) = p.parse::<u16>() {
-                if !ports.contains(&port_num) {
-                    ports.push(port_num);
+                } else if let Ok(port_num) = p.parse::<u16>() {
+                    if port_num > 0 && !ports.contains(&port_num) && !excluded.contains(&port_num) {
+                        ports.push(port_num);
+                    }
                 }
             }
         }
     }
-    for common in [443, 53, 8080, 1194] {
-        if !ports.contains(&common) && ports.len() < 20 {
-            ports.push(common);
+
+    // Default range for UDP protocols (AmneziaWG / Hysteria2 NAT range configured on VPS)
+    if ranges.is_empty() && is_udp {
+        ranges.push((20000, 50000));
+    }
+
+    // 3. Pool of well-known standard ports
+    let defaults: &[u16] = if is_udp {
+        &[
+            53, 443, 8443, 1194, 51820, 123, 500, 4500, 5060, 5061, 8080, 993, 995, 3478, 3479,
+            20000, 22000, 25000, 28000, 30000, 32000, 35000, 38000, 40000, 42000, 45000, 48000, 50000,
+        ]
+    } else {
+        &[
+            443, 80, 8443, 2053, 2083, 2087, 2096, 8080, 8880, 2052, 2082, 2086, 2095, 8444,
+            9443, 10443, 4443, 7443, 8000, 8008, 8888, 3000, 5000, 9090, 1080, 3128, 22, 2222,
+            2200, 22222, 5222, 5228, 853, 993, 995, 1433, 3306, 5432, 6379, 8081, 8088, 8445,
+            9000, 9001, 9999,
+        ]
+    };
+
+    // Add unvisited standard ports
+    for &cp in defaults {
+        if ports.len() >= target_count {
+            break;
+        }
+        if cp > 0 && !ports.contains(&cp) && !excluded.contains(&cp) {
+            ports.push(cp);
+        }
+    }
+
+    // 4. If we still need more ports, randomly generate new ones from the available ranges
+    if !ranges.is_empty() {
+        let mut attempts = 0;
+        let mut range_idx = 0;
+        while ports.len() < target_count && attempts < 2500 {
+            attempts += 1;
+            let (min_r, max_r) = ranges[range_idx % ranges.len()];
+            range_idx += 1;
+            let cand = random_u16_in_range(min_r, max_r);
+            if cand > 0 && !ports.contains(&cand) && !excluded.contains(&cand) {
+                ports.push(cand);
+            }
+        }
+    }
+
+    // 5. Fallback if the range was fully exhausted: allow repeating from range without excluded check
+    if ports.len() < target_count && !ranges.is_empty() {
+        let mut attempts = 0;
+        let mut range_idx = 0;
+        while ports.len() < target_count && attempts < 500 {
+            attempts += 1;
+            let (min_r, max_r) = ranges[range_idx % ranges.len()];
+            range_idx += 1;
+            let cand = random_u16_in_range(min_r, max_r);
+            if cand > 0 && !ports.contains(&cand) {
+                ports.push(cand);
+            }
+        }
+    }
+
+    // 6. If TCP and still not enough, generate random high ports in 10000..60000
+    if ports.len() < target_count && !is_udp {
+        let mut attempts = 0;
+        while ports.len() < target_count && attempts < 500 {
+            attempts += 1;
+            let cand = random_u16_in_range(10000, 60000);
+            if cand > 0 && !ports.contains(&cand) && !excluded.contains(&cand) {
+                ports.push(cand);
+            }
         }
     }
 
     ports
+}
+
+pub fn get_awg_candidate_ports(profile: &VpnProfile) -> Vec<u16> {
+    get_profile_candidate_ports(profile, None, None, 28)
 }
 
 pub fn generate_singbox_config(
@@ -825,33 +933,43 @@ pub fn generate_singbox_config_internal(
     if is_awg {
         outbounds.push(direct_out);
         outbounds.push(block_out);
+        let mut peer_obj = json!({
+            "address": profile.server,
+            "port": active_peer_port,
+            "public_key": profile.awg_public_key.as_deref().unwrap_or(&profile.password),
+            "allowed_ips": ["0.0.0.0/0", "::/0"]
+        });
+        if let Some(ref pka) = profile.awg_persistent_keepalive {
+            let trimmed = pka.trim();
+            if let Ok(num) = trimmed.parse::<u32>() {
+                peer_obj["persistent_keepalive_interval"] = json!(num);
+            } else if !trimmed.is_empty() {
+                peer_obj["persistent_keepalive_interval"] = json!(trimmed);
+            } else {
+                peer_obj["persistent_keepalive_interval"] = json!(25);
+            }
+        } else {
+            peer_obj["persistent_keepalive_interval"] = json!(25);
+        }
+        if let Some(ref psk) = profile.awg_preshared_key {
+            if !psk.trim().is_empty() {
+                peer_obj["pre_shared_key"] = json!(psk.trim());
+            }
+        }
+
         let mut ep = json!({
             "type": "wireguard",
             "tag": "proxy",
             "address": [profile.awg_local_address.as_deref().unwrap_or("10.8.0.2/32")],
             "private_key": profile.awg_private_key.as_deref().unwrap_or(&profile.password),
-            "listen_port": 0,
             "mtu": 1280,
             "jc": profile.awg_jc.unwrap_or(4),
             "jmin": profile.awg_jmin.unwrap_or(40),
             "jmax": profile.awg_jmax.unwrap_or(70),
             "s1": profile.awg_s1.unwrap_or(15),
             "s2": profile.awg_s2.unwrap_or(25),
-            "peers": [
-                {
-                    "address": profile.server,
-                    "port": active_peer_port,
-                    "public_key": profile.awg_public_key.as_deref().unwrap_or(&profile.password),
-                    "allowed_ips": ["0.0.0.0/0", "::/0"],
-                    "persistent_keepalive_interval": 25
-                }
-            ]
+            "peers": [peer_obj]
         });
-        if let Some(ref psk) = profile.awg_preshared_key {
-            if !psk.trim().is_empty() {
-                ep["peers"][0]["pre_shared_key"] = json!(psk.trim());
-            }
-        }
         if let Some(ref h1) = profile.awg_h1 {
             if let Ok(num) = h1.trim().parse::<u32>() {
                 ep["h1"] = json!(num);
@@ -902,12 +1020,6 @@ pub fn generate_singbox_config_internal(
                 ep["s3"] = json!(s3);
                 ep["s4"] = json!(s4);
 
-                if profile.awg_random_trailers.unwrap_or(true) {
-                    ep["random_trailers"] = json!(true);
-                }
-                if profile.awg_disable_cookies.unwrap_or(true) {
-                    ep["disable_cookies"] = json!(true);
-                }
                 if let Some(ref r) = profile.awg_rekey_after_time {
                     if !r.trim().is_empty() { ep["rekey_after_time"] = json!(r.trim()); }
                 }
@@ -920,6 +1032,21 @@ pub fn generate_singbox_config_internal(
                 if let Some(ref r) = profile.awg_keepalive_timeout {
                     if !r.trim().is_empty() { ep["keepalive_timeout"] = json!(r.trim()); }
                 }
+            }
+        }
+
+        if let Some(rt) = profile.awg_random_trailers {
+            ep["random_trailers"] = json!(rt);
+        }
+        if let Some(dc) = profile.awg_disable_cookies {
+            ep["disable_cookies"] = json!(dc);
+        }
+        if let Some(ref mha) = profile.awg_max_handshake_attempts {
+            let trimmed = mha.trim();
+            if let Ok(num) = trimmed.parse::<u32>() {
+                ep["max_handshake_attempts"] = json!(num);
+            } else if !trimmed.is_empty() {
+                ep["max_handshake_attempts"] = json!(trimmed);
             }
         }
 
@@ -937,7 +1064,7 @@ pub fn generate_singbox_config_internal(
         }
         endpoints.push(ep);
     } else {
-        outbounds.push(build_single_outbound(profile, "proxy", None));
+        outbounds.push(build_single_outbound(profile, "proxy", None, override_port));
         outbounds.push(direct_out);
         outbounds.push(block_out);
     }

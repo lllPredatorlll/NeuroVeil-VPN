@@ -12,7 +12,8 @@ use models::{
 use singbox::{
     build_awg_conf, build_profile_uri, check_singbox_version, collect_exe_in_dir,
     download_singbox_core, generate_mobile_singbox_config, generate_singbox_config,
-    get_app_data_dir, get_awg_candidate_ports, get_singbox_bin_path, parse_profile_uri,
+    generate_singbox_config_with_port, get_app_data_dir,
+    get_profile_candidate_ports, get_singbox_bin_path, parse_profile_uri,
     reset_stale_app_sockets, set_windows_system_proxy, write_routing_rulesets,
 };
 use std::fs;
@@ -119,6 +120,12 @@ fn stop_singbox_internal(rt: &mut RuntimeState) {
         let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
         let _ = child.kill();
         let _ = child.wait();
+        #[cfg(target_os = "windows")]
+        {
+            let mut flush_cmd = Command::new("ipconfig");
+            flush_cmd.arg("/flushdns").creation_flags(CREATE_NO_WINDOW);
+            let _ = flush_cmd.output();
+        }
         save_persistent_state(&rt.persistent);
         push_log(&mut rt.logs, "Процесс sing-box остановлен.".to_string());
     }
@@ -246,7 +253,7 @@ fn spawn_and_monitor_singbox(
         );
     }
 
-    let config_json = generate_singbox_config(profile, routing_snapshot);
+    let config_json = generate_singbox_config_with_port(profile, routing_snapshot, Some(active_port));
     let config_path = get_app_data_dir().join("active_config.json");
     let config_str = serde_json::to_string_pretty(&config_json).map_err(|e| e.to_string())?;
     fs::write(&config_path, config_str)
@@ -312,7 +319,7 @@ fn spawn_and_monitor_singbox(
             thread::sleep(Duration::from_millis(40));
         }
         let delay_url = format!(
-            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://1.1.1.1/generate_204&timeout=2000",
+            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=2000",
             warmup_clash_port
         );
         if ureq::get(&delay_url)
@@ -786,14 +793,17 @@ async fn connect_vpn(
             (prof, prof_routing, had_child)
         };
 
-        // Only run taskkill if there could be an orphaned sing-box.exe not tracked by this session
+        // Ensure any previous sing-box process is terminated and allow socket/TUN release
         #[cfg(target_os = "windows")]
-        if !had_tracked_child {
-            let mut kill_cmd = Command::new("taskkill");
-            kill_cmd
-                .args(["/F", "/IM", "sing-box.exe"])
-                .creation_flags(CREATE_NO_WINDOW);
-            let _ = kill_cmd.output();
+        {
+            if !had_tracked_child {
+                let mut kill_cmd = Command::new("taskkill");
+                kill_cmd
+                    .args(["/F", "/IM", "sing-box.exe"])
+                    .creation_flags(CREATE_NO_WINDOW);
+                let _ = kill_cmd.output();
+            }
+            thread::sleep(Duration::from_millis(100));
         }
 
         // 2. Direct fast launch of sing-box without blocking loops (< 50ms)
@@ -1064,6 +1074,13 @@ fn add_or_update_profile(
     if profile.id.trim().is_empty() {
         profile.id = Uuid::new_v4().to_string();
     }
+    if profile.original_port.is_none() || profile.original_port == Some(0) {
+        if let Some(existing) = rt.persistent.profiles.iter().find(|p| p.id == profile.id) {
+            profile.original_port = existing.original_port.or(Some(existing.port));
+        } else {
+            profile.original_port = Some(profile.port);
+        }
+    }
     if is_awg_protocol(&profile.protocol) {
         if let Some(ref priv_key) = profile.awg_private_key {
             let trimmed = priv_key.trim();
@@ -1194,10 +1211,249 @@ async fn ping_profile(id: String, state: State<'_, SharedState>) -> Result<u32, 
     .map_err(|e| e.to_string())?
 }
 
+async fn probe_single_port(
+    server: &str,
+    port: u16,
+    protocol: &str,
+    awg_h1: Option<&str>,
+    awg_s1: Option<u16>,
+    baseline_latency: Option<u32>,
+    primary_port: u16,
+) -> PortProbeResult {
+    let target = format!("{}:{}", server, port);
+    let target_addr = match tokio::net::lookup_host(&target).await.ok().and_then(|mut it| it.next()) {
+        Some(a) => a,
+        None => {
+            return PortProbeResult {
+                port,
+                reachable: false,
+                latency_ms: None,
+                message: "Не удалось разрешить IP сервера".to_string(),
+            };
+        }
+    };
+
+    let is_tcp = protocol == "vless" || protocol == "shadowsocks" || protocol == "ssh";
+    let is_quic = protocol == "hysteria2" || protocol == "tuic";
+
+    if is_tcp {
+        let t0 = Instant::now();
+        match tokio::time::timeout(Duration::from_millis(1500), tokio::net::TcpStream::connect(target_addr)).await {
+            Ok(Ok(_sock)) => {
+                let lat = t0.elapsed().as_millis().max(1) as u32;
+                PortProbeResult {
+                    port,
+                    reachable: true,
+                    latency_ms: Some(lat),
+                    message: "Порт доступен (TCP подключение успешно)".to_string(),
+                }
+            }
+            Ok(Err(e)) => {
+                let msg = if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                    "Порт закрыт на сервере (Connection Refused)".to_string()
+                } else {
+                    format!("Ошибка: {}", e)
+                };
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: msg,
+                }
+            }
+            Err(_) => {
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: "Таймаут (заблокирован DPI или закрыт)".to_string(),
+                }
+            }
+        }
+    } else if is_quic {
+        let t0 = Instant::now();
+        let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                return PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: format!("Ошибка сокета: {}", e),
+                };
+            }
+        };
+
+        if sock.connect(target_addr).await.is_err() {
+            return PortProbeResult {
+                port,
+                reachable: false,
+                latency_ms: None,
+                message: "Не удалось привязать целевой адрес".to_string(),
+            };
+        }
+
+        // Send RFC 9000 Version Negotiation trigger probe
+        let mut quic_probe = Vec::with_capacity(48);
+        quic_probe.push(0xc0); // Long header, Initial
+        quic_probe.extend_from_slice(&[0x1a, 0x2a, 0x3a, 0x4a]); // Reserved Version for negotiation
+        quic_probe.push(0x08); // DCID len
+        quic_probe.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04]);
+        quic_probe.push(0x08); // SCID len
+        quic_probe.extend_from_slice(&[0xfe, 0xed, 0xfa, 0xce, 0x05, 0x06, 0x07, 0x08]);
+        quic_probe.push(0x00); // Token length
+        quic_probe.extend_from_slice(&[0x40, 0x10]); // Varint length
+        quic_probe.extend_from_slice(&[0u8; 16]); // Payload
+        let _ = sock.send(&quic_probe).await;
+
+        let mut buf = [0u8; 1024];
+        let recv_res = tokio::time::timeout(Duration::from_millis(1500), sock.recv(&mut buf)).await;
+        match recv_res {
+            Ok(Ok(n)) if n > 0 => {
+                let lat = t0.elapsed().as_millis().max(1) as u32;
+                PortProbeResult {
+                    port,
+                    reachable: true,
+                    latency_ms: Some(lat),
+                    message: "Порт доступен (QUIC ответ получен)".to_string(),
+                }
+            }
+            Ok(Ok(_)) => {
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: "Пустой ответ".to_string(),
+                }
+            }
+            Ok(Err(e)) => {
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: format!("Порт закрыт: {}", e),
+                }
+            }
+            Err(_) => {
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: "Таймаут (заблокирован DPI или закрыт)".to_string(),
+                }
+            }
+        }
+    } else {
+        // AmneziaWG / UDP
+        let t0 = Instant::now();
+        let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+            Ok(s) => s,
+            Err(e) => {
+                return PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: format!("Ошибка сокета: {}", e),
+                };
+            }
+        };
+
+        if sock.connect(target_addr).await.is_err() {
+            return PortProbeResult {
+                port,
+                reachable: false,
+                latency_ms: None,
+                message: "Не удалось подключиться к адресу".to_string(),
+            };
+        }
+
+        // Port 51820 is standard WireGuard - universally blocked by TSPPU in RU
+        if port == 51820 {
+            return PortProbeResult {
+                port,
+                reachable: false,
+                latency_ms: None,
+                message: "Порт 51820 заблокирован DPI (ТСПУ WireGuard)".to_string(),
+            };
+        }
+
+        let is_port_53 = port == 53;
+        let mut probe_pkt = Vec::new();
+        if is_port_53 {
+            // DNS A query for yandex.ru
+            probe_pkt.extend_from_slice(&[0x13, 0x37, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+            probe_pkt.extend_from_slice(&[0x06, b'y', b'a', b'n', b'd', b'e', b'x', 0x02, b'r', b'u', 0x00]);
+            probe_pkt.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        } else {
+            let h1_val = awg_h1.and_then(|s| s.parse::<u32>().ok()).unwrap_or(1);
+            probe_pkt.extend_from_slice(&h1_val.to_le_bytes());
+            let seed = (port as u32).wrapping_mul(1664525).wrapping_add(1013904223);
+            probe_pkt.extend_from_slice(&seed.to_le_bytes());
+            let pad = awg_s1.unwrap_or(12) as usize;
+            let total = (148 + pad).min(512);
+            while probe_pkt.len() < total {
+                probe_pkt.push(0x55);
+            }
+        }
+
+        let _ = sock.send(&probe_pkt).await;
+
+        let mut buf = [0u8; 1024];
+        let recv_res = tokio::time::timeout(Duration::from_millis(800), sock.recv(&mut buf)).await;
+        match recv_res {
+            Ok(Ok(n)) if n > 0 => {
+                let lat = t0.elapsed().as_millis().max(1) as u32;
+                PortProbeResult {
+                    port,
+                    reachable: true,
+                    latency_ms: Some(lat),
+                    message: "Порт доступен (UDP ответ получен)".to_string(),
+                }
+            }
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                PortProbeResult {
+                    port,
+                    reachable: false,
+                    latency_ms: None,
+                    message: "Порт закрыт на сервере (ICMP Port Unreachable)".to_string(),
+                }
+            }
+            _ => {
+                if port == primary_port {
+                    if let Some(base_lat) = baseline_latency {
+                        PortProbeResult {
+                            port,
+                            reachable: true,
+                            latency_ms: Some(base_lat),
+                            message: "Основной порт прослушивания сервера".to_string(),
+                        }
+                    } else {
+                        PortProbeResult {
+                            port,
+                            reachable: false,
+                            latency_ms: None,
+                            message: "Сервер недоступен (хост оффлайн или заблокирован)".to_string(),
+                        }
+                    }
+                } else {
+                    PortProbeResult {
+                        port,
+                        reachable: false,
+                        latency_ms: None,
+                        message: "Таймаут (нет ответа от сервера / порт не перенаправлен)".to_string(),
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
-async fn probe_awg_ports(
+async fn probe_profile_ports(
     profile_id: String,
     profile: Option<VpnProfile>,
+    custom_ports: Option<Vec<u16>>,
+    exclude_ports: Option<Vec<u16>>,
     state: State<'_, SharedState>,
 ) -> Result<Vec<PortProbeResult>, String> {
     let profile = {
@@ -1211,39 +1467,69 @@ async fn probe_awg_ports(
             .ok_or_else(|| "Профиль не найден".to_string())?
     };
 
-    let candidates = get_awg_candidate_ports(&profile);
-    let max_ports = candidates.len().min(12);
-    let mut results = Vec::new();
+    let primary_port = profile.original_port.unwrap_or(profile.port);
+    let candidates = get_profile_candidate_ports(&profile, custom_ports, exclude_ports, 28);
+    let server = profile.server.trim().to_string();
+    let protocol = profile.protocol.clone();
 
-    for &port in candidates.iter().take(max_ports) {
-        let start = Instant::now();
-        let target = format!("{}:{}", profile.server, port);
-        match std::net::UdpSocket::bind("0.0.0.0:0") {
-            Ok(sock) => {
-                let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
-                let _ = sock.connect(&target);
-                let dummy = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-                let _ = sock.send(&dummy);
-                let latency = start.elapsed().as_millis() as u32;
-                results.push(PortProbeResult {
-                    port,
-                    reachable: true,
-                    latency_ms: Some(latency.max(1)),
-                    message: "Порт доступен".to_string(),
-                });
+    // Measure baseline host connectivity/latency via TCP 22 or 443 or primary_port
+    let baseline_latency: Option<u32> = {
+        let mut base_lat = None;
+        let test_ports = [22u16, 443u16, 80u16, primary_port];
+        for tp in test_ports {
+            if tp == 0 {
+                continue;
             }
-            Err(e) => {
-                results.push(PortProbeResult {
-                    port,
-                    reachable: false,
-                    latency_ms: None,
-                    message: e.to_string(),
-                });
+            if let Ok(mut it) = tokio::net::lookup_host((server.as_str(), tp)).await {
+                if let Some(addr) = it.next() {
+                    let t0 = Instant::now();
+                    if let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(1200), tokio::net::TcpStream::connect(addr)).await {
+                        base_lat = Some(t0.elapsed().as_millis().max(1) as u32);
+                        break;
+                    }
+                }
             }
+        }
+        base_lat
+    };
+
+    let mut tasks = Vec::new();
+    for port in candidates {
+        let s_c = server.clone();
+        let p_c = protocol.clone();
+        let h1_c = profile.awg_h1.clone();
+        let s1_val = profile.awg_s1;
+        let base_lat = baseline_latency;
+        let p_port = primary_port;
+
+        tasks.push(tokio::spawn(async move {
+            probe_single_port(&s_c, port, &p_c, h1_c.as_deref(), s1_val, base_lat, p_port).await
+        }));
+    }
+
+    let mut results = Vec::new();
+    for t in tasks {
+        if let Ok(res) = t.await {
+            results.push(res);
         }
     }
 
+    results.sort_by(|a, b| {
+        b.reachable.cmp(&a.reachable)
+            .then_with(|| a.latency_ms.unwrap_or(9999).cmp(&b.latency_ms.unwrap_or(9999)))
+            .then_with(|| a.port.cmp(&b.port))
+    });
+
     Ok(results)
+}
+
+#[tauri::command]
+async fn probe_awg_ports(
+    profile_id: String,
+    profile: Option<VpnProfile>,
+    state: State<'_, SharedState>,
+) -> Result<Vec<PortProbeResult>, String> {
+    probe_profile_ports(profile_id, profile, None, None, state).await
 }
 
 #[tauri::command]
@@ -2392,15 +2678,15 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             }
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
-                    "Связь с GitHub установлена. У вас актуальная версия v1.0.2 (Build 1050).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта."
+                    "Связь с GitHub установлена. У вас актуальная версия v1.0.3 (Build 1051).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта."
                 } else {
-                    "Связь с GitHub установлена. У вас актуальная версия v1.0.2 (Build 1050)."
+                    "Связь с GitHub установлена. У вас актуальная версия v1.0.3 (Build 1051)."
                 };
                 return Ok(AppUpdateInfo {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 1050)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 1051)", current_version),
                     release_notes: note.to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -2803,6 +3089,7 @@ fn main() {
             export_profile_json,
             export_awg_conf,
             probe_awg_ports,
+            probe_profile_ports,
             login_vps_admin,
             delete_vps_device_cmd,
             app_start_dragging,
