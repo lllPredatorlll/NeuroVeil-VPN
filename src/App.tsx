@@ -2524,8 +2524,8 @@ export default function App() {
 
         {/* TAB 1: DASHBOARD */}
         {activeTab === "dashboard" && (
-          <div className="flex-1 overflow-y-auto p-6 flex flex-col justify-between h-full min-h-0 space-y-6 animate-tab-enter">
-            <div className="space-y-6">
+          <div className="flex-1 overflow-y-auto p-3.5 sm:p-5 lg:p-6 flex flex-col justify-between h-full min-h-0 space-y-4 sm:space-y-5 lg:space-y-6 animate-tab-enter">
+            <div className="space-y-4 sm:space-y-5 lg:space-y-6">
               {/* Warning if sing-box binary is missing */}
               {!status.singbox_installed && (
                 <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
@@ -2551,14 +2551,14 @@ export default function App() {
                 </div>
               )}
 
-              <div className="grid grid-cols-12 gap-4">
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-4">
                 {/* Left Column: Power Button & Speed Meter */}
-                <div className="col-span-5 p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-col justify-between space-y-2.5 relative overflow-hidden">
+                <div className="col-span-1 lg:col-span-5 p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-col justify-between space-y-2.5 relative overflow-hidden">
                   {/* Modern Main Action Button - Fills the top space completely */}
                   <button
                     onClick={handleToggleConnect}
                     disabled={connecting || reconnectCooldown}
-                    className={`w-full h-[64px] rounded-xl px-3.5 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
+                    className={`w-full min-h-[64px] py-2 rounded-xl px-3.5 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
                       status.connected
                         ? status.is_handshaking
                           ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-1 ring-amber-500/30"
@@ -2643,7 +2643,7 @@ export default function App() {
                       <Download className="w-3 h-3 text-cyan-400 shrink-0" />
                       <div className="min-w-0">
                         <div className="text-[9px] text-slate-400 leading-none">Входящий</div>
-                        <div className="text-[11px] font-bold text-white truncate font-mono mt-0.5">
+                        <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
                           {formatBytes(status.down_speed)}/с
                         </div>
                       </div>
@@ -2653,7 +2653,7 @@ export default function App() {
                       <Upload className="w-3 h-3 text-indigo-400 shrink-0" />
                       <div className="min-w-0">
                         <div className="text-[9px] text-slate-400 leading-none">Исходящий</div>
-                        <div className="text-[11px] font-bold text-white truncate font-mono mt-0.5">
+                        <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
                           {formatBytes(status.up_speed)}/с
                         </div>
                       </div>
@@ -2662,15 +2662,15 @@ export default function App() {
                 </div>
 
                 {/* Right Column: Server Selector */}
-                <div className="col-span-7">
+                <div className="col-span-1 lg:col-span-7">
                   {/* Active Profile Selection Card */}
                   <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 shrink-0">
                         <Layers className="w-3.5 h-3.5 text-cyan-400" />
                         Выбранный сервер и протокол
                       </span>
-                      <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
                         <button
                           onClick={() => setActiveTab("profiles")}
                           className="text-xs text-slate-400 hover:text-slate-200 font-medium transition cursor-pointer"
@@ -2739,7 +2739,7 @@ export default function App() {
                                       {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
                                     </span>
                                     <span
-                                      className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono"
+                                      className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono hidden sm:inline-block shrink-0"
                                       title={`Трафик: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}`}
                                     >
                                       ↓{formatBytes(p.total_down_bytes || 0)} • ↑{formatBytes(p.total_up_bytes || 0)}
@@ -2895,10 +2895,10 @@ export default function App() {
                 </div>
 
                 {/* Active Preset Description Banner */}
-                <div className="pt-1 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-800/80">
-                  <div className="flex items-center gap-1.5 truncate">
-                    <span className="text-cyan-400 font-medium">Активный профиль:</span>
-                    <span className="text-slate-300">
+                <div className="pt-1.5 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-cyan-400 font-medium shrink-0">Активный профиль:</span>
+                    <span className="text-slate-300 truncate">
                       {routingPresets.find((p) => p.id === activePresetId)?.description ||
                         routingPresets.find((p) => p.id === activePresetId)?.name ||
                         "По умолчанию"}
@@ -2907,7 +2907,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleResetPresets}
-                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-2"
+                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-auto"
                     title="Сбросить все предустановки к исходным стандартным"
                   >
                     Восстановить стандартные
@@ -3100,11 +3100,11 @@ export default function App() {
 
             {/* Bottom Live Core Logs - Anchored to bottom edge */}
             <div className="p-4 rounded-2xl bg-[#0d1322] border border-slate-800/90 space-y-2 mt-auto shrink-0 w-full">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-slate-400 flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="text-xs font-semibold text-slate-400 flex items-center gap-2 shrink-0">
                   <Terminal className="w-4 h-4 text-cyan-400" /> Журнал ядра sing-box
                 </span>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
                   <button
                     type="button"
                     onClick={handleExportCoreLogs}
@@ -3156,9 +3156,9 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-12 gap-6">
+              <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 lg:gap-6">
                 {/* Left Column: Server Credentials, Actions & Automation Info (5 cols) */}
-                <div className="col-span-5 space-y-5">
+                <div className="col-span-1 xl:col-span-5 space-y-5">
                   {/* Card 1: Server SSH Parameters */}
                   <div className="p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
                 <div className="flex items-center justify-between">
@@ -3380,7 +3380,7 @@ export default function App() {
                 </div>
 
                 {/* Right Column: Protocol Selection & Detailed Parameters (7 cols) */}
-                <div className="col-span-7 p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
+                <div className="col-span-1 xl:col-span-7 p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
