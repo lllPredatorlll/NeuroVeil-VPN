@@ -1065,11 +1065,11 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         ));
         if creds.enable_port_hopping {
             fw_rules.push_str(&format!(
-                "if command -v ufw >/dev/null 2>&1; then ufw allow 20000:50000/udp >/dev/null 2>&1 || true; ufw allow 53/udp >/dev/null 2>&1 || true; fi\n\
-                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port=20000-50000/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port=53/udp >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi\n\
-                 iptables -t nat -A PREROUTING -p udp --dport 20000:50000 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
+                "if command -v ufw >/dev/null 2>&1; then ufw allow 20000:65000/udp >/dev/null 2>&1 || true; ufw allow 53/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port=20000-65000/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port=53/udp >/dev/null 2>&1 || true; firewall-cmd --reload >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -A PREROUTING -p udp --dport 20000:65000 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
                  iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
-                 iptables -I INPUT -p udp --dport 20000:50000 -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -I INPUT -p udp --dport 20000:65000 -j ACCEPT >/dev/null 2>&1 || true\n\
                  iptables -I INPUT -p udp --dport 53 -j ACCEPT >/dev/null 2>&1 || true\n",
                 p = creds.hy2_port
             ));
@@ -1186,12 +1186,12 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         }));
 
         fw_rules.push_str(&format!(
-            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; ufw allow 20000:50000/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
-             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port=20000-50000/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; ufw allow 20000:65000/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port=20000-65000/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
              iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
              iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -I INPUT -p udp --dport 20000:50000 -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -t nat -A PREROUTING -p udp --dport 20000:50000 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
+             iptables -I INPUT -p udp --dport 20000:65000 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -A PREROUTING -p udp --dport 20000:65000 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
              iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
              iptables -I FORWARD -d 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
              iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE >/dev/null 2>&1 || true\n",
@@ -1336,7 +1336,7 @@ systemctl is-active sing-box
             up_mbps: 100,
             down_mbps: 100,
             hop_ports: if creds.enable_port_hopping {
-                Some("20000:50000".to_string())
+                Some("20000:65000".to_string())
             } else {
                 None
             },
@@ -1719,7 +1719,7 @@ systemctl is-active sing-box
         let prof_name = device_name.trim().to_string();
 
         let server_pub = awg_json["server_public_key"].as_str().unwrap_or("").to_string();
-        let hop_ports = awg_json["hop_ports"].as_str().unwrap_or("20000:50000").to_string();
+        let hop_ports = awg_json["hop_ports"].as_str().unwrap_or("20000:65000").to_string();
         let hpk = awg_json["header_protection_key"].as_str().map(|s| s.to_string());
         let jc = awg_json["jc"].as_u64().map(|v| v as u16).or(Some(4));
         let jmin = awg_json["jmin"].as_u64().map(|v| v as u16).or(Some(40));
@@ -1936,7 +1936,7 @@ systemctl is-active sing-box
         up_mbps: 100,
         down_mbps: 100,
         hop_ports: if protocol == "hysteria2" && creds.enable_port_hopping {
-            Some("20000:50000".to_string())
+            Some("20000:65000".to_string())
         } else {
             None
         },
@@ -2076,7 +2076,7 @@ pub async fn fetch_vps_profiles(
                     up_mbps: 100,
                     down_mbps: 100,
                     hop_ports: if ib_type == "hysteria2" && creds.enable_port_hopping {
-                        Some("20000:50000".to_string())
+                        Some("20000:65000".to_string())
                     } else {
                         None
                     },
@@ -2139,7 +2139,7 @@ pub async fn fetch_vps_profiles(
                 let client_priv = active_json.and_then(|j| j["client_private_key"].as_str()).unwrap_or("").to_string();
                 let psk = active_json.and_then(|j| j["preshared_key"].as_str()).map(|s| s.to_string());
                 let hpk = active_json.and_then(|j| j["header_protection_key"].as_str()).map(|s| s.to_string());
-                let hop_ports = active_json.and_then(|j| j["hop_ports"].as_str()).unwrap_or("20000:50000").to_string();
+                let hop_ports = active_json.and_then(|j| j["hop_ports"].as_str()).unwrap_or("20000:65000").to_string();
                 let jc = ep["jc"].as_u64().map(|v| v as u16).or(Some(4));
                 let jmin = ep["jmin"].as_u64().map(|v| v as u16).or(Some(40));
                 let jmax = ep["jmax"].as_u64().map(|v| v as u16).or(Some(70));

@@ -15,7 +15,7 @@ pub struct VpnProfile {
     pub uuid: Option<String>,          // Required for TUIC v5
     pub obfs_password: Option<String>, // Optional Salamander obfuscation for Hysteria 2
     #[serde(default)]
-    pub hop_ports: Option<String>,     // Optional Port Hopping range e.g. "20000:50000"
+    pub hop_ports: Option<String>,     // Optional Port Hopping range e.g. "20000:65000"
     #[serde(default)]
     pub hop_interval: Option<String>,  // Optional Port Hopping interval e.g. "30s"
     #[serde(default)]
@@ -69,7 +69,7 @@ pub struct VpnProfile {
     #[serde(default)]
     pub awg_i4: Option<String>,             // AWG 3.1 init prefix 4
     #[serde(default)]
-    pub awg_hop_ports: Option<String>,      // Port hunting range/list e.g. "20000:50000"
+    pub awg_hop_ports: Option<String>,      // Port hunting range/list e.g. "20000:65000"
     #[serde(default)]
     pub awg_port_probing: Option<bool>,     // Enable automatic port probing / failover
     #[serde(default)]
@@ -443,7 +443,7 @@ fn default_awg_port() -> u16 {
 }
 
 fn default_awg_hop_ports() -> String {
-    "20000:50000".to_string()
+    "20000:65000".to_string()
 }
 
 fn default_awg2_port() -> u16 {

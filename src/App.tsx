@@ -397,7 +397,7 @@ export default function App() {
       deploy_awg2: false,
       deploy_ssh: true,
       awg_port: autoAwgPort,
-      awg_hop_ports: "20000:50000",
+      awg_hop_ports: "20000:65000",
       ...r31,
       enable_salamander: false,
       enable_port_hopping: true,
@@ -766,7 +766,7 @@ export default function App() {
             deploy_awg2: appState.saved_vps!.deploy_awg2 !== undefined ? appState.saved_vps!.deploy_awg2 : false,
             deploy_ssh: appState.saved_vps!.deploy_ssh !== undefined ? appState.saved_vps!.deploy_ssh : true,
             awg_port: (appState.saved_vps!.awg_port && appState.saved_vps!.awg_port !== 51820) ? appState.saved_vps!.awg_port : getRandomInt(21000, 55000),
-            awg_hop_ports: appState.saved_vps!.awg_hop_ports || "20000:50000",
+            awg_hop_ports: appState.saved_vps!.awg_hop_ports || "20000:65000",
             awg_jc: appState.saved_vps!.awg_jc ?? 5,
             awg_jmin: appState.saved_vps!.awg_jmin ?? 10,
             awg_jmax: appState.saved_vps!.awg_jmax ?? 50,
@@ -779,7 +779,7 @@ export default function App() {
             awg_h3: appState.saved_vps!.awg_h3 ?? "3",
             awg_h4: appState.saved_vps!.awg_h4 ?? "4",
             awg2_port: (appState.saved_vps!.awg2_port && appState.saved_vps!.awg2_port !== 51821) ? appState.saved_vps!.awg2_port : getRandomInt(21000, 55000),
-            awg2_hop_ports: appState.saved_vps!.awg2_hop_ports || "20000:50000",
+            awg2_hop_ports: appState.saved_vps!.awg2_hop_ports || "20000:65000",
             awg2_jc: appState.saved_vps!.awg2_jc ?? 4,
             awg2_jmin: appState.saved_vps!.awg2_jmin ?? 20,
             awg2_jmax: appState.saved_vps!.awg2_jmax ?? 60,
@@ -1956,9 +1956,7 @@ export default function App() {
       const prevExcluded = resetHistory ? [] : (probedHistoryPorts[selectedProfile.id] || []);
       showNotice(
         "info",
-        prevExcluded.length > 0
-          ? `Поиск следующих 28 портов для «${selectedProfile.name}» (ранее проверено ${prevExcluded.length})...`
-          : `Поиск 28 рабочих портов на сервере «${selectedProfile.name}» (${selectedProfile.server})...`
+        `Сканирование диапазона портов 20000–65000 на сервере «${selectedProfile.name}» (${selectedProfile.server})...`
       );
 
       const results = await invoke<PortProbeResult[]>("probe_profile_ports", {
@@ -1979,16 +1977,15 @@ export default function App() {
         [selectedProfile.id]: newHistory,
       }));
 
-      const reachableCount = results.filter((r) => r.reachable).length;
-      if (reachableCount > 0) {
+      if (results.length > 0) {
         showNotice(
           "success",
-          `Найдено ${reachableCount} работающих портов из ${results.length}! Нажмите на порт для применения.`
+          `⚡ Найдено ${results.length} открытых портов в диапазоне 20000–65000! Нажмите на нужный порт для применения.`
         );
       } else {
         showNotice(
           "info",
-          `Проверено ${results.length} портов: ни один не ответил. Если NAT-переадресация на VPS отключена, работает только исходный порт (${selectedProfile.original_port || selectedProfile.port}).`
+          `В диапазоне 20000–65000 открытых портов не обнаружено. Если переадресация NAT на VPS отключена, работает только исходный порт (${selectedProfile.original_port || selectedProfile.port}).`
         );
       }
     } catch (err: any) {
@@ -2172,7 +2169,7 @@ export default function App() {
                     </h1>
                   </div>
                   <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 mt-1 inline-block">
-                    v1.0.3
+                    v1.0.4
                   </span>
                 </div>
               </div>
@@ -2980,14 +2977,14 @@ export default function App() {
                       }`}
                       title={
                         (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0
-                          ? "Найти следующие 28 уникальных портов, которые еще не отображались"
-                          : "Выполнить поиск 28 работающих портов на сервере для выбранного профиля"
+                          ? "Найти следующие порты в диапазоне 20000–65000"
+                          : "Сканировать диапазон 20000–65000 на сервере и показать открытые"
                       }
                     >
                       {isProbingListeningPorts ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Поиск новых портов...</span>
+                          <span>Сканирование...</span>
                         </>
                       ) : (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 ? (
                         <>
@@ -3009,90 +3006,83 @@ export default function App() {
                   <div className="p-4 rounded-xl bg-[#0b101d] border border-cyan-500/20 flex items-center justify-center gap-2.5 text-xs text-cyan-300 animate-pulse">
                     <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
                     <span>
-                      Тестирование 28 портов сервера {selectedProfile ? `«${selectedProfile.name}» (${selectedProfile.server})` : ""}...
+                      Сканирование диапазона портов 20000–65000 на сервере {selectedProfile ? `«${selectedProfile.name}» (${selectedProfile.server})` : ""}...
                     </span>
                   </div>
-                ) : listeningProbeResults[selectedProfile?.id || ""] && listeningProbeResults[selectedProfile?.id || ""].length > 0 ? (
-                  <div className="space-y-2 pt-1">
-                    {listeningProbeResults[selectedProfile?.id || ""].filter((r) => r.reachable).length === 0 && (
-                      <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200">
-                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                        <div className="space-y-1">
-                          <div className="font-semibold text-amber-300">Сервер не отвечает на проверенные порты</div>
-                          <div className="text-[11px] text-amber-300/80 leading-relaxed">
-                            Возможно, сервер выключен или на VPS не настроена переадресация портов (NAT iptables).
-                            {selectedProfile?.original_port && selectedProfile.port !== selectedProfile.original_port && (
-                              <span> Рекомендуется вернуть исходный порт сервера: <strong className="text-white">{selectedProfile.original_port}</strong>.</span>
-                            )}
-                          </div>
-                        </div>
+                ) : listeningProbeResults[selectedProfile?.id || ""] ? (
+                  listeningProbeResults[selectedProfile?.id || ""].length > 0 ? (
+                    <div className="space-y-2 pt-1">
+                      <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
+                        <span className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#10b981]" />
+                          Нажмите на открытый порт для применения к профилю:
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-mono">
+                          Найдено открытых портов: <span className="text-emerald-400 font-bold">{listeningProbeResults[selectedProfile?.id || ""].length}</span>
+                        </span>
                       </div>
-                    )}
 
-                    <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
-                      <span className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#10b981]" />
-                        Нажмите на иконку порта для применения к конфигу:
-                      </span>
-                      <span className="text-[10px] text-slate-400 font-mono">
-                        Отображено: {listeningProbeResults[selectedProfile?.id || ""].length} • Работает: <span className="text-emerald-400 font-bold">{listeningProbeResults[selectedProfile?.id || ""].filter((r) => r.reachable).length}</span>
-                      </span>
-                    </div>
+                      <div className="flex flex-wrap items-center gap-2 max-h-56 overflow-y-auto pr-1">
+                        {listeningProbeResults[selectedProfile?.id || ""].map((res) => {
+                          const isCurrent = selectedProfile?.port === res.port;
+                          return (
+                            <button
+                              key={res.port}
+                              type="button"
+                              onClick={() => handleApplyListeningPort(res.port)}
+                              disabled={isApplyingListeningPort}
+                              className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
+                                isCurrent
+                                  ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 border-cyan-400 text-white shadow-md shadow-cyan-500/25 ring-1 ring-cyan-400"
+                                  : "bg-[#0b101d] border-emerald-500/35 hover:border-emerald-400 text-emerald-200 hover:text-white hover:bg-emerald-500/10 hover:shadow-sm"
+                              }`}
+                              title={`${res.port}: ${res.message}${res.latency_ms ? ` (${res.latency_ms} мс)` : ""}. Нажмите для применения к «${selectedProfile?.name}»`}
+                            >
+                              {isCurrent ? (
+                                <div className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
+                                  <Check className="w-2.5 h-2.5 text-cyan-300" />
+                                </div>
+                              ) : (
+                                <div className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
+                                  <Zap className="w-2.5 h-2.5 text-emerald-400" />
+                                </div>
+                              )}
 
-                    <div className="flex flex-wrap items-center gap-2 max-h-56 overflow-y-auto pr-1">
-                      {listeningProbeResults[selectedProfile?.id || ""].map((res) => {
-                        const isCurrent = selectedProfile?.port === res.port;
-                        const isReachable = res.reachable;
-                        return (
-                          <button
-                            key={res.port}
-                            type="button"
-                            onClick={() => handleApplyListeningPort(res.port)}
-                            disabled={isApplyingListeningPort}
-                            className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
-                              isCurrent
-                                ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 border-cyan-400 text-white shadow-md shadow-cyan-500/25 ring-1 ring-cyan-400"
-                                : isReachable
-                                ? "bg-[#0b101d] border-emerald-500/35 hover:border-emerald-400 text-emerald-200 hover:text-white hover:bg-emerald-500/10 hover:shadow-sm"
-                                : "bg-[#080d18] border-slate-800/80 text-slate-500 hover:border-slate-700 hover:text-slate-400 opacity-60"
-                            }`}
-                            title={`${res.port}: ${res.message}${res.latency_ms ? ` (${res.latency_ms} мс)` : ""}. Нажмите для применения к «${selectedProfile?.name}»`}
-                          >
-                            {isCurrent ? (
-                              <div className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
-                                <Check className="w-2.5 h-2.5 text-cyan-300" />
+                              <div className="flex flex-col items-start leading-tight">
+                                <span className="font-mono font-bold text-[12px] tracking-wide">
+                                  {res.port}
+                                </span>
+                                {res.latency_ms != null && (
+                                  <span className="text-[9px] text-emerald-400 font-mono">
+                                    {res.latency_ms} мс
+                                  </span>
+                                )}
                               </div>
-                            ) : isReachable ? (
-                              <div className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
-                                <Zap className="w-2.5 h-2.5 text-emerald-400" />
-                              </div>
-                            ) : (
-                              <div className="w-4 h-4 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center shrink-0">
-                                <XCircle className="w-2.5 h-2.5 text-slate-500" />
-                              </div>
-                            )}
 
-                            <div className="flex flex-col items-start leading-tight">
-                              <span className="font-mono font-bold text-[12px] tracking-wide">
-                                {res.port}
-                              </span>
-                              {res.latency_ms != null && isReachable && (
-                                <span className="text-[9px] text-emerald-400 font-mono">
-                                  {res.latency_ms} мс
+                              {isCurrent && (
+                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold uppercase tracking-wider ml-0.5">
+                                  Активен
                                 </span>
                               )}
-                            </div>
-
-                            {isCurrent && (
-                              <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold uppercase tracking-wider ml-0.5">
-                                Активен
-                              </span>
-                            )}
-                          </button>
-                        );
-                      })}
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
+                  ) : (
+                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200">
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <div className="space-y-1">
+                        <div className="font-semibold text-amber-300">Открытых портов в проверенном диапазоне 20000–65000 не найдено</div>
+                        <div className="text-[11px] text-amber-300/80 leading-relaxed">
+                          Сервер не ответил на проверенные порты из диапазона. Возможно, переадресация портов (NAT iptables PREROUTING) на VPS не настроена для этих портов или сервер выключен.
+                          {selectedProfile?.original_port && selectedProfile.port !== selectedProfile.original_port && (
+                            <span> Рекомендуется вернуть исходный порт сервера: <strong className="text-white">{selectedProfile.original_port}</strong>.</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )
                 ) : (
                   <div className="p-3 rounded-xl bg-[#0b101d]/60 border border-slate-800/60 flex items-center justify-between text-xs text-slate-400">
                     <div className="flex items-center gap-2">
@@ -3925,7 +3915,7 @@ export default function App() {
                                   awg_hop_ports: e.target.value,
                                 })
                               }
-                              placeholder="20000:50000"
+                              placeholder="20000:65000"
                               className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
                             />
                           </div>
@@ -4334,7 +4324,7 @@ export default function App() {
                           tls_fragment: proto === "ssh" ? false : true,
                           awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
                           awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/32") : isAwg31 ? (newProfile.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
-                          awg_hop_ports: (isAwg31 || isAwg20) ? (newProfile.awg_hop_ports || "20000:50000") : newProfile.awg_hop_ports,
+                          awg_hop_ports: (isAwg31 || isAwg20) ? (newProfile.awg_hop_ports || "20000:65000") : newProfile.awg_hop_ports,
                           awg_port_probing: (isAwg31 || isAwg20) ? (newProfile.awg_port_probing ?? true) : newProfile.awg_port_probing,
                         });
                       }}
@@ -4484,8 +4474,8 @@ export default function App() {
                         <label className="block text-xs text-slate-400 mb-1">Диапазон авто-подбора портов (Port Hunting)</label>
                         <input
                           type="text"
-                          placeholder="20000:50000"
-                          value={newProfile.awg_hop_ports || "20000:50000"}
+                          placeholder="20000:65000"
+                          value={newProfile.awg_hop_ports || "20000:65000"}
                           onChange={(e) =>
                             setNewProfile({ ...newProfile, awg_hop_ports: e.target.value })
                           }
@@ -4733,8 +4723,8 @@ export default function App() {
                         <label className="block text-xs text-slate-400 mb-1">Диапазон авто-подбора портов (Port Hunting)</label>
                         <input
                           type="text"
-                          placeholder="20000:50000"
-                          value={newProfile.awg_hop_ports || "20000:50000"}
+                          placeholder="20000:65000"
+                          value={newProfile.awg_hop_ports || "20000:65000"}
                           onChange={(e) =>
                             setNewProfile({ ...newProfile, awg_hop_ports: e.target.value })
                           }
@@ -7273,7 +7263,7 @@ export default function App() {
             {/* Bottom Footer Bar */}
             <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800/60 text-[11px] text-slate-400 flex items-center justify-between">
               <div>
-                <span className="font-semibold text-slate-300">NeuroVeil VPN v1.0.3 (Build 1051)</span> — Next-Gen High-Speed VPN Client
+                <span className="font-semibold text-slate-300">NeuroVeil VPN v1.0.4 (Build 1052)</span> — Next-Gen High-Speed VPN Client
               </div>
               <div className="text-slate-500 font-mono text-[10px]">
                 Port: 8443 (Hy2) • 9443 (TUIC) • Динамический UDP (Amnezia 3.1) • Tray & Autostart Active
@@ -7298,7 +7288,7 @@ export default function App() {
                 </p>
               </div>
               <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                Версия: 1.0.3 build 1051
+                Версия: 1.0.4 build 1052
               </span>
             </div>
 
@@ -7542,7 +7532,7 @@ export default function App() {
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-bold text-white">
-                      NeuroVeil VPN v1.0.3 (Build 1051)
+                      NeuroVeil VPN v1.0.4 (Build 1052)
                     </span>
                     <button
                       type="button"
@@ -7819,7 +7809,7 @@ export default function App() {
                           <input
                             type="text"
                             value={editForm.awg_hop_ports || ""}
-                            placeholder="20000:50000"
+                            placeholder="20000:65000"
                             onChange={(e) => setEditForm({ ...editForm, awg_hop_ports: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
@@ -8082,7 +8072,7 @@ export default function App() {
                           <input
                             type="text"
                             value={editForm.awg_hop_ports || ""}
-                            placeholder="20000:50000"
+                            placeholder="20000:65000"
                             onChange={(e) => setEditForm({ ...editForm, awg_hop_ports: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
@@ -8223,7 +8213,7 @@ export default function App() {
                           <input
                             type="text"
                             value={editForm.hop_ports || ""}
-                            placeholder="20000:50000"
+                            placeholder="20000:65000"
                             onChange={(e) => setEditForm({ ...editForm, hop_ports: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />

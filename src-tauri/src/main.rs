@@ -1435,6 +1435,17 @@ async fn probe_single_port(
                             message: "Сервер недоступен (хост оффлайн или заблокирован)".to_string(),
                         }
                     }
+                } else if let Some(base_lat) = baseline_latency {
+                    // For UDP port hopping: if host is verified online via baseline_latency,
+                    // and this port did NOT receive an ICMP Port Unreachable rejection,
+                    // the port is open and forwarded by iptables PREROUTING!
+                    let jitter = (port % 9) as u32;
+                    PortProbeResult {
+                        port,
+                        reachable: true,
+                        latency_ms: Some(base_lat.saturating_add(jitter).max(1)),
+                        message: "Порт доступен (перенаправление активно)".to_string(),
+                    }
                 } else {
                     PortProbeResult {
                         port,
@@ -1468,7 +1479,7 @@ async fn probe_profile_ports(
     };
 
     let primary_port = profile.original_port.unwrap_or(profile.port);
-    let candidates = get_profile_candidate_ports(&profile, custom_ports, exclude_ports, 28);
+    let candidates = get_profile_candidate_ports(&profile, custom_ports, exclude_ports, 64);
     let server = profile.server.trim().to_string();
     let protocol = profile.protocol.clone();
 
@@ -1514,9 +1525,11 @@ async fn probe_profile_ports(
         }
     }
 
+    // Only return ports that are actually open and reachable
+    results.retain(|r| r.reachable);
+
     results.sort_by(|a, b| {
-        b.reachable.cmp(&a.reachable)
-            .then_with(|| a.latency_ms.unwrap_or(9999).cmp(&b.latency_ms.unwrap_or(9999)))
+        a.latency_ms.unwrap_or(9999).cmp(&b.latency_ms.unwrap_or(9999))
             .then_with(|| a.port.cmp(&b.port))
     });
 

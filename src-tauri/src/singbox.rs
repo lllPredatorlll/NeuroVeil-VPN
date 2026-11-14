@@ -817,14 +817,14 @@ pub fn get_profile_candidate_ports(
 
     // Default range for UDP protocols (AmneziaWG / Hysteria2 NAT range configured on VPS)
     if ranges.is_empty() && is_udp {
-        ranges.push((20000, 50000));
+        ranges.push((20000, 65000));
     }
 
     // 3. Pool of well-known standard ports
     let defaults: &[u16] = if is_udp {
         &[
             53, 443, 8443, 1194, 51820, 123, 500, 4500, 5060, 5061, 8080, 993, 995, 3478, 3479,
-            20000, 22000, 25000, 28000, 30000, 32000, 35000, 38000, 40000, 42000, 45000, 48000, 50000,
+            20000, 25000, 30000, 35000, 40000, 45000, 50000, 55000, 60000, 65000,
         ]
     } else {
         &[
@@ -845,7 +845,27 @@ pub fn get_profile_candidate_ports(
         }
     }
 
-    // 4. If we still need more ports, randomly generate new ones from the available ranges
+    // 4. Sample ports systematically across the entire range to guarantee full coverage from min to max
+    if !ranges.is_empty() {
+        for &(min_r, max_r) in &ranges {
+            let span = max_r.saturating_sub(min_r);
+            if span > 0 {
+                let steps = (target_count / 2).max(10) as u32;
+                let step_size = (span as u32 / steps).max(1);
+                for i in 0..=steps {
+                    let p = (min_r as u32 + i * step_size).min(max_r as u32) as u16;
+                    if p > 0 && !ports.contains(&p) && !excluded.contains(&p) {
+                        ports.push(p);
+                    }
+                    if ports.len() >= target_count {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Fill remaining slots with random selections across the available ranges
     if !ranges.is_empty() {
         let mut attempts = 0;
         let mut range_idx = 0;
@@ -860,7 +880,7 @@ pub fn get_profile_candidate_ports(
         }
     }
 
-    // 5. Fallback if the range was fully exhausted: allow repeating from range without excluded check
+    // 6. Fallback if the range was fully exhausted: allow repeating from range without excluded check
     if ports.len() < target_count && !ranges.is_empty() {
         let mut attempts = 0;
         let mut range_idx = 0;
@@ -875,7 +895,7 @@ pub fn get_profile_candidate_ports(
         }
     }
 
-    // 6. If TCP and still not enough, generate random high ports in 10000..60000
+    // 7. If TCP and still not enough, generate random high ports in 10000..60000
     if ports.len() < target_count && !is_udp {
         let mut attempts = 0;
         while ports.len() < target_count && attempts < 500 {
@@ -891,7 +911,7 @@ pub fn get_profile_candidate_ports(
 }
 
 pub fn get_awg_candidate_ports(profile: &VpnProfile) -> Vec<u16> {
-    get_profile_candidate_ports(profile, None, None, 28)
+    get_profile_candidate_ports(profile, None, None, 40)
 }
 
 pub fn generate_singbox_config(
@@ -1097,7 +1117,10 @@ pub fn generate_singbox_config_internal(
             "mtu": 1400,
             "auto_route": true,
             "strict_route": routing.kill_switch,
-            "stack": "gvisor"
+            "stack": "mixed",
+            "endpoint_independent_nat": true,
+            "udp_mapping": "endpoint_independent",
+            "udp_filtering": "endpoint_independent"
         });
         if profile.server.parse::<std::net::Ipv4Addr>().is_ok() {
             tun_obj["route_exclude_address"] = json!([format!("{}/32", profile.server)]);
@@ -1115,7 +1138,7 @@ pub fn generate_singbox_config_internal(
         }),
         json!({
             "action": "sniff",
-            "timeout": "50ms"
+            "timeout": "300ms"
         }),
         json!({
             "protocol": "dns",
@@ -1386,7 +1409,8 @@ pub fn generate_singbox_config_internal(
             ],
             "rules": dns_rules,
             "final": final_dns,
-            "strategy": "ipv4_only"
+            "strategy": "ipv4_only",
+            "reverse_mapping": true
         },
         "inbounds": inbounds,
         "outbounds": outbounds,
@@ -1431,6 +1455,9 @@ pub fn generate_mobile_singbox_config(profile: &VpnProfile, routing: &RoutingCon
             tun_map.insert("auto_route".to_string(), json!(true));
             tun_map.insert("strict_route".to_string(), json!(false));
             tun_map.insert("stack".to_string(), json!("mixed"));
+            tun_map.insert("endpoint_independent_nat".to_string(), json!(true));
+            tun_map.insert("udp_mapping".to_string(), json!("endpoint_independent"));
+            tun_map.insert("udp_filtering".to_string(), json!("endpoint_independent"));
             if profile.server.parse::<std::net::Ipv4Addr>().is_ok() {
                 tun_map.insert(
                     "route_exclude_address".to_string(),
@@ -1875,7 +1902,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
                             password: priv_key.clone(),
                             uuid: None,
                             obfs_password: None,
-                            hop_ports: Some("20000:50000".to_string()),
+                            hop_ports: Some("20000:65000".to_string()),
                             awg_private_key: Some(priv_key),
                             awg_public_key: pub_key,
                             awg_preshared_key: psk,
@@ -1891,7 +1918,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
                             awg_h2: h2.or_else(|| Some("2".to_string())),
                             awg_h3: h3.or_else(|| Some("3".to_string())),
                             awg_h4: h4.or_else(|| Some("4".to_string())),
-                            awg_hop_ports: Some("20000:50000".to_string()),
+                            awg_hop_ports: Some("20000:65000".to_string()),
                             awg_port_probing: Some(true),
                             up_mbps: 100,
                             down_mbps: 100,
@@ -2284,7 +2311,7 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let mut i2 = None;
     let mut i3 = None;
     let mut i4 = None;
-    let mut hop_ports = Some("20000:50000".to_string());
+    let mut hop_ports = Some("20000:65000".to_string());
     let mut header_protection_key = None;
     let mut rekey_after_time = None;
     let mut rekey_timeout = None;
@@ -2521,7 +2548,7 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
         password: priv_key.clone(),
         uuid: None,
         obfs_password: None,
-        hop_ports: Some("20000:50000".to_string()),
+        hop_ports: Some("20000:65000".to_string()),
         hop_interval: None,
         reality_public_key: None,
         reality_short_id: None,
@@ -2558,7 +2585,7 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
         awg_i2: i2,
         awg_i3: i3,
         awg_i4: i4,
-        awg_hop_ports: Some("20000:50000".to_string()),
+        awg_hop_ports: Some("20000:65000".to_string()),
         awg_port_probing: Some(true),
         up_mbps: 100,
         down_mbps: 100,
