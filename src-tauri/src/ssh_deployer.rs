@@ -242,7 +242,7 @@ async fn connect_ssh_endpoint_single(
             .first()
             .ok_or_else(|| format!("Не найден IP-адрес для {}", addr_str))?;
 
-        let s = tokio::time::timeout(Duration::from_secs(6), TcpStream::connect(addr))
+        let s = tokio::time::timeout(Duration::from_secs(12), TcpStream::connect(addr))
             .await
             .map_err(|_| {
                 format!(
@@ -269,13 +269,13 @@ async fn connect_ssh_endpoint_single(
     });
 
     let mut session = tokio::time::timeout(
-        Duration::from_secs(12),
+        Duration::from_secs(25),
         client::connect_stream(config, tcp_stream, SshClientHandler),
     )
     .await
     .map_err(|_| {
         format!(
-            "Таймаут SSH-рукопожатия с {}:{} (сервер не ответил вовремя).",
+            "Таймаут SSH-рукопожатия с {}:{} (сервер не ответил вовремя). Проверьте доступность SSH или используйте VNC-консоль хостинга.",
             clean_host, port
         )
     })?
@@ -525,14 +525,29 @@ pub async fn test_ssh_connection(app: &AppHandle, creds: &VpsCredentials) -> Res
 }
 
 pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<DeployResult, String> {
-    if !creds.deploy_vless && !creds.deploy_hy2 && !creds.deploy_tuic && !creds.deploy_ss && !creds.deploy_awg && !creds.deploy_ssh {
-        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Amnezia 3.1 или SSH Tunnel)".to_string());
+    let any_proto = creds.deploy_vless
+        || creds.deploy_hy2
+        || creds.deploy_tuic
+        || creds.deploy_ss
+        || creds.deploy_awg
+        || creds.deploy_awg2
+        || creds.deploy_ssh
+        || creds.deploy_shadowtls
+        || creds.deploy_vless_ws
+        || creds.deploy_webrtc;
+
+    if !any_proto {
+        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Amnezia 3.1, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH Tunnel)".to_string());
     }
 
     let mut creds = creds.clone();
     if creds.deploy_awg && (creds.awg_port == 0 || creds.awg_port == 51820) {
         creds.awg_port = random_u32_in_range(20000, 55000) as u16;
         emit_log(app, &format!("Авто-рандомизация: выбран порт Amnezia 3.1 UDP {}", creds.awg_port));
+    }
+    if creds.deploy_awg2 && (creds.awg2_port == 0 || creds.awg2_port == 51821 || creds.awg2_port == 51820) {
+        creds.awg2_port = random_u32_in_range(20000, 55000) as u16;
+        emit_log(app, &format!("Авто-рандомизация: выбран порт AmneziaWG 2.0 UDP {}", creds.awg2_port));
     }
 
     let ssh_port = if creds.ssh_port == 0 { 22 } else { creds.ssh_port };
@@ -905,7 +920,88 @@ chmod 600 /etc/sing-box/awg.json
         )
     };
 
-    if creds.deploy_hy2 || creds.deploy_tuic {
+    let (
+        awg2_server_priv,
+        awg2_server_pub,
+        awg2_client_priv,
+        awg2_client_pub,
+        awg2_psk,
+    ) = if creds.deploy_awg2 {
+        emit_log(app, "Шаг 3/6: Генерация ключей для AmneziaWG 2.0 (чистый WireGuard)...");
+        let (k1_code, k1_out) = run_remote_cmd(&sess, "/usr/local/bin/sing-box generate wg-keypair").await?;
+        if k1_code != 0 {
+            return Err(format!("Ошибка генерации ключей WireGuard (сервер AmneziaWG 2.0): {}", k1_out));
+        }
+        let mut s_priv = String::new();
+        let mut s_pub = String::new();
+        for line in k1_out.lines() {
+            let l = line.trim();
+            if l.starts_with("PrivateKey:") {
+                s_priv = l.trim_start_matches("PrivateKey:").trim().to_string();
+            } else if l.starts_with("PublicKey:") {
+                s_pub = l.trim_start_matches("PublicKey:").trim().to_string();
+            }
+        }
+
+        let (k2_code, k2_out) = run_remote_cmd(&sess, "/usr/local/bin/sing-box generate wg-keypair").await?;
+        if k2_code != 0 {
+            return Err(format!("Ошибка генерации ключей WireGuard (клиент AmneziaWG 2.0): {}", k2_out));
+        }
+        let mut c_priv = String::new();
+        let mut c_pub = String::new();
+        for line in k2_out.lines() {
+            let l = line.trim();
+            if l.starts_with("PrivateKey:") {
+                c_priv = l.trim_start_matches("PrivateKey:").trim().to_string();
+            } else if l.starts_with("PublicKey:") {
+                c_pub = l.trim_start_matches("PublicKey:").trim().to_string();
+            }
+        }
+
+        let psk = generate_random_base64_32();
+
+        let awg2_save_cmd = format!(
+            r#"cat << 'EOF_AWG2' > /etc/sing-box/awg2.json
+{{
+  "server_private_key": "{s_priv}",
+  "server_public_key": "{s_pub}",
+  "client_private_key": "{c_priv}",
+  "client_public_key": "{c_pub}",
+  "preshared_key": "{psk}",
+  "port": {p},
+  "devices": [
+    {{
+      "name": "default",
+      "client_private_key": "{c_priv}",
+      "client_public_key": "{c_pub}",
+      "preshared_key": "{psk}",
+      "ip": "10.8.1.2/32"
+    }}
+  ]
+}}
+EOF_AWG2
+chmod 600 /etc/sing-box/awg2.json
+"#,
+            s_priv = s_priv,
+            s_pub = s_pub,
+            c_priv = c_priv,
+            c_pub = c_pub,
+            psk = psk,
+            p = creds.awg2_port,
+        );
+        let _ = run_remote_cmd(&sess, &awg2_save_cmd).await?;
+        (s_priv, s_pub, c_priv, c_pub, psk)
+    } else {
+        (
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        )
+    };
+
+    if creds.deploy_hy2 || creds.deploy_tuic || creds.deploy_webrtc || creds.deploy_vless_ws {
         emit_log(
             app,
             &format!(
@@ -1116,24 +1212,131 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         ));
     }
 
-    if creds.deploy_ss {
+    if creds.deploy_ss || creds.deploy_shadowtls {
         let ss_in = json!({
             "type": "shadowsocks",
             "tag": "ss-in",
             "listen": "::",
             "listen_port": creds.ss_port,
             "method": creds.ss_method,
-            "password": ss_password
+            "password": ss_password.clone(),
+            "multiplex": {
+                "enabled": true
+            }
         });
         inbounds.push(ss_in);
+        if creds.deploy_ss {
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = creds.ss_port
+            ));
+        }
+    }
+
+    let shadowtls_pass = Uuid::new_v4().simple().to_string();
+    if creds.deploy_shadowtls {
+        let st_sni = if creds.shadowtls_sni.trim().is_empty() {
+            "www.microsoft.com".to_string()
+        } else {
+            creds.shadowtls_sni.trim().to_string()
+        };
+        // ShadowTLS v3 inbound that accepts connections, validates HMAC via handshake decoy, and forwards to ss-in
+        let st_in = json!({
+            "type": "shadowtls",
+            "tag": "shadowtls-in",
+            "listen": "::",
+            "listen_port": creds.shadowtls_port,
+            "version": 3,
+            "users": [
+                {
+                    "name": "neuroveil-user",
+                    "password": shadowtls_pass
+                }
+            ],
+            "handshake": {
+                "server": st_sni,
+                "server_port": 443
+            },
+            "detour": "ss-in"
+        });
+        inbounds.push(st_in);
         fw_rules.push_str(&format!(
-            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
-             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; fi\n\
              iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
-            p = creds.ss_port
+             iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+            p = creds.shadowtls_port
+        ));
+    }
+
+    if creds.deploy_vless_ws {
+        let vless_ws_in = json!({
+            "type": "vless",
+            "tag": "vless-ws-in",
+            "listen": "::",
+            "listen_port": creds.vless_ws_port,
+            "users": [
+                {
+                    "name": "neuroveil-ws-user",
+                    "uuid": vless_uuid.clone()
+                }
+            ],
+            "transport": {
+                "type": "ws",
+                "path": "/neuroveil-ws"
+            },
+            "tls": {
+                "enabled": true,
+                "server_name": sni.clone(),
+                "certificate_path": "/etc/sing-box/cert.pem",
+                "key_path": "/etc/sing-box/key.pem"
+            }
+        });
+        inbounds.push(vless_ws_in);
+        fw_rules.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; fi\n\
+             iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+            p = creds.vless_ws_port
+        ));
+    }
+
+    if creds.deploy_webrtc {
+        let webrtc_in = json!({
+            "type": "vless",
+            "tag": "webrtc-in",
+            "listen": "::",
+            "listen_port": creds.webrtc_port,
+            "users": [
+                {
+                    "name": "neuroveil-webrtc-user",
+                    "uuid": vless_uuid.clone()
+                }
+            ],
+            "transport": {
+                "type": "grpc",
+                "service_name": "neuroveil-webrtc"
+            },
+            "tls": {
+                "enabled": true,
+                "server_name": sni.clone(),
+                "certificate_path": "/etc/sing-box/cert.pem",
+                "key_path": "/etc/sing-box/key.pem"
+            }
+        });
+        inbounds.push(webrtc_in);
+        fw_rules.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; fi\n\
+             iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+            p = creds.webrtc_port
         ));
     }
 
@@ -1188,14 +1391,71 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         fw_rules.push_str(&format!(
             "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; ufw allow 20000:65000/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
              if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port=20000-65000/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
-             iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -I INPUT -p udp --dport 20000:65000 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -D INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -D OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C INPUT -p udp --dport 20000:65000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 20000:65000 -j ACCEPT >/dev/null 2>&1 || true\n\
              iptables -t nat -A PREROUTING -p udp --dport 20000:65000 -j REDIRECT --to-ports {p} >/dev/null 2>&1 || true\n\
-             iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -I FORWARD -d 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
-             iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE >/dev/null 2>&1 || true\n",
+             iptables -C FORWARD -s 10.8.0.0/24 -j ACCEPT 2>/dev/null || iptables -I FORWARD -s 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -d 10.8.0.0/24 -j ACCEPT 2>/dev/null || iptables -I FORWARD -d 10.8.0.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -j MASQUERADE >/dev/null 2>&1 || true\n",
             p = creds.awg_port
+        ));
+    }
+
+    if creds.deploy_awg2 {
+        let awg2_ep = json!({
+            "type": "wireguard",
+            "tag": "awg2-in",
+            "listen_port": creds.awg2_port,
+            "address": ["10.8.1.1/24"],
+            "private_key": awg2_server_priv,
+            "mtu": 1420,
+            "peers": [
+                {
+                    "public_key": awg2_client_pub,
+                    "pre_shared_key": awg2_psk,
+                    "allowed_ips": ["10.8.1.2/32"]
+                }
+            ]
+        });
+        endpoints.push(awg2_ep);
+
+        route_rules.push(json!({
+            "inbound": ["awg2-in"],
+            "outbound": "direct"
+        }));
+        route_rules.push(json!({
+            "source_ip_cidr": ["10.8.1.0/24"],
+            "outbound": "direct"
+        }));
+
+        fw_rules.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
+             iptables -D INPUT -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -D OUTPUT -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -s 10.8.1.0/24 -j ACCEPT 2>/dev/null || iptables -I FORWARD -s 10.8.1.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -d 10.8.1.0/24 -j ACCEPT 2>/dev/null || iptables -I FORWARD -d 10.8.1.0/24 -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -C POSTROUTING -s 10.8.1.0/24 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -j MASQUERADE >/dev/null 2>&1 || true\n",
+            p = creds.awg2_port
+        ));
+    }
+
+    // Exempt every dedicated active UDP service port from 20000:65000 port-hopping REDIRECTs
+    let mut active_udp_ports: Vec<u16> = Vec::new();
+    if creds.deploy_hy2 && creds.hy2_port > 0 { active_udp_ports.push(creds.hy2_port); }
+    if creds.deploy_tuic && creds.tuic_port > 0 { active_udp_ports.push(creds.tuic_port); }
+    if creds.deploy_ss && creds.ss_port > 0 { active_udp_ports.push(creds.ss_port); }
+    if creds.deploy_awg && creds.awg_port > 0 { active_udp_ports.push(creds.awg_port); }
+    if creds.deploy_awg2 && creds.awg2_port > 0 { active_udp_ports.push(creds.awg2_port); }
+    for udp_p in active_udp_ports {
+        fw_rules.push_str(&format!(
+            "iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n",
+            p = udp_p
         ));
     }
 
@@ -1247,6 +1507,9 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF_SVC
 
+# Remove stale PREROUTING UDP REDIRECT / RETURN rules from previous deployments
+iptables -t nat -S PREROUTING 2>/dev/null | grep -E -- '(--dport 20000:65000|--dport 53 ).*-j REDIRECT|-p udp .*-j RETURN' | sed 's/^-A /iptables -t nat -D /' | sh >/dev/null 2>&1 || true
+
 if command -v ufw >/dev/null 2>&1; then
     ufw allow 22/tcp >/dev/null 2>&1 || true
     if [ "{port}" != "22" ] && [ -n "{port}" ]; then ufw allow {port}/tcp >/dev/null 2>&1 || true; fi
@@ -1255,6 +1518,15 @@ iptables -I INPUT -p tcp --dport 22 -j ACCEPT >/dev/null 2>&1 || true
 if [ "{port}" != "22" ] && [ -n "{port}" ]; then iptables -I INPUT -p tcp --dport {port} -j ACCEPT >/dev/null 2>&1 || true; fi
 
 {fw_rules}
+
+if command -v firewall-cmd >/dev/null 2>&1; then
+    firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+fi
+mkdir -p /etc/iptables
+iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
 
 rm -f /etc/systemd/system/neuroveil-iptables.service
 systemctl daemon-reload >/dev/null 2>&1 || true
@@ -1284,6 +1556,12 @@ systemctl is-active sing-box
             svc_out, journal
         ));
     }
+    if let Ok((_, sock_out)) = run_remote_cmd(&sess, "ss -lunp 2>/dev/null | grep sing-box || netstat -lunp 2>/dev/null | grep sing-box || true").await {
+        let trimmed_socks = sock_out.trim();
+        if !trimmed_socks.is_empty() {
+            emit_log(app, &format!("Открытые UDP-сокеты sing-box на сервере:\n{}", trimmed_socks));
+        }
+    }
     let _ = sess
         .disconnect(russh::Disconnect::ByApplication, "deploy completed", "en")
         .await;
@@ -1308,7 +1586,7 @@ systemctl is-active sing-box
             sni: reality_sni,
             insecure: false,
             password: vless_uuid.clone(),
-            uuid: Some(vless_uuid),
+            uuid: Some(vless_uuid.clone()),
             up_mbps: 100,
             down_mbps: 100,
             reality_public_key: Some(vless_pub),
@@ -1359,7 +1637,7 @@ systemctl is-active sing-box
             protocol: "tuic".to_string(),
             server: connect_host.clone(),
             port: creds.tuic_port,
-            sni,
+            sni: sni.clone(),
             insecure: true,
             password: tuic_password,
             uuid: Some(tuic_uuid),
@@ -1381,7 +1659,7 @@ systemctl is-active sing-box
             server: connect_host.clone(),
             port: creds.ss_port,
             insecure: false,
-            password: ss_password,
+            password: ss_password.clone(),
             up_mbps: 100,
             down_mbps: 100,
             ss_method: Some(creds.ss_method.clone()),
@@ -1436,13 +1714,37 @@ systemctl is-active sing-box
         created_profiles.push(awg_profile);
     }
 
+    if creds.deploy_awg2 {
+        let awg2_name = format!("AmneziaWG 2.0 ({})", creds.host.trim());
+        let mut awg2_profile = VpnProfile {
+            id: Uuid::new_v4().to_string(),
+            name: awg2_name,
+            protocol: "awg2".to_string(),
+            server: connect_host.clone(),
+            port: creds.awg2_port,
+            password: awg2_client_priv.clone(),
+            awg_private_key: Some(awg2_client_priv),
+            awg_public_key: Some(awg2_server_pub),
+            awg_preshared_key: Some(awg2_psk),
+            awg_local_address: Some("10.8.1.2/24".to_string()),
+            awg_version: Some("2.0".to_string()),
+            awg_port_probing: Some(false),
+            up_mbps: 100,
+            down_mbps: 100,
+            pinned_on_pc: Some(true),
+            ..Default::default()
+        };
+        awg2_profile.uri = build_profile_uri(&awg2_profile);
+        created_profiles.push(awg2_profile);
+    }
+
     if creds.deploy_ssh {
         let ssh_name = format!("SSH Tunnel ({}:{})", creds.host.trim(), ssh_port);
         let mut ssh_profile = VpnProfile {
             id: Uuid::new_v4().to_string(),
             name: ssh_name,
             protocol: "ssh".to_string(),
-            server: connect_host,
+            server: connect_host.clone(),
             port: ssh_port,
             sni: if creds.username.trim().is_empty() {
                 "root".to_string()
@@ -1459,6 +1761,77 @@ systemctl is-active sing-box
         };
         ssh_profile.uri = build_profile_uri(&ssh_profile);
         created_profiles.push(ssh_profile);
+    }
+
+    if creds.deploy_shadowtls {
+        let st_name = format!("ShadowTLS v3 ({})", creds.host.trim());
+        let st_sni = if creds.shadowtls_sni.trim().is_empty() {
+            "www.microsoft.com".to_string()
+        } else {
+            creds.shadowtls_sni.trim().to_string()
+        };
+        let mut st_profile = VpnProfile {
+            id: Uuid::new_v4().to_string(),
+            name: st_name,
+            protocol: "shadowtls".to_string(),
+            server: connect_host.clone(),
+            port: creds.shadowtls_port,
+            password: ss_password.clone(),
+            shadowtls_password: Some(shadowtls_pass),
+            shadowtls_sni: Some(st_sni),
+            ss_method: Some(creds.ss_method.clone()),
+            up_mbps: 100,
+            down_mbps: 100,
+            tls_fragment: Some(false),
+            pinned_on_pc: Some(true),
+            ..Default::default()
+        };
+        st_profile.uri = build_profile_uri(&st_profile);
+        created_profiles.push(st_profile);
+    }
+
+    if creds.deploy_vless_ws {
+        let cdn_name = format!("Cloudflare CDN WS ({})", creds.host.trim());
+        let cdn_host = creds.cdn_domain.clone().unwrap_or_else(|| connect_host.clone());
+        let mut cdn_profile = VpnProfile {
+            id: Uuid::new_v4().to_string(),
+            name: cdn_name,
+            protocol: "vless_ws".to_string(),
+            server: connect_host.clone(),
+            port: creds.vless_ws_port,
+            uuid: Some(vless_uuid.clone()),
+            password: vless_uuid.clone(),
+            ws_path: Some("/neuroveil-ws".to_string()),
+            cdn_host: Some(cdn_host),
+            sni: sni.clone(),
+            up_mbps: 100,
+            down_mbps: 100,
+            pinned_on_pc: Some(true),
+            ..Default::default()
+        };
+        cdn_profile.uri = build_profile_uri(&cdn_profile);
+        created_profiles.push(cdn_profile);
+    }
+
+    if creds.deploy_webrtc {
+        let webrtc_name = format!("WebRTC Steganography ({})", creds.host.trim());
+        let mut webrtc_profile = VpnProfile {
+            id: Uuid::new_v4().to_string(),
+            name: webrtc_name,
+            protocol: "webrtc".to_string(),
+            server: connect_host.clone(),
+            port: creds.webrtc_port,
+            uuid: Some(vless_uuid.clone()),
+            password: vless_uuid.clone(),
+            ws_path: Some("neuroveil-webrtc".to_string()),
+            sni: sni.clone(),
+            up_mbps: 100,
+            down_mbps: 100,
+            pinned_on_pc: Some(true),
+            ..Default::default()
+        };
+        webrtc_profile.uri = build_profile_uri(&webrtc_profile);
+        created_profiles.push(webrtc_profile);
     }
 
     emit_log(
@@ -1719,58 +2092,84 @@ systemctl is-active sing-box
         let prof_name = device_name.trim().to_string();
 
         let server_pub = awg_json["server_public_key"].as_str().unwrap_or("").to_string();
-        let hop_ports = awg_json["hop_ports"].as_str().unwrap_or("20000:65000").to_string();
-        let hpk = awg_json["header_protection_key"].as_str().map(|s| s.to_string());
-        let jc = awg_json["jc"].as_u64().map(|v| v as u16).or(Some(4));
-        let jmin = awg_json["jmin"].as_u64().map(|v| v as u16).or(Some(40));
-        let jmax = awg_json["jmax"].as_u64().map(|v| v as u16).or(Some(70));
-        let s1 = awg_json["s1"].as_u64().map(|v| v as u16).or(Some(15));
-        let s2 = awg_json["s2"].as_u64().map(|v| v as u16).or(Some(25));
-        let s3 = awg_json["s3"].as_u64().map(|v| v as u16);
-        let s4 = awg_json["s4"].as_u64().map(|v| v as u16);
-        let h1 = awg_json["h1"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h1"].as_u64().map(|u| u.to_string())).or(Some("1".to_string()));
-        let h2 = awg_json["h2"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h2"].as_u64().map(|u| u.to_string())).or(Some("2".to_string()));
-        let h3 = awg_json["h3"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h3"].as_u64().map(|u| u.to_string())).or(Some("3".to_string()));
-        let h4 = awg_json["h4"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h4"].as_u64().map(|u| u.to_string())).or(Some("4".to_string()));
+        let client_addr = if is_awg2 {
+            peer_ip.replace("/32", "/24")
+        } else {
+            peer_ip.clone()
+        };
+        let mut awg_profile = if is_awg2 {
+            VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name: prof_name,
+                protocol: protocol.to_string(),
+                server: connect_host,
+                port,
+                password: dev_priv.clone(),
+                awg_private_key: Some(dev_priv),
+                awg_public_key: Some(server_pub),
+                awg_preshared_key: psk,
+                awg_local_address: Some(client_addr),
+                awg_version: Some("2.0".to_string()),
+                awg_port_probing: Some(false),
+                up_mbps: 100,
+                down_mbps: 100,
+                pinned_on_pc: Some(false),
+                ..Default::default()
+            }
+        } else {
+            let hop_ports = awg_json["hop_ports"].as_str().unwrap_or("20000:65000").to_string();
+            let hpk = awg_json["header_protection_key"].as_str().map(|s| s.to_string());
+            let jc = awg_json["jc"].as_u64().map(|v| v as u16).or(Some(4));
+            let jmin = awg_json["jmin"].as_u64().map(|v| v as u16).or(Some(40));
+            let jmax = awg_json["jmax"].as_u64().map(|v| v as u16).or(Some(70));
+            let s1 = awg_json["s1"].as_u64().map(|v| v as u16).or(Some(15));
+            let s2 = awg_json["s2"].as_u64().map(|v| v as u16).or(Some(25));
+            let s3 = awg_json["s3"].as_u64().map(|v| v as u16);
+            let s4 = awg_json["s4"].as_u64().map(|v| v as u16);
+            let h1 = awg_json["h1"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h1"].as_u64().map(|u| u.to_string())).or(Some("1".to_string()));
+            let h2 = awg_json["h2"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h2"].as_u64().map(|u| u.to_string())).or(Some("2".to_string()));
+            let h3 = awg_json["h3"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h3"].as_u64().map(|u| u.to_string())).or(Some("3".to_string()));
+            let h4 = awg_json["h4"].as_str().map(|s| s.to_string()).or_else(|| awg_json["h4"].as_u64().map(|u| u.to_string())).or(Some("4".to_string()));
 
-        let mut awg_profile = VpnProfile {
-            id: Uuid::new_v4().to_string(),
-            name: prof_name,
-            protocol: protocol.to_string(),
-            server: connect_host,
-            port,
-            password: dev_priv.clone(),
-            awg_private_key: Some(dev_priv),
-            awg_public_key: Some(server_pub),
-            awg_preshared_key: psk,
-            awg_local_address: Some(peer_ip),
-            awg_version: Some(if is_awg2 { "2.0".to_string() } else { "3.1".to_string() }),
-            awg_header_protection_key: hpk,
-            awg_jc: jc,
-            awg_jmin: jmin,
-            awg_jmax: jmax,
-            awg_s1: s1,
-            awg_s2: s2,
-            awg_s3: s3,
-            awg_s4: s4,
-            awg_h1: h1,
-            awg_h2: h2,
-            awg_h3: h3,
-            awg_h4: h4,
-            awg_rekey_after_time: awg_json["rekey_after_time"].as_str().map(|s| s.to_string()),
-            awg_rekey_timeout: awg_json["rekey_timeout"].as_str().map(|s| s.to_string()),
-            awg_reject_after_time: awg_json["reject_after_time"].as_str().map(|s| s.to_string()),
-            awg_keepalive_timeout: awg_json["keepalive_timeout"].as_str().map(|s| s.to_string()),
-            awg_max_handshake_attempts: awg_json["max_handshake_attempts"].as_str().map(|s| s.to_string()),
-            awg_random_trailers: awg_json["random_trailers"].as_bool(),
-            awg_disable_cookies: awg_json["disable_cookies"].as_bool(),
-            awg_persistent_keepalive: awg_json["persistent_keepalive"].as_str().map(|s| s.to_string()),
-            awg_hop_ports: Some(hop_ports),
-            awg_port_probing: Some(true),
-            up_mbps: 100,
-            down_mbps: 100,
-            pinned_on_pc: Some(false),
-            ..Default::default()
+            VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name: prof_name,
+                protocol: protocol.to_string(),
+                server: connect_host,
+                port,
+                password: dev_priv.clone(),
+                awg_private_key: Some(dev_priv),
+                awg_public_key: Some(server_pub),
+                awg_preshared_key: psk,
+                awg_local_address: Some(client_addr),
+                awg_version: Some("3.1".to_string()),
+                awg_header_protection_key: hpk,
+                awg_jc: jc,
+                awg_jmin: jmin,
+                awg_jmax: jmax,
+                awg_s1: s1,
+                awg_s2: s2,
+                awg_s3: s3,
+                awg_s4: s4,
+                awg_h1: h1,
+                awg_h2: h2,
+                awg_h3: h3,
+                awg_h4: h4,
+                awg_rekey_after_time: awg_json["rekey_after_time"].as_str().map(|s| s.to_string()),
+                awg_rekey_timeout: awg_json["rekey_timeout"].as_str().map(|s| s.to_string()),
+                awg_reject_after_time: awg_json["reject_after_time"].as_str().map(|s| s.to_string()),
+                awg_keepalive_timeout: awg_json["keepalive_timeout"].as_str().map(|s| s.to_string()),
+                awg_max_handshake_attempts: awg_json["max_handshake_attempts"].as_str().map(|s| s.to_string()),
+                awg_random_trailers: awg_json["random_trailers"].as_bool(),
+                awg_disable_cookies: awg_json["disable_cookies"].as_bool(),
+                awg_persistent_keepalive: awg_json["persistent_keepalive"].as_str().map(|s| s.to_string()),
+                awg_hop_ports: Some(hop_ports),
+                awg_port_probing: Some(true),
+                up_mbps: 100,
+                down_mbps: 100,
+                pinned_on_pc: Some(false),
+                ..Default::default()
+            }
         };
         awg_profile.uri = build_profile_uri(&awg_profile);
         emit_log(
@@ -2128,7 +2527,7 @@ pub async fn fetch_vps_profiles(
             if ep["type"].as_str() == Some("wireguard") {
                 let tag = ep["tag"].as_str().unwrap_or("");
                 let ep_port = ep["listen_port"].as_u64().unwrap_or(51820) as u16;
-                let is_awg2 = tag == "awg2-in" || ep_port == creds.awg2_port || (awg2_json.is_some() && tag.contains("awg2"));
+                let is_awg2 = tag == "awg2-in" || (creds.awg2_port > 0 && ep_port == creds.awg2_port) || (awg2_json.is_some() && tag.contains("awg2"));
                 let active_json = if is_awg2 { awg2_json.as_ref() } else { awg_json.as_ref() };
                 let proto_str = if is_awg2 { "awg2" } else { "amneziawg" };
                 let proto_ver = if is_awg2 { "2.0" } else { "3.1" };
@@ -2138,19 +2537,19 @@ pub async fn fetch_vps_profiles(
                 let server_pub = active_json.and_then(|j| j["server_public_key"].as_str()).unwrap_or("").to_string();
                 let client_priv = active_json.and_then(|j| j["client_private_key"].as_str()).unwrap_or("").to_string();
                 let psk = active_json.and_then(|j| j["preshared_key"].as_str()).map(|s| s.to_string());
-                let hpk = active_json.and_then(|j| j["header_protection_key"].as_str()).map(|s| s.to_string());
-                let hop_ports = active_json.and_then(|j| j["hop_ports"].as_str()).unwrap_or("20000:65000").to_string();
-                let jc = ep["jc"].as_u64().map(|v| v as u16).or(Some(4));
-                let jmin = ep["jmin"].as_u64().map(|v| v as u16).or(Some(40));
-                let jmax = ep["jmax"].as_u64().map(|v| v as u16).or(Some(70));
-                let s1 = ep["s1"].as_u64().map(|v| v as u16).or(Some(15));
-                let s2 = ep["s2"].as_u64().map(|v| v as u16).or(Some(25));
-                let s3 = ep["s3"].as_u64().map(|v| v as u16);
-                let s4 = ep["s4"].as_u64().map(|v| v as u16);
-                let h1 = ep["h1"].as_str().map(|s| s.to_string()).or_else(|| ep["h1"].as_u64().map(|u| u.to_string()));
-                let h2 = ep["h2"].as_str().map(|s| s.to_string()).or_else(|| ep["h2"].as_u64().map(|u| u.to_string()));
-                let h3 = ep["h3"].as_str().map(|s| s.to_string()).or_else(|| ep["h3"].as_u64().map(|u| u.to_string()));
-                let h4 = ep["h4"].as_str().map(|s| s.to_string()).or_else(|| ep["h4"].as_u64().map(|u| u.to_string()));
+                let hpk = if is_awg2 { None } else { active_json.and_then(|j| j["header_protection_key"].as_str()).map(|s| s.to_string()) };
+                let hop_ports = if is_awg2 { None } else { Some(active_json.and_then(|j| j["hop_ports"].as_str()).unwrap_or("20000:65000").to_string()) };
+                let jc = if is_awg2 { None } else { ep["jc"].as_u64().map(|v| v as u16).or(Some(4)) };
+                let jmin = if is_awg2 { None } else { ep["jmin"].as_u64().map(|v| v as u16).or(Some(40)) };
+                let jmax = if is_awg2 { None } else { ep["jmax"].as_u64().map(|v| v as u16).or(Some(70)) };
+                let s1 = if is_awg2 { None } else { ep["s1"].as_u64().map(|v| v as u16).or(Some(15)) };
+                let s2 = if is_awg2 { None } else { ep["s2"].as_u64().map(|v| v as u16).or(Some(25)) };
+                let s3 = if is_awg2 { None } else { ep["s3"].as_u64().map(|v| v as u16) };
+                let s4 = if is_awg2 { None } else { ep["s4"].as_u64().map(|v| v as u16) };
+                let h1 = if is_awg2 { None } else { ep["h1"].as_str().map(|s| s.to_string()).or_else(|| ep["h1"].as_u64().map(|u| u.to_string())) };
+                let h2 = if is_awg2 { None } else { ep["h2"].as_str().map(|s| s.to_string()).or_else(|| ep["h2"].as_u64().map(|u| u.to_string())) };
+                let h3 = if is_awg2 { None } else { ep["h3"].as_str().map(|s| s.to_string()).or_else(|| ep["h3"].as_u64().map(|u| u.to_string())) };
+                let h4 = if is_awg2 { None } else { ep["h4"].as_str().map(|s| s.to_string()).or_else(|| ep["h4"].as_u64().map(|u| u.to_string())) };
 
                 if let Some(devices) = active_json.and_then(|j| j["devices"].as_array()) {
                     for d in devices {
@@ -2165,7 +2564,8 @@ pub async fn fetch_vps_profiles(
                         if c_priv.trim().is_empty() {
                             continue;
                         }
-                        let peer_addr = d["ip"].as_str().unwrap_or(if is_awg2 { "10.8.1.2/32" } else { "10.8.0.2/32" }).to_string();
+                        let raw_addr = d["ip"].as_str().unwrap_or(if is_awg2 { "10.8.1.2/24" } else { "10.8.0.2/32" });
+                        let peer_addr = if is_awg2 { raw_addr.replace("/32", "/24") } else { raw_addr.to_string() };
                         let peer_psk = d["preshared_key"].as_str().map(|s| s.to_string()).or_else(|| psk.clone());
                         let mut prof = VpnProfile {
                             id: Uuid::new_v4().to_string(),
@@ -2191,16 +2591,16 @@ pub async fn fetch_vps_profiles(
                             awg_h2: h2.clone(),
                             awg_h3: h3.clone(),
                             awg_h4: h4.clone(),
-                            awg_rekey_after_time: active_json.and_then(|j| j["rekey_after_time"].as_str()).map(|s| s.to_string()),
-                            awg_rekey_timeout: active_json.and_then(|j| j["rekey_timeout"].as_str()).map(|s| s.to_string()),
-                            awg_reject_after_time: active_json.and_then(|j| j["reject_after_time"].as_str()).map(|s| s.to_string()),
-                            awg_keepalive_timeout: active_json.and_then(|j| j["keepalive_timeout"].as_str()).map(|s| s.to_string()),
-                            awg_max_handshake_attempts: active_json.and_then(|j| j["max_handshake_attempts"].as_str()).map(|s| s.to_string()),
-                            awg_random_trailers: active_json.and_then(|j| j["random_trailers"].as_bool()),
-                            awg_disable_cookies: active_json.and_then(|j| j["disable_cookies"].as_bool()),
-                            awg_persistent_keepalive: active_json.and_then(|j| j["persistent_keepalive"].as_str()).map(|s| s.to_string()),
-                            awg_hop_ports: Some(hop_ports.clone()),
-                            awg_port_probing: Some(true),
+                            awg_rekey_after_time: if is_awg2 { None } else { active_json.and_then(|j| j["rekey_after_time"].as_str()).map(|s| s.to_string()) },
+                            awg_rekey_timeout: if is_awg2 { None } else { active_json.and_then(|j| j["rekey_timeout"].as_str()).map(|s| s.to_string()) },
+                            awg_reject_after_time: if is_awg2 { None } else { active_json.and_then(|j| j["reject_after_time"].as_str()).map(|s| s.to_string()) },
+                            awg_keepalive_timeout: if is_awg2 { None } else { active_json.and_then(|j| j["keepalive_timeout"].as_str()).map(|s| s.to_string()) },
+                            awg_max_handshake_attempts: if is_awg2 { None } else { active_json.and_then(|j| j["max_handshake_attempts"].as_str()).map(|s| s.to_string()) },
+                            awg_random_trailers: if is_awg2 { None } else { active_json.and_then(|j| j["random_trailers"].as_bool()) },
+                            awg_disable_cookies: if is_awg2 { None } else { active_json.and_then(|j| j["disable_cookies"].as_bool()) },
+                            awg_persistent_keepalive: if is_awg2 { None } else { active_json.and_then(|j| j["persistent_keepalive"].as_str()).map(|s| s.to_string()) },
+                            awg_hop_ports: hop_ports.clone(),
+                            awg_port_probing: Some(!is_awg2),
                             pinned_on_pc: if is_base { Some(true) } else { Some(false) },
                             ..Default::default()
                         };
@@ -2221,8 +2621,9 @@ pub async fn fetch_vps_profiles(
                             } else {
                                 peer_name.to_string()
                             };
-                            let default_ip = if is_awg2 { "10.8.1.2/32" } else { "10.8.0.2/32" };
-                            let peer_addr = p["allowed_ips"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or(default_ip).to_string();
+                            let default_ip = if is_awg2 { "10.8.1.2/24" } else { "10.8.0.2/32" };
+                            let raw_addr = p["allowed_ips"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or(default_ip);
+                            let peer_addr = if is_awg2 { raw_addr.replace("/32", "/24") } else { raw_addr.to_string() };
                             let peer_psk = p["pre_shared_key"].as_str().map(|s| s.to_string()).or_else(|| psk.clone());
                             let mut prof = VpnProfile {
                                 id: Uuid::new_v4().to_string(),
@@ -2248,16 +2649,16 @@ pub async fn fetch_vps_profiles(
                                 awg_h2: h2.clone(),
                                 awg_h3: h3.clone(),
                                 awg_h4: h4.clone(),
-                                awg_rekey_after_time: active_json.and_then(|j| j["rekey_after_time"].as_str()).map(|s| s.to_string()),
-                                awg_rekey_timeout: active_json.and_then(|j| j["rekey_timeout"].as_str()).map(|s| s.to_string()),
-                                awg_reject_after_time: active_json.and_then(|j| j["reject_after_time"].as_str()).map(|s| s.to_string()),
-                                awg_keepalive_timeout: active_json.and_then(|j| j["keepalive_timeout"].as_str()).map(|s| s.to_string()),
-                                awg_max_handshake_attempts: active_json.and_then(|j| j["max_handshake_attempts"].as_str()).map(|s| s.to_string()),
-                                awg_random_trailers: active_json.and_then(|j| j["random_trailers"].as_bool()),
-                                awg_disable_cookies: active_json.and_then(|j| j["disable_cookies"].as_bool()),
-                                awg_persistent_keepalive: active_json.and_then(|j| j["persistent_keepalive"].as_str()).map(|s| s.to_string()),
-                                awg_hop_ports: Some(hop_ports.clone()),
-                                awg_port_probing: Some(true),
+                                awg_rekey_after_time: if is_awg2 { None } else { active_json.and_then(|j| j["rekey_after_time"].as_str()).map(|s| s.to_string()) },
+                                awg_rekey_timeout: if is_awg2 { None } else { active_json.and_then(|j| j["rekey_timeout"].as_str()).map(|s| s.to_string()) },
+                                awg_reject_after_time: if is_awg2 { None } else { active_json.and_then(|j| j["reject_after_time"].as_str()).map(|s| s.to_string()) },
+                                awg_keepalive_timeout: if is_awg2 { None } else { active_json.and_then(|j| j["keepalive_timeout"].as_str()).map(|s| s.to_string()) },
+                                awg_max_handshake_attempts: if is_awg2 { None } else { active_json.and_then(|j| j["max_handshake_attempts"].as_str()).map(|s| s.to_string()) },
+                                awg_random_trailers: if is_awg2 { None } else { active_json.and_then(|j| j["random_trailers"].as_bool()) },
+                                awg_disable_cookies: if is_awg2 { None } else { active_json.and_then(|j| j["disable_cookies"].as_bool()) },
+                                awg_persistent_keepalive: if is_awg2 { None } else { active_json.and_then(|j| j["persistent_keepalive"].as_str()).map(|s| s.to_string()) },
+                                awg_hop_ports: hop_ports.clone(),
+                                awg_port_probing: Some(!is_awg2),
                                 pinned_on_pc: if is_base { Some(true) } else { Some(false) },
                                 ..Default::default()
                             };

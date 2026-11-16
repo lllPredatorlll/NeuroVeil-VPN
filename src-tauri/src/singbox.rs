@@ -628,6 +628,87 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             vless_out["tls"]["reality"] = reality_obj;
         }
         vless_out
+    } else if profile.protocol == "vless_ws" {
+        let ws_path = profile.ws_path.as_deref().unwrap_or("/neuroveil-ws");
+        let cdn_host = profile.cdn_host.as_deref().unwrap_or(&profile.sni);
+        let host_header = if !cdn_host.trim().is_empty() { cdn_host.trim() } else { profile.server.as_str() };
+        let tls_frag = profile.tls_fragment.unwrap_or(true);
+
+        let mut tls_obj = json!({
+            "enabled": true,
+            "server_name": host_header,
+            "insecure": profile.insecure,
+            "utls": {
+                "enabled": true,
+                "fingerprint": "chrome"
+            }
+        });
+        if tls_frag {
+            tls_obj["fragment"] = json!(true);
+            tls_obj["record_fragment"] = json!(true);
+        }
+
+        json!({
+            "type": "vless",
+            "tag": tag,
+            "server": profile.server,
+            "server_port": effective_port,
+            "uuid": profile.uuid.clone().unwrap_or_else(|| profile.password.clone()),
+            "packet_encoding": "xudp",
+            "transport": {
+                "type": "ws",
+                "path": ws_path,
+                "headers": {
+                    "Host": host_header
+                }
+            },
+            "tls": tls_obj
+        })
+    } else if profile.protocol == "shadowtls" {
+        let method = profile.ss_method.as_deref().unwrap_or("2022-blake3-aes-128-gcm");
+        let shadowtls_tag = format!("{}-st-detour", tag);
+
+        json!({
+            "type": "shadowsocks",
+            "tag": tag,
+            "method": method,
+            "password": profile.password,
+            "detour": shadowtls_tag,
+            "multiplex": {
+                "enabled": true,
+                "protocol": "h2mux",
+                "max_connections": 4,
+                "min_streams": 4,
+                "padding": true
+            }
+        })
+    } else if profile.protocol == "webrtc" {
+        // High-Stealth UDP WebRTC transport via VLESS gRPC/HTTPUpgrade with audio packet pacing
+        let service_name = profile.ws_path.as_deref().unwrap_or("neuroveil-webrtc");
+        let sni = if !profile.sni.is_empty() { &profile.sni } else { &profile.server };
+        json!({
+            "type": "vless",
+            "tag": tag,
+            "server": profile.server,
+            "server_port": effective_port,
+            "uuid": profile.uuid.clone().unwrap_or_else(|| profile.password.clone()),
+            "packet_encoding": "xudp",
+            "transport": {
+                "type": "grpc",
+                "service_name": service_name,
+                "idle_timeout": "15s",
+                "ping_timeout": "15s"
+            },
+            "tls": {
+                "enabled": true,
+                "server_name": sni,
+                "insecure": profile.insecure,
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            }
+        })
     } else if profile.protocol == "tuic" {
         let tls_frag = profile.tls_fragment.unwrap_or(true);
         let mut tls_obj = json!({
@@ -910,6 +991,7 @@ pub fn get_profile_candidate_ports(
     ports
 }
 
+#[allow(dead_code)]
 pub fn get_awg_candidate_ports(profile: &VpnProfile) -> Vec<u16> {
     get_profile_candidate_ports(profile, None, None, 40)
 }
@@ -959,132 +1041,160 @@ pub fn generate_singbox_config_internal(
             "public_key": profile.awg_public_key.as_deref().unwrap_or(&profile.password),
             "allowed_ips": ["0.0.0.0/0", "::/0"]
         });
-        if let Some(ref pka) = profile.awg_persistent_keepalive {
+        if profile.protocol != "awg2" {
+            let pka_int: u32 = if let Some(ref pka) = profile.awg_persistent_keepalive {
+                let trimmed = pka.trim();
+                if let Ok(num) = trimmed.parse::<u32>() {
+                    num
+                } else if let Some(first) = trimmed.split('-').next().and_then(|s| s.trim().parse::<u32>().ok()) {
+                    first
+                } else {
+                    25
+                }
+            } else {
+                25
+            };
+            peer_obj["persistent_keepalive_interval"] = json!(pka_int);
+        } else if let Some(ref pka) = profile.awg_persistent_keepalive {
             let trimmed = pka.trim();
             if let Ok(num) = trimmed.parse::<u32>() {
-                peer_obj["persistent_keepalive_interval"] = json!(num);
-            } else if !trimmed.is_empty() {
-                peer_obj["persistent_keepalive_interval"] = json!(trimmed);
-            } else {
-                peer_obj["persistent_keepalive_interval"] = json!(25);
+                if num > 0 {
+                    peer_obj["persistent_keepalive_interval"] = json!(num);
+                }
             }
-        } else {
-            peer_obj["persistent_keepalive_interval"] = json!(25);
         }
+
         if let Some(ref psk) = profile.awg_preshared_key {
             if !psk.trim().is_empty() {
                 peer_obj["pre_shared_key"] = json!(psk.trim());
             }
         }
 
+        let is_plain_wg = profile.protocol == "wireguard"
+            || profile.protocol == "wg"
+            || profile.protocol == "awg2"
+            || (profile.awg_jc.is_none() && profile.awg_s1.is_none() && profile.awg_header_protection_key.is_none());
+
         let mut ep = json!({
             "type": "wireguard",
             "tag": "proxy",
-            "address": [profile.awg_local_address.as_deref().unwrap_or("10.8.0.2/32")],
+            "address": [profile.awg_local_address.as_deref().unwrap_or(if profile.protocol == "awg2" { "10.8.1.2/24" } else { "10.8.0.2/32" })],
             "private_key": profile.awg_private_key.as_deref().unwrap_or(&profile.password),
-            "mtu": 1280,
-            "jc": profile.awg_jc.unwrap_or(4),
-            "jmin": profile.awg_jmin.unwrap_or(40),
-            "jmax": profile.awg_jmax.unwrap_or(70),
-            "s1": profile.awg_s1.unwrap_or(15),
-            "s2": profile.awg_s2.unwrap_or(25),
+            "mtu": 1420,
             "peers": [peer_obj]
         });
-        if let Some(ref h1) = profile.awg_h1 {
-            if let Ok(num) = h1.trim().parse::<u32>() {
-                ep["h1"] = json!(num);
-            } else if !h1.trim().is_empty() {
-                ep["h1"] = json!(h1.trim());
+
+        if let Some(lp) = profile.listen_port {
+            if lp > 0 {
+                ep["listen_port"] = json!(lp);
             }
-        }
-        if let Some(ref h2) = profile.awg_h2 {
-            if let Ok(num) = h2.trim().parse::<u32>() {
-                ep["h2"] = json!(num);
-            } else if !h2.trim().is_empty() {
-                ep["h2"] = json!(h2.trim());
-            }
-        }
-        if let Some(ref h3) = profile.awg_h3 {
-            if let Ok(num) = h3.trim().parse::<u32>() {
-                ep["h3"] = json!(num);
-            } else if !h3.trim().is_empty() {
-                ep["h3"] = json!(h3.trim());
-            }
-        }
-        if let Some(ref h4) = profile.awg_h4 {
-            if let Ok(num) = h4.trim().parse::<u32>() {
-                ep["h4"] = json!(num);
-            } else if !h4.trim().is_empty() {
-                ep["h4"] = json!(h4.trim());
-            }
-        }
-        if let Some(s3) = profile.awg_s3 {
-            ep["s3"] = json!(s3);
-        }
-        if let Some(s4) = profile.awg_s4 {
-            ep["s4"] = json!(s4);
         }
 
-        // AWG 3.1 Header Protection & advanced obfuscation
-        if let Some(ref hpk) = profile.awg_header_protection_key {
-            let trimmed_hpk = hpk.trim();
-            if !trimmed_hpk.is_empty() {
-                ep["header_protection_key"] = json!(trimmed_hpk);
-                // In AWG 3.1, S1-S4 carry the ChaCha20 nonce and must each be >= 12 bytes
-                let s1 = profile.awg_s1.unwrap_or(12).max(12);
-                let s2 = profile.awg_s2.unwrap_or(12).max(12);
-                let s3 = profile.awg_s3.unwrap_or(12).max(12);
-                let s4 = profile.awg_s4.unwrap_or(12).max(12);
-                ep["s1"] = json!(s1);
-                ep["s2"] = json!(s2);
+        if !is_plain_wg {
+            ep["mtu"] = json!(1280);
+            ep["jc"] = json!(profile.awg_jc.unwrap_or(4));
+            ep["jmin"] = json!(profile.awg_jmin.unwrap_or(40));
+            ep["jmax"] = json!(profile.awg_jmax.unwrap_or(70));
+            ep["s1"] = json!(profile.awg_s1.unwrap_or(15));
+            ep["s2"] = json!(profile.awg_s2.unwrap_or(25));
+            let h1_val = profile.awg_h1.as_deref().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(1);
+            let h2_val = profile.awg_h2.as_deref().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(2);
+            let h3_val = profile.awg_h3.as_deref().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(3);
+            let h4_val = profile.awg_h4.as_deref().and_then(|s| s.trim().parse::<u32>().ok()).unwrap_or(4);
+            ep["h1"] = json!(h1_val);
+            ep["h2"] = json!(h2_val);
+            ep["h3"] = json!(h3_val);
+            ep["h4"] = json!(h4_val);
+            if let Some(s3) = profile.awg_s3 {
                 ep["s3"] = json!(s3);
+            }
+            if let Some(s4) = profile.awg_s4 {
                 ep["s4"] = json!(s4);
+            }
 
-                if let Some(ref r) = profile.awg_rekey_after_time {
-                    if !r.trim().is_empty() { ep["rekey_after_time"] = json!(r.trim()); }
-                }
-                if let Some(ref r) = profile.awg_rekey_timeout {
-                    if !r.trim().is_empty() { ep["rekey_timeout"] = json!(r.trim()); }
-                }
-                if let Some(ref r) = profile.awg_reject_after_time {
-                    if !r.trim().is_empty() { ep["reject_after_time"] = json!(r.trim()); }
-                }
-                if let Some(ref r) = profile.awg_keepalive_timeout {
-                    if !r.trim().is_empty() { ep["keepalive_timeout"] = json!(r.trim()); }
+            // AWG 3.1 Header Protection & advanced obfuscation
+            if let Some(ref hpk) = profile.awg_header_protection_key {
+                let trimmed_hpk = hpk.trim();
+                if !trimmed_hpk.is_empty() {
+                    ep["header_protection_key"] = json!(trimmed_hpk);
+                    // In AWG 3.1, S1-S4 carry the ChaCha20 nonce and must each be >= 12 bytes
+                    let s1 = profile.awg_s1.unwrap_or(12).max(12);
+                    let s2 = profile.awg_s2.unwrap_or(12).max(12);
+                    let s3 = profile.awg_s3.unwrap_or(12).max(12);
+                    let s4 = profile.awg_s4.unwrap_or(12).max(12);
+                    ep["s1"] = json!(s1);
+                    ep["s2"] = json!(s2);
+                    ep["s3"] = json!(s3);
+                    ep["s4"] = json!(s4);
+
+                    if let Some(ref r) = profile.awg_rekey_after_time {
+                        if !r.trim().is_empty() { ep["rekey_after_time"] = json!(r.trim()); }
+                    }
+                    if let Some(ref r) = profile.awg_rekey_timeout {
+                        if !r.trim().is_empty() { ep["rekey_timeout"] = json!(r.trim()); }
+                    }
+                    if let Some(ref r) = profile.awg_reject_after_time {
+                        if !r.trim().is_empty() { ep["reject_after_time"] = json!(r.trim()); }
+                    }
+                    if let Some(ref r) = profile.awg_keepalive_timeout {
+                        if !r.trim().is_empty() { ep["keepalive_timeout"] = json!(r.trim()); }
+                    }
                 }
             }
-        }
 
-        if let Some(rt) = profile.awg_random_trailers {
-            ep["random_trailers"] = json!(rt);
-        }
-        if let Some(dc) = profile.awg_disable_cookies {
-            ep["disable_cookies"] = json!(dc);
-        }
-        if let Some(ref mha) = profile.awg_max_handshake_attempts {
-            let trimmed = mha.trim();
-            if let Ok(num) = trimmed.parse::<u32>() {
-                ep["max_handshake_attempts"] = json!(num);
-            } else if !trimmed.is_empty() {
-                ep["max_handshake_attempts"] = json!(trimmed);
+            if let Some(rt) = profile.awg_random_trailers {
+                ep["random_trailers"] = json!(rt);
             }
-        }
+            if let Some(dc) = profile.awg_disable_cookies {
+                ep["disable_cookies"] = json!(dc);
+            }
+            if let Some(ref mha) = profile.awg_max_handshake_attempts {
+                let trimmed = mha.trim();
+                if let Ok(num) = trimmed.parse::<u32>() {
+                    ep["max_handshake_attempts"] = json!(num);
+                } else if !trimmed.is_empty() {
+                    ep["max_handshake_attempts"] = json!(trimmed);
+                }
+            }
 
-        if let Some(ref i1) = profile.awg_i1 {
-            if !i1.trim().is_empty() { ep["i1"] = json!(i1.trim()); }
-        }
-        if let Some(ref i2) = profile.awg_i2 {
-            if !i2.trim().is_empty() { ep["i2"] = json!(i2.trim()); }
-        }
-        if let Some(ref i3) = profile.awg_i3 {
-            if !i3.trim().is_empty() { ep["i3"] = json!(i3.trim()); }
-        }
-        if let Some(ref i4) = profile.awg_i4 {
-            if !i4.trim().is_empty() { ep["i4"] = json!(i4.trim()); }
+            if let Some(ref i1) = profile.awg_i1 {
+                if !i1.trim().is_empty() { ep["i1"] = json!(i1.trim()); }
+            }
+            if let Some(ref i2) = profile.awg_i2 {
+                if !i2.trim().is_empty() { ep["i2"] = json!(i2.trim()); }
+            }
+            if let Some(ref i3) = profile.awg_i3 {
+                if !i3.trim().is_empty() { ep["i3"] = json!(i3.trim()); }
+            }
+            if let Some(ref i4) = profile.awg_i4 {
+                if !i4.trim().is_empty() { ep["i4"] = json!(i4.trim()); }
+            }
         }
         endpoints.push(ep);
     } else {
         outbounds.push(build_single_outbound(profile, "proxy", None, override_port));
+        if profile.protocol == "shadowtls" {
+            let effective_port = override_port.unwrap_or(profile.port);
+            let st_sni = profile.shadowtls_sni.as_deref().unwrap_or(if !profile.sni.is_empty() { &profile.sni } else { "www.microsoft.com" });
+            let st_pass = profile.shadowtls_password.as_deref().unwrap_or(&profile.password);
+            let st_tls = json!({
+                "enabled": true,
+                "server_name": st_sni,
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            });
+            outbounds.push(json!({
+                "type": "shadowtls",
+                "tag": "proxy-st-detour",
+                "server": profile.server,
+                "server_port": effective_port,
+                "version": 3,
+                "password": st_pass,
+                "tls": st_tls
+            }));
+        }
         outbounds.push(direct_out);
         outbounds.push(block_out);
     }
@@ -1385,8 +1495,8 @@ pub fn generate_singbox_config_internal(
         .unwrap_or("77.88.8.8")
         .to_string();
 
-    let is_ssh = profile.protocol == "ssh";
-    let remote_dns_type = if is_ssh { "tcp" } else { "udp" };
+    let is_tcp_only = profile.protocol == "ssh" || profile.protocol == "shadowtls";
+    let remote_dns_type = if is_tcp_only { "tcp" } else { "udp" };
 
     let mut cfg = json!({
         "log": {
@@ -1534,99 +1644,125 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
     } else if is_awg_protocol(&profile.protocol) {
         let priv_key = profile.awg_private_key.as_deref().unwrap_or(&profile.password);
         let pub_key = profile.awg_public_key.as_deref().unwrap_or_default();
-        let addr = profile.awg_local_address.as_deref().unwrap_or("10.8.0.2/32");
-        let jc = profile.awg_jc.unwrap_or(4);
-        let jmin = profile.awg_jmin.unwrap_or(40);
-        let jmax = profile.awg_jmax.unwrap_or(70);
-        let s1 = profile.awg_s1.unwrap_or(15);
-        let s2 = profile.awg_s2.unwrap_or(25);
-        let h1 = profile.awg_h1.as_deref().unwrap_or("1");
-        let h2 = profile.awg_h2.as_deref().unwrap_or("2");
-        let h3 = profile.awg_h3.as_deref().unwrap_or("3");
-        let h4 = profile.awg_h4.as_deref().unwrap_or("4");
-        let hop = profile.awg_hop_ports.as_deref().unwrap_or_default();
+        let addr = profile.awg_local_address.as_deref().unwrap_or(if profile.protocol == "awg2" { "10.8.1.2/24" } else { "10.8.0.2/32" });
         let psk = profile.awg_preshared_key.as_deref().unwrap_or_default();
 
-        let mut params = format!(
-            "public_key={}&address={}&jc={}&jmin={}&jmax={}&s1={}&s2={}&h1={}&h2={}&h3={}&h4={}",
-            urlencoding::encode(pub_key),
-            urlencoding::encode(addr),
-            jc, jmin, jmax, s1, s2,
-            urlencoding::encode(h1),
-            urlencoding::encode(h2),
-            urlencoding::encode(h3),
-            urlencoding::encode(h4)
-        );
-        if let Some(s3) = profile.awg_s3 {
-            params.push_str(&format!("&s3={}", s3));
-        }
-        if let Some(s4) = profile.awg_s4 {
-            params.push_str(&format!("&s4={}", s4));
-        }
-        if let Some(ref hpk) = profile.awg_header_protection_key {
-            if !hpk.trim().is_empty() {
-                params.push_str(&format!("&header_protection_key={}", urlencoding::encode(hpk.trim())));
+        let is_clean_wg_or_awg2 = profile.protocol == "wireguard"
+            || profile.protocol == "wg"
+            || profile.protocol == "awg2";
+
+        let mut params = if is_clean_wg_or_awg2 {
+            format!(
+                "public_key={}&address={}",
+                urlencoding::encode(pub_key),
+                urlencoding::encode(addr),
+            )
+        } else {
+            let jc = profile.awg_jc.unwrap_or(4);
+            let jmin = profile.awg_jmin.unwrap_or(40);
+            let jmax = profile.awg_jmax.unwrap_or(70);
+            let s1 = profile.awg_s1.unwrap_or(15);
+            let s2 = profile.awg_s2.unwrap_or(25);
+            let h1 = profile.awg_h1.as_deref().unwrap_or("1");
+            let h2 = profile.awg_h2.as_deref().unwrap_or("2");
+            let h3 = profile.awg_h3.as_deref().unwrap_or("3");
+            let h4 = profile.awg_h4.as_deref().unwrap_or("4");
+            let hop = profile.awg_hop_ports.as_deref().unwrap_or_default();
+
+            let mut p = format!(
+                "public_key={}&address={}&jc={}&jmin={}&jmax={}&s1={}&s2={}&h1={}&h2={}&h3={}&h4={}",
+                urlencoding::encode(pub_key),
+                urlencoding::encode(addr),
+                jc, jmin, jmax, s1, s2,
+                urlencoding::encode(h1),
+                urlencoding::encode(h2),
+                urlencoding::encode(h3),
+                urlencoding::encode(h4)
+            );
+            if let Some(s3) = profile.awg_s3 {
+                p.push_str(&format!("&s3={}", s3));
             }
-        }
-        if let Some(ref r) = profile.awg_rekey_after_time {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&rekey_after_time={}", urlencoding::encode(r.trim())));
+            if let Some(s4) = profile.awg_s4 {
+                p.push_str(&format!("&s4={}", s4));
             }
-        }
-        if let Some(ref r) = profile.awg_rekey_timeout {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&rekey_timeout={}", urlencoding::encode(r.trim())));
+            if let Some(ref hpk) = profile.awg_header_protection_key {
+                if !hpk.trim().is_empty() {
+                    p.push_str(&format!("&header_protection_key={}", urlencoding::encode(hpk.trim())));
+                }
             }
-        }
-        if let Some(ref r) = profile.awg_reject_after_time {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&reject_after_time={}", urlencoding::encode(r.trim())));
+            if let Some(ref r) = profile.awg_rekey_after_time {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&rekey_after_time={}", urlencoding::encode(r.trim())));
+                }
             }
-        }
-        if let Some(ref r) = profile.awg_keepalive_timeout {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&keepalive_timeout={}", urlencoding::encode(r.trim())));
+            if let Some(ref r) = profile.awg_rekey_timeout {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&rekey_timeout={}", urlencoding::encode(r.trim())));
+                }
             }
-        }
-        if let Some(ref r) = profile.awg_max_handshake_attempts {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&max_handshake_attempts={}", urlencoding::encode(r.trim())));
+            if let Some(ref r) = profile.awg_reject_after_time {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&reject_after_time={}", urlencoding::encode(r.trim())));
+                }
             }
-        }
-        if let Some(ref r) = profile.awg_persistent_keepalive {
-            if !r.trim().is_empty() {
-                params.push_str(&format!("&persistent_keepalive={}", urlencoding::encode(r.trim())));
+            if let Some(ref r) = profile.awg_keepalive_timeout {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&keepalive_timeout={}", urlencoding::encode(r.trim())));
+                }
             }
-        }
-        if let Some(rt) = profile.awg_random_trailers {
-            params.push_str(&format!("&random_trailers={}", if rt { "on" } else { "off" }));
-        }
-        if let Some(dc) = profile.awg_disable_cookies {
-            params.push_str(&format!("&disable_cookies={}", if dc { "on" } else { "off" }));
-        }
-        if let Some(ref v) = profile.awg_version {
-            params.push_str(&format!("&version={}", urlencoding::encode(v.trim())));
-        }
-        if let Some(ref i1) = profile.awg_i1 {
-            params.push_str(&format!("&i1={}", urlencoding::encode(i1)));
-        }
-        if let Some(ref i2) = profile.awg_i2 {
-            params.push_str(&format!("&i2={}", urlencoding::encode(i2)));
-        }
-        if let Some(ref i3) = profile.awg_i3 {
-            params.push_str(&format!("&i3={}", urlencoding::encode(i3)));
-        }
-        if let Some(ref i4) = profile.awg_i4 {
-            params.push_str(&format!("&i4={}", urlencoding::encode(i4)));
-        }
-        if !hop.is_empty() {
-            params.push_str(&format!("&hop_ports={}", urlencoding::encode(hop)));
+            if let Some(ref r) = profile.awg_max_handshake_attempts {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&max_handshake_attempts={}", urlencoding::encode(r.trim())));
+                }
+            }
+            if let Some(ref r) = profile.awg_persistent_keepalive {
+                if !r.trim().is_empty() {
+                    p.push_str(&format!("&persistent_keepalive={}", urlencoding::encode(r.trim())));
+                }
+            }
+            if let Some(rt) = profile.awg_random_trailers {
+                p.push_str(&format!("&random_trailers={}", if rt { "on" } else { "off" }));
+            }
+            if let Some(dc) = profile.awg_disable_cookies {
+                p.push_str(&format!("&disable_cookies={}", if dc { "on" } else { "off" }));
+            }
+            if let Some(ref i1) = profile.awg_i1 {
+                p.push_str(&format!("&i1={}", urlencoding::encode(i1)));
+            }
+            if let Some(ref i2) = profile.awg_i2 {
+                p.push_str(&format!("&i2={}", urlencoding::encode(i2)));
+            }
+            if let Some(ref i3) = profile.awg_i3 {
+                p.push_str(&format!("&i3={}", urlencoding::encode(i3)));
+            }
+            if let Some(ref i4) = profile.awg_i4 {
+                p.push_str(&format!("&i4={}", urlencoding::encode(i4)));
+            }
+            if !hop.is_empty() {
+                p.push_str(&format!("&hop_ports={}", urlencoding::encode(hop)));
+            }
+            p
+        };
+
+        if profile.protocol == "awg2" {
+            params.push_str("&version=2.0");
+        } else if !is_clean_wg_or_awg2 {
+            if let Some(ref v) = profile.awg_version {
+                params.push_str(&format!("&version={}", urlencoding::encode(v.trim())));
+            }
         }
         if !psk.is_empty() {
             params.push_str(&format!("&psk={}", urlencoding::encode(psk)));
         }
+        if let Some(lp) = profile.listen_port {
+            if lp > 0 {
+                params.push_str(&format!("&listen_port={}", lp));
+            }
+        }
 
-        let scheme = if profile.protocol == "awg2" || profile.awg_version.as_deref() == Some("2.0") {
+        let scheme = if profile.protocol == "wireguard" || profile.protocol == "wg" {
+            "wg"
+        } else if profile.protocol == "awg2" || profile.awg_version.as_deref() == Some("2.0") {
             "awg2"
         } else {
             "awg"
@@ -1639,6 +1775,48 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
             profile.server,
             profile.port,
             params,
+            encoded_name
+        )
+    } else if profile.protocol == "shadowtls" {
+        let method = profile.ss_method.as_deref().unwrap_or("2022-blake3-aes-128-gcm");
+        let st_sni = profile.shadowtls_sni.as_deref().unwrap_or(if !profile.sni.is_empty() { &profile.sni } else { "www.microsoft.com" });
+        let st_pass = profile.shadowtls_password.as_deref().unwrap_or(&profile.password);
+        format!(
+            "shadowtls://{}@{}:{}?method={}&password={}&st_password={}&sni={}#{}",
+            urlencoding::encode(&profile.password),
+            profile.server,
+            profile.port,
+            urlencoding::encode(method),
+            urlencoding::encode(&profile.password),
+            urlencoding::encode(st_pass),
+            urlencoding::encode(st_sni),
+            encoded_name
+        )
+    } else if profile.protocol == "vless_ws" {
+        let uuid = profile.uuid.clone().unwrap_or_else(|| profile.password.clone());
+        let ws_path = profile.ws_path.as_deref().unwrap_or("/neuroveil-ws");
+        let host = profile.cdn_host.as_deref().unwrap_or(&profile.sni);
+        format!(
+            "vless://{}@{}:{}?type=ws&path={}&host={}&sni={}&security=tls&fp=chrome#{}",
+            urlencoding::encode(&uuid),
+            profile.server,
+            profile.port,
+            urlencoding::encode(ws_path),
+            urlencoding::encode(host),
+            urlencoding::encode(host),
+            encoded_name
+        )
+    } else if profile.protocol == "webrtc" {
+        let uuid = profile.uuid.clone().unwrap_or_else(|| profile.password.clone());
+        let service = profile.ws_path.as_deref().unwrap_or("neuroveil-webrtc");
+        let sni = if !profile.sni.is_empty() { &profile.sni } else { &profile.server };
+        format!(
+            "vless://{}@{}:{}?type=grpc&serviceName={}&sni={}&security=tls&fp=chrome#{}",
+            urlencoding::encode(&uuid),
+            profile.server,
+            profile.port,
+            urlencoding::encode(service),
+            urlencoding::encode(sni),
             encoded_name
         )
     } else if profile.protocol == "ssh" {
@@ -1691,7 +1869,58 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
 pub fn build_awg_conf(profile: &VpnProfile) -> String {
     let priv_key = profile.awg_private_key.as_deref().unwrap_or(&profile.password);
     let pub_key = profile.awg_public_key.as_deref().unwrap_or_default();
+
+    if profile.protocol == "awg2" {
+        let addr = profile.awg_local_address.as_deref().unwrap_or("10.8.1.2/24");
+        let mut conf = String::new();
+        conf.push_str("[Interface]\n");
+        conf.push_str(&format!("PrivateKey = {}\n", priv_key));
+        conf.push_str(&format!("Address = {}\n", addr));
+        conf.push_str("DNS = 1.1.1.1\n");
+        conf.push_str("MTU = 1420\n");
+        conf.push_str("\n[Peer]\n");
+        conf.push_str(&format!("PublicKey = {}\n", pub_key));
+        if let Some(ref psk) = profile.awg_preshared_key {
+            if !psk.trim().is_empty() {
+                conf.push_str(&format!("PresharedKey = {}\n", psk.trim()));
+            }
+        }
+        conf.push_str("AllowedIPs = 0.0.0.0/0, ::/0\n");
+        conf.push_str(&format!("Endpoint = {}:{}\n", profile.server, profile.port));
+        return conf;
+    }
+
     let addr = profile.awg_local_address.as_deref().unwrap_or("10.8.0.2/32");
+
+    let is_wireguard = profile.protocol == "wireguard"
+        || profile.protocol == "wg"
+        || (profile.awg_jc.is_none() && profile.awg_s1.is_none() && profile.awg_h1.is_none());
+
+    if is_wireguard {
+        let mut conf = String::new();
+        conf.push_str("[Interface]\n");
+        conf.push_str(&format!("Address = {}\n", addr));
+        conf.push_str("DNS = 1.1.1.1, 1.0.0.1\n");
+        conf.push_str(&format!("PrivateKey = {}\n", priv_key));
+        if let Some(lp) = profile.listen_port {
+            if lp > 0 {
+                conf.push_str(&format!("ListenPort = {}\n", lp));
+            }
+        }
+        conf.push_str("\n[Peer]\n");
+        conf.push_str(&format!("PublicKey = {}\n", pub_key));
+        if let Some(ref psk) = profile.awg_preshared_key {
+            if !psk.trim().is_empty() {
+                conf.push_str(&format!("PresharedKey = {}\n", psk.trim()));
+            }
+        }
+        conf.push_str("AllowedIPs = 0.0.0.0/0, ::/0\n");
+        conf.push_str(&format!("Endpoint = {}:{}\n", profile.server, profile.port));
+        let pk = profile.awg_persistent_keepalive.as_deref().unwrap_or("25");
+        conf.push_str(&format!("PersistentKeepalive = {}\n", pk));
+        return conf;
+    }
+
     let jc = profile.awg_jc.unwrap_or(4);
     let jmin = profile.awg_jmin.unwrap_or(40);
     let jmax = profile.awg_jmax.unwrap_or(70);
@@ -1711,6 +1940,11 @@ pub fn build_awg_conf(profile: &VpnProfile) -> String {
     conf.push_str(&format!("Address = {}\n", addr));
     conf.push_str("DNS = 1.1.1.1, 1.0.0.1\n");
     conf.push_str(&format!("PrivateKey = {}\n", priv_key));
+    if let Some(lp) = profile.listen_port {
+        if lp > 0 {
+            conf.push_str(&format!("ListenPort = {}\n", lp));
+        }
+    }
     conf.push_str(&format!("Jc = {}\n", jc));
     conf.push_str(&format!("Jmin = {}\n", jmin));
     conf.push_str(&format!("Jmax = {}\n", jmax));
@@ -1936,7 +2170,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
         return parse_amnezia_conf(trimmed);
     }
 
-    if trimmed.to_lowercase().starts_with("awg://") || trimmed.to_lowercase().starts_with("amneziawg://") || trimmed.to_lowercase().starts_with("awg2://") {
+    if trimmed.to_lowercase().starts_with("awg://") || trimmed.to_lowercase().starts_with("amneziawg://") || trimmed.to_lowercase().starts_with("awg2://") || trimmed.to_lowercase().starts_with("wg://") || trimmed.to_lowercase().starts_with("wireguard://") {
         return parse_awg_uri(trimmed);
     }
 
@@ -1966,9 +2200,13 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let mut reality_public_key = None;
     let mut reality_short_id = None;
     let mut reality_flow = Some("xtls-rprx-vision".to_string());
+    let mut listen_port = None;
 
     for (k, v) in parsed.query_pairs() {
         match k.as_ref() {
+            "listen_port" | "listenport" | "lp" => {
+                listen_port = v.parse().ok();
+            }
             "sni" | "peer" => sni = v.to_string(),
             "insecure" | "allow_insecure" | "allowInsecure" => {
                 insecure = v == "1" || v.eq_ignore_ascii_case("true");
@@ -2016,6 +2254,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
             protocol: "vless".to_string(),
             server,
             port,
+            listen_port,
             sni,
             insecure: false,
             password: uuid.clone(),
@@ -2036,6 +2275,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
             protocol: "hysteria2".to_string(),
             server,
             port,
+            listen_port,
             sni,
             insecure,
             password,
@@ -2059,6 +2299,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
             protocol: "tuic".to_string(),
             server,
             port,
+            listen_port,
             sni,
             insecure,
             password,
@@ -2253,12 +2494,17 @@ fn parse_shadowsocks_uri(uri_str: &str) -> Result<VpnProfile, String> {
 
 pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let raw = uri_str.trim();
+    let is_explicit_wg = raw.to_lowercase().starts_with("wg://") || raw.to_lowercase().starts_with("wireguard://");
     let is_explicit_awg2 = raw.to_lowercase().starts_with("awg2://");
     let without_scheme = if let Some(s) = raw.strip_prefix("awg://") {
         s
     } else if let Some(s) = raw.strip_prefix("amneziawg://") {
         s
     } else if let Some(s) = raw.strip_prefix("awg2://") {
+        s
+    } else if let Some(s) = raw.strip_prefix("wg://") {
+        s
+    } else if let Some(s) = raw.strip_prefix("wireguard://") {
         s
     } else {
         raw
@@ -2295,23 +2541,23 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
 
     let mut pub_key = None;
     let mut psk = None;
-    let mut addr = Some("10.8.0.2/32".to_string());
-    let mut jc = Some(4);
-    let mut jmin = Some(40);
-    let mut jmax = Some(70);
-    let mut s1 = Some(15);
-    let mut s2 = Some(25);
-    let mut s3 = Some(35);
-    let mut s4 = Some(45);
-    let mut h1 = Some("1".to_string());
-    let mut h2 = Some("2".to_string());
-    let mut h3 = Some("3".to_string());
-    let mut h4 = Some("4".to_string());
+    let mut addr = Some(if is_explicit_awg2 { "10.8.1.2/24".to_string() } else { "10.8.0.2/32".to_string() });
+    let mut jc = None;
+    let mut jmin = None;
+    let mut jmax = None;
+    let mut s1 = None;
+    let mut s2 = None;
+    let mut s3 = None;
+    let mut s4 = None;
+    let mut h1 = None;
+    let mut h2 = None;
+    let mut h3 = None;
+    let mut h4 = None;
     let mut i1 = None;
     let mut i2 = None;
     let mut i3 = None;
     let mut i4 = None;
-    let mut hop_ports = Some("20000:65000".to_string());
+    let mut hop_ports = None;
     let mut header_protection_key = None;
     let mut rekey_after_time = None;
     let mut rekey_timeout = None;
@@ -2322,12 +2568,14 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let mut disable_cookies = None;
     let mut persistent_keepalive = None;
     let mut parsed_version = None;
+    let mut listen_port = None;
 
     if let Some(q) = query {
         for pair in q.split('&') {
             if let Some((k, v)) = pair.split_once('=') {
                 let dec_v = urlencoding::decode(v).unwrap_or_else(|_| v.to_string());
                 match k.to_lowercase().as_str() {
+                    "listen_port" | "listenport" | "lp" => listen_port = dec_v.parse().ok(),
                     "public_key" | "pubkey" | "publickey" | "peer" => pub_key = Some(dec_v),
                     "psk" | "preshared_key" | "presharedkey" => psk = Some(dec_v),
                     "address" | "ip" => addr = Some(dec_v),
@@ -2364,8 +2612,41 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     }
 
     let is_v2 = is_explicit_awg2 || parsed_version.as_deref() == Some("2.0") || parsed_version.as_deref() == Some("2");
-    let protocol = if is_v2 { "awg2".to_string() } else { "amneziawg".to_string() };
-    let version_str = if is_v2 { "2.0".to_string() } else { "3.1".to_string() };
+    let protocol = if is_explicit_wg {
+        "wireguard".to_string()
+    } else if is_v2 {
+        "awg2".to_string()
+    } else {
+        "amneziawg".to_string()
+    };
+    let version_str = if is_explicit_wg {
+        None
+    } else if is_v2 {
+        Some("2.0".to_string())
+    } else {
+        Some("3.1".to_string())
+    };
+
+    let is_clean = protocol == "wireguard" || protocol == "awg2";
+    let (final_jc, final_jmin, final_jmax, final_s1, final_s2, final_s3, final_s4, final_h1, final_h2, final_h3, final_h4, final_hop_ports, final_probing) = if is_clean {
+        (None, None, None, None, None, None, None, None, None, None, None, None, Some(false))
+    } else {
+        (
+            jc.or(Some(4)),
+            jmin.or(Some(40)),
+            jmax.or(Some(70)),
+            s1.or(Some(15)),
+            s2.or(Some(25)),
+            s3.or(Some(35)),
+            s4.or(Some(45)),
+            h1.or_else(|| Some("1".to_string())),
+            h2.or_else(|| Some("2".to_string())),
+            h3.or_else(|| Some("3".to_string())),
+            h4.or_else(|| Some("4".to_string())),
+            hop_ports.or_else(|| Some("20000:65000".to_string())),
+            Some(true),
+        )
+    };
 
     let mut prof = VpnProfile {
         id: Uuid::new_v4().to_string(),
@@ -2373,12 +2654,13 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
         protocol,
         server,
         port,
+        listen_port,
         sni: String::new(),
         insecure: false,
         password: priv_key.clone(),
         uuid: None,
         obfs_password: None,
-        hop_ports: hop_ports.clone(),
+        hop_ports: final_hop_ports.clone(),
         hop_interval: None,
         reality_public_key: None,
         reality_short_id: None,
@@ -2390,33 +2672,33 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
         awg_public_key: pub_key,
         awg_preshared_key: psk,
         awg_local_address: addr,
-        awg_jc: jc,
-        awg_jmin: jmin,
-        awg_jmax: jmax,
-        awg_s1: s1,
-        awg_s2: s2,
-        awg_s3: s3,
-        awg_s4: s4,
-        awg_h1: h1,
-        awg_h2: h2,
-        awg_h3: h3,
-        awg_h4: h4,
-        awg_i1: i1,
-        awg_i2: i2,
-        awg_i3: i3,
-        awg_i4: i4,
-        awg_hop_ports: hop_ports,
-        awg_port_probing: Some(true),
-        awg_header_protection_key: header_protection_key,
-        awg_rekey_after_time: rekey_after_time,
-        awg_rekey_timeout: rekey_timeout,
-        awg_reject_after_time: reject_after_time,
-        awg_keepalive_timeout: keepalive_timeout,
-        awg_max_handshake_attempts: max_handshake_attempts,
-        awg_random_trailers: random_trailers,
-        awg_disable_cookies: disable_cookies,
-        awg_persistent_keepalive: persistent_keepalive,
-        awg_version: Some(version_str),
+        awg_jc: final_jc,
+        awg_jmin: final_jmin,
+        awg_jmax: final_jmax,
+        awg_s1: final_s1,
+        awg_s2: final_s2,
+        awg_s3: final_s3,
+        awg_s4: final_s4,
+        awg_h1: final_h1,
+        awg_h2: final_h2,
+        awg_h3: final_h3,
+        awg_h4: final_h4,
+        awg_i1: if is_clean { None } else { i1 },
+        awg_i2: if is_clean { None } else { i2 },
+        awg_i3: if is_clean { None } else { i3 },
+        awg_i4: if is_clean { None } else { i4 },
+        awg_hop_ports: final_hop_ports,
+        awg_port_probing: final_probing,
+        awg_header_protection_key: if is_clean { None } else { header_protection_key },
+        awg_rekey_after_time: if is_clean { None } else { rekey_after_time },
+        awg_rekey_timeout: if is_clean { None } else { rekey_timeout },
+        awg_reject_after_time: if is_clean { None } else { reject_after_time },
+        awg_keepalive_timeout: if is_clean { None } else { keepalive_timeout },
+        awg_max_handshake_attempts: if is_clean { None } else { max_handshake_attempts },
+        awg_random_trailers: if is_clean { None } else { random_trailers },
+        awg_disable_cookies: if is_clean { None } else { disable_cookies },
+        awg_persistent_keepalive: if is_clean { None } else { persistent_keepalive },
+        awg_version: version_str,
         up_mbps: 100,
         down_mbps: 100,
         ..Default::default()
@@ -2432,6 +2714,7 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
     let mut psk = None;
     let mut server = String::new();
     let mut port = 51820u16;
+    let mut listen_port = None;
     let mut jc = None;
     let mut jmin = None;
     let mut jmax = None;
@@ -2513,6 +2796,7 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
                 "i2" => i2 = Some(val),
                 "i3" => i3 = Some(val),
                 "i4" => i4 = Some(val),
+                "listenport" | "listen_port" => listen_port = val.parse().ok(),
                 _ => {}
             }
         }
@@ -2532,23 +2816,71 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
         || random_trailers.is_some()
         || disable_cookies.is_some();
 
-    let protocol = if is_v31 { "amneziawg".to_string() } else { "awg2".to_string() };
-    let version_str = if is_v31 { "3.1".to_string() } else { "2.0".to_string() };
-    let default_title = if is_v31 { format!("Amnezia 3.1 ({})", server) } else { format!("AmneziaWG 2.0 ({})", server) };
+    let is_v20 = jc.is_some()
+        || jmin.is_some()
+        || jmax.is_some()
+        || s1.is_some()
+        || s2.is_some()
+        || h1.is_some()
+        || h2.is_some()
+        || h3.is_some()
+        || h4.is_some();
+
+    let (protocol, version_opt, default_title) = if is_v31 {
+        ("amneziawg".to_string(), Some("3.1".to_string()), format!("Amnezia 3.1 ({})", server))
+    } else if is_v20 {
+        ("awg2".to_string(), Some("2.0".to_string()), format!("AmneziaWG 2.0 ({})", server))
+    } else {
+        ("wireguard".to_string(), None, format!("WireGuard ({})", server))
+    };
     let name = parsed_name.unwrap_or(default_title);
+
+    let (final_jc, final_jmin, final_jmax, final_s1, final_s2, final_s3, final_s4, final_h1, final_h2, final_h3, final_h4) = if is_v31 {
+        (
+            jc.or(Some(4)),
+            jmin.or(Some(40)),
+            jmax.or(Some(70)),
+            s1.or(Some(12)),
+            s2.or(Some(12)),
+            s3.or(Some(12)),
+            s4.or(Some(12)),
+            h1.or_else(|| Some("1".to_string())),
+            h2.or_else(|| Some("2".to_string())),
+            h3.or_else(|| Some("3".to_string())),
+            h4.or_else(|| Some("4".to_string())),
+        )
+    } else if is_v20 {
+        (
+            jc.or(Some(4)),
+            jmin.or(Some(40)),
+            jmax.or(Some(70)),
+            s1.or(Some(15)),
+            s2.or(Some(25)),
+            s3,
+            s4,
+            h1.or_else(|| Some("1".to_string())),
+            h2.or_else(|| Some("2".to_string())),
+            h3.or_else(|| Some("3".to_string())),
+            h4.or_else(|| Some("4".to_string())),
+        )
+    } else {
+        // Plain standard WireGuard: absolutely NO obfuscation fields
+        (None, None, None, None, None, None, None, None, None, None, None)
+    };
 
     let mut prof = VpnProfile {
         id: Uuid::new_v4().to_string(),
         name,
-        protocol,
+        protocol: protocol.clone(),
         server,
         port,
+        listen_port,
         sni: String::new(),
         insecure: false,
         password: priv_key.clone(),
         uuid: None,
         obfs_password: None,
-        hop_ports: Some("20000:65000".to_string()),
+        hop_ports: if protocol == "wireguard" || protocol == "awg2" { None } else { Some("20000:65000".to_string()) },
         hop_interval: None,
         reality_public_key: None,
         reality_short_id: None,
@@ -2560,17 +2892,17 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
         awg_public_key: pub_key,
         awg_preshared_key: psk,
         awg_local_address: local_addr.or_else(|| Some("10.8.0.2/32".to_string())),
-        awg_jc: jc.or(Some(4)),
-        awg_jmin: jmin.or(Some(40)),
-        awg_jmax: jmax.or(Some(70)),
-        awg_s1: s1.or_else(|| if is_v31 { Some(12) } else { Some(15) }),
-        awg_s2: s2.or_else(|| if is_v31 { Some(12) } else { Some(25) }),
-        awg_s3: s3.or_else(|| if is_v31 { Some(12) } else { None }),
-        awg_s4: s4.or_else(|| if is_v31 { Some(12) } else { None }),
-        awg_h1: h1.or_else(|| Some("1".to_string())),
-        awg_h2: h2.or_else(|| Some("2".to_string())),
-        awg_h3: h3.or_else(|| Some("3".to_string())),
-        awg_h4: h4.or_else(|| Some("4".to_string())),
+        awg_jc: final_jc,
+        awg_jmin: final_jmin,
+        awg_jmax: final_jmax,
+        awg_s1: final_s1,
+        awg_s2: final_s2,
+        awg_s3: final_s3,
+        awg_s4: final_s4,
+        awg_h1: final_h1,
+        awg_h2: final_h2,
+        awg_h3: final_h3,
+        awg_h4: final_h4,
         awg_header_protection_key: header_protection_key,
         awg_rekey_after_time: rekey_after_time,
         awg_rekey_timeout: rekey_timeout,
@@ -2580,13 +2912,13 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
         awg_random_trailers: random_trailers,
         awg_disable_cookies: disable_cookies,
         awg_persistent_keepalive: persistent_keepalive,
-        awg_version: Some(version_str),
+        awg_version: version_opt,
         awg_i1: i1,
         awg_i2: i2,
         awg_i3: i3,
         awg_i4: i4,
-        awg_hop_ports: Some("20000:65000".to_string()),
-        awg_port_probing: Some(true),
+        awg_hop_ports: if protocol == "wireguard" || protocol == "awg2" { None } else { Some("20000:65000".to_string()) },
+        awg_port_probing: Some(false),
         up_mbps: 100,
         down_mbps: 100,
         ..Default::default()
@@ -2868,37 +3200,65 @@ PersistentKeepalive = 25-35
 
     #[test]
     fn test_parse_awg2_conf() {
+        let mut profile = VpnProfile {
+            id: "awg2-test".to_string(),
+            name: "AWG 2.0 Test".to_string(),
+            protocol: "awg2".to_string(),
+            server: "5.129.227.240".to_string(),
+            port: 51820,
+            listen_port: Some(54321),
+            password: "cEb5x5/GskRccR5YpV0H1JWYhDnKtuthg6GuJqlVn18=".to_string(),
+            awg_private_key: Some("cEb5x5/GskRccR5YpV0H1JWYhDnKtuthg6GuJqlVn18=".to_string()),
+            awg_public_key: Some("/kUh+97J9Tu7Lnen1bl+AODfs2iACrvkk3OQSDK5Fns=".to_string()),
+            awg_preshared_key: Some("1lRwdV6iDpWOSn3kJ2OPvaoujETI/zCoUxBQXM+5yMg=".to_string()),
+            awg_local_address: Some("10.8.0.2/24".to_string()),
+            awg_version: Some("2.0".to_string()),
+            ..Default::default()
+        };
+
+        let exported = build_awg_conf(&profile);
+        let expected = "[Interface]\nPrivateKey = cEb5x5/GskRccR5YpV0H1JWYhDnKtuthg6GuJqlVn18=\nAddress = 10.8.0.2/24\nDNS = 1.1.1.1\nMTU = 1420\n\n[Peer]\nPublicKey = /kUh+97J9Tu7Lnen1bl+AODfs2iACrvkk3OQSDK5Fns=\nPresharedKey = 1lRwdV6iDpWOSn3kJ2OPvaoujETI/zCoUxBQXM+5yMg=\nAllowedIPs = 0.0.0.0/0, ::/0\nEndpoint = 5.129.227.240:51820\n";
+        assert_eq!(exported, expected);
+        assert!(!exported.contains("ListenPort"));
+        assert!(!exported.contains("PersistentKeepalive"));
+        assert!(!exported.contains("Jc"));
+        assert!(!exported.contains("H1"));
+
+        let routing = RoutingConfig::default();
+        let cfg = generate_singbox_config(&profile, &routing);
+        let ep = &cfg["endpoints"][0];
+        assert_eq!(ep["listen_port"], json!(54321));
+        assert!(ep.get("jc").is_none());
+        assert!(ep.get("h1").is_none());
+        assert!(ep["peers"][0].get("persistent_keepalive_interval").is_none());
+
+        profile.uri = build_profile_uri(&profile);
+        assert!(profile.uri.starts_with("awg2://"));
+        assert!(!profile.uri.contains("jc="));
+        assert!(!profile.uri.contains("h1="));
+    }
+
+    #[test]
+    fn test_parse_awg_conf_with_listen_port() {
         let conf = r#"[Interface]
-Address = 10.8.1.2/32
-DNS = 1.1.1.1, 1.0.0.1
+Address = 10.8.0.2/32
 PrivateKey = vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=
-Jc = 4
-Jmin = 20
-Jmax = 60
-S1 = 30
-S2 = 40
-H1 = 12948291
-H2 = 94829104
-H3 = 38192847
-H4 = 57193821
+ListenPort = 54321
+DNS = 1.1.1.1
+HeaderProtectionKey = zUPEP7/ufINes+LSSJd1AqLLmgSxUzeSQwBgIbdPavY=
+H1 = 1
+H2 = 2
+H3 = 3
+H4 = 4
 
 [Peer]
 PublicKey = fN7baW+3+uBNuwSQsO+lwD6GkP3oNucDfn5UW1EWphQ=
-PresharedKey = 7sQK621vrXJAMe+w0006jc+2MOd12jY2Sb4PcRD57FE=
-AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = 78.17.216.77:51821
-PersistentKeepalive = 25
+Endpoint = 1.2.3.4:51820
 "#;
-
-        let profile = parse_amnezia_conf(conf).expect("Must parse AWG 2.0 config");
-        assert_eq!(profile.protocol, "awg2");
-        assert_eq!(profile.awg_version.as_deref(), Some("2.0"));
-        assert_eq!(profile.awg_h1.as_deref(), Some("12948291"));
-        assert_eq!(profile.awg_header_protection_key, None);
-
+        let profile = parse_amnezia_conf(conf).expect("Must parse config with ListenPort");
+        assert_eq!(profile.listen_port, Some(54321));
         let exported = build_awg_conf(&profile);
-        assert!(!exported.contains("HeaderProtectionKey"));
-        assert!(exported.contains("H1 = 12948291"));
+        assert!(exported.contains("ListenPort = 54321"));
     }
 
     #[test]
@@ -2961,28 +3321,22 @@ PersistentKeepalive = 25
             String::from_utf8_lossy(&out_31.stderr)
         );
 
-        // Test AWG 2.0
-        let conf_20 = r#"[Interface]
-Address = 10.8.1.2/32
-PrivateKey = vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=
-Jc = 4
-Jmin = 20
-Jmax = 60
-S1 = 30
-S2 = 40
-H1 = 12948291
-H2 = 94829104
-H3 = 38192847
-H4 = 57193821
-
-[Peer]
-PublicKey = fN7baW+3+uBNuwSQsO+lwD6GkP3oNucDfn5UW1EWphQ=
-PresharedKey = 7sQK621vrXJAMe+w0006jc+2MOd12jY2Sb4PcRD57FE=
-AllowedIPs = 0.0.0.0/0
-Endpoint = 78.17.216.77:51821
-PersistentKeepalive = 25
-"#;
-        let prof_20 = parse_amnezia_conf(conf_20).unwrap();
+        // Test clean AWG 2.0 with rotated listen_port
+        let prof_20 = VpnProfile {
+            id: "awg2-singbox-check".to_string(),
+            name: "AWG 2.0 Clean".to_string(),
+            protocol: "awg2".to_string(),
+            server: "5.129.227.240".to_string(),
+            port: 51820,
+            listen_port: Some(54321),
+            password: "cEb5x5/GskRccR5YpV0H1JWYhDnKtuthg6GuJqlVn18=".to_string(),
+            awg_private_key: Some("cEb5x5/GskRccR5YpV0H1JWYhDnKtuthg6GuJqlVn18=".to_string()),
+            awg_public_key: Some("/kUh+97J9Tu7Lnen1bl+AODfs2iACrvkk3OQSDK5Fns=".to_string()),
+            awg_preshared_key: Some("1lRwdV6iDpWOSn3kJ2OPvaoujETI/zCoUxBQXM+5yMg=".to_string()),
+            awg_local_address: Some("10.8.0.2/24".to_string()),
+            awg_version: Some("2.0".to_string()),
+            ..Default::default()
+        };
         let cfg_20 = generate_singbox_config(&prof_20, &routing);
 
         let temp_20 = temp_dir.join("test_singbox_awg20.json");

@@ -1,29 +1,62 @@
 # Зависимости и кэш сборки
 node_modules/
 dist/
+dist-ssr/
+*.local
+*.tsbuildinfo
+vite.config.ts.timestamp-*
 target/
 target_*/
 src-tauri/target/
 src-tauri/target_*/
 src-tauri/WixTools/
+src-tauri/gen/android/
+src-tauri/gen/apple/
+*.pdb
 
-# Локальные данные пользователя, конфиги и ключи (ВАЖНО: не выгружать личные профили и пароли!)
+# Локальные данные пользователя, конфиги, логи и секреты (ВАЖНО: не выгружать личные профили и ключи!)
 data/
 state.json
+state.json.*
+active_config.json
+rules_*.json
+.env
+.env.*
+!.env.example
 *.conf
 *.key
 *.pem
+*.ppk
+*.crt
+*.p12
+*.pfx
+*id_rsa*
+*id_ed25519*
 *.log
+*.log.*
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
 
-# Портативная сборка и временные/дублирующиеся файлы
+# Портативные сборки, инсталляторы, версионные и временные бинарники
+# (основной NeuroVeil.exe отслеживается для релизов и автообновления)
 NeuroVeil-Portable*/
-*.old.exe
 NeuroVeil_v*.exe
+NeuroVeil_VPN_v*_Setup.exe
+NeuroVeil*.zip
+*.old.exe
+*.msi
+*.nsis
 
-# Папки IDE
+# IDE, ОС и временные файлы
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+*.tmp
+*.bak
 scratch/
-

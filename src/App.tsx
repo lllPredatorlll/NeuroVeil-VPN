@@ -26,6 +26,7 @@ import {
   Sparkles,
   FolderOpen,
   FileCode,
+  FileText,
   Cpu,
   Search,
   QrCode,
@@ -320,15 +321,6 @@ export default function App() {
     return btoa(binary);
   }
 
-  function generateRandomHValues(): [string, string, string, string] {
-    const set = new Set<number>();
-    while (set.size < 4) {
-      set.add(getRandomInt(10_000_000, 2_147_483_640));
-    }
-    const arr = Array.from(set);
-    return [arr[0].toString(), arr[1].toString(), arr[2].toString(), arr[3].toString()];
-  }
-
   function generateRandomAwg31Params() {
     return {
       awg_jc: getRandomInt(4, 7),
@@ -355,24 +347,6 @@ export default function App() {
     };
   }
 
-  function generateRandomAwg20Params() {
-    const [h1, h2, h3, h4] = generateRandomHValues();
-    return {
-      awg_jc: getRandomInt(3, 8),
-      awg_jmin: getRandomInt(15, 35),
-      awg_jmax: getRandomInt(50, 95),
-      awg_s1: getRandomInt(20, 75),
-      awg_s2: getRandomInt(20, 75),
-      awg_s3: 0,
-      awg_s4: 0,
-      awg_h1: h1,
-      awg_h2: h2,
-      awg_h3: h3,
-      awg_h4: h4,
-      awg_preshared_key: getRandomBase64Key(),
-    };
-  }
-
   // VPS Auto-Deploy state
   const [vpsCreds, setVpsCreds] = useState<VpsCredentials>(() => {
     const autoAwgPort = getRandomInt(21000, 55000);
@@ -396,6 +370,14 @@ export default function App() {
       deploy_awg: true,
       deploy_awg2: false,
       deploy_ssh: true,
+      deploy_shadowtls: true,
+      shadowtls_port: 8443,
+      shadowtls_sni: "www.microsoft.com",
+      deploy_vless_ws: true,
+      vless_ws_port: 2096,
+      cdn_domain: "",
+      deploy_webrtc: true,
+      webrtc_port: 3478,
       awg_port: autoAwgPort,
       awg_hop_ports: "20000:65000",
       ...r31,
@@ -550,24 +532,54 @@ export default function App() {
   const [newPresetOutbound, setNewPresetOutbound] = useState<"direct" | "proxy">("direct");
   const [isApplyingPreset, setIsApplyingPreset] = useState(false);
 
-  // Listening Port Detection state
-  const [isProbingListeningPorts, setIsProbingListeningPorts] = useState(false);
-  const [isApplyingListeningPort, setIsApplyingListeningPort] = useState(false);
-  const [listeningProbeResults, setListeningProbeResults] = useState<Record<string, PortProbeResult[]>>({});
-  const [probedHistoryPorts, setProbedHistoryPorts] = useState<Record<string, number[]>>({});
 
   // In-app Config Editor Modal State
   const [editingProfile, setEditingProfile] = useState<VpnProfile | null>(null);
   const [editForm, setEditForm] = useState<Partial<VpnProfile>>({});
   const [editModeRaw, setEditModeRaw] = useState<boolean>(false);
   const [editRawJson, setEditRawJson] = useState<string>("");
+  const [editRawConf, setEditRawConf] = useState<string>("");
+  const [rawTextFormat, setRawTextFormat] = useState<"conf" | "json">("conf");
   const [editSaving, setEditSaving] = useState<boolean>(false);
 
-  const handleOpenEditModal = (prof: VpnProfile) => {
+  const handleOpenEditModal = async (prof: VpnProfile, initialMode: "visual" | "text" = "visual") => {
     setEditingProfile(prof);
     setEditForm({ ...prof });
     setEditRawJson(JSON.stringify(prof, null, 2));
-    setEditModeRaw(false);
+    const isAwgOrWg = prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard";
+    if (isAwgOrWg) {
+      try {
+        const conf = await invoke<string>("export_awg_conf", {
+          profileId: prof.id,
+          profile: prof,
+        });
+        setEditRawConf(conf);
+        setRawTextFormat("conf");
+      } catch {
+        setRawTextFormat("json");
+      }
+    } else {
+      setRawTextFormat("json");
+    }
+    setEditModeRaw(initialMode === "text");
+  };
+
+  const applyStatusUpdate = (st: VpnStatus) => {
+    setStatus(st);
+    if (st.connected && st.active_profile_id && st.active_listen_port) {
+      const lp = st.active_listen_port;
+      const pid = st.active_profile_id;
+      setProfiles((prev) =>
+        prev.some((p) => p.id === pid && p.listen_port !== lp)
+          ? prev.map((p) => (p.id === pid ? { ...p, listen_port: lp } : p))
+          : prev
+      );
+      setSyncedServerProfiles((prev) =>
+        prev.some((p) => p.id === pid && p.listen_port !== lp)
+          ? prev.map((p) => (p.id === pid ? { ...p, listen_port: lp } : p))
+          : prev
+      );
+    }
   };
 
   const handleSaveEditedProfile = async () => {
@@ -577,9 +589,29 @@ export default function App() {
       let updatedProfile: VpnProfile;
       if (editModeRaw) {
         try {
-          updatedProfile = JSON.parse(editRawJson);
+          const isConfText = (rawTextFormat === "conf" || editRawConf.includes("[Interface]") || editRawConf.includes("[Peer]"));
+          if (isConfText) {
+            const parsed = await invoke<VpnProfile>("parse_profile_text", { text: editRawConf });
+            const keepAwg2 =
+              editingProfile.protocol === "awg2" &&
+              parsed.awg_jc == null &&
+              !parsed.awg_header_protection_key;
+            updatedProfile = {
+              ...editingProfile,
+              ...parsed,
+              id: editingProfile.id,
+              name: editForm.name || parsed.name || editingProfile.name,
+              protocol: keepAwg2 ? "awg2" : parsed.protocol,
+              awg_version: keepAwg2 ? "2.0" : parsed.awg_version,
+              pinned_on_pc: editingProfile.pinned_on_pc,
+              auto_rotate_listen_port: editForm.auto_rotate_listen_port ?? editingProfile.auto_rotate_listen_port,
+              listen_port: parsed.listen_port ?? editingProfile.listen_port ?? null,
+            };
+          } else {
+            updatedProfile = JSON.parse(editRawJson);
+          }
         } catch (e: any) {
-          showNotice("error", "Ошибка синтаксиса JSON: " + e.message);
+          showNotice("error", "Ошибка синтаксиса текста конфига: " + e.message);
           setEditSaving(false);
           return;
         }
@@ -588,10 +620,32 @@ export default function App() {
           ...editingProfile,
           ...editForm,
           port: Number(editForm.port) || editingProfile.port,
+          listen_port: editForm.listen_port ? Number(editForm.listen_port) || null : null,
         } as VpnProfile;
       }
 
-      if (updatedProfile.protocol === "amneziawg" || updatedProfile.protocol === "awg2") {
+      if (updatedProfile.protocol === "awg2") {
+        const priv = (updatedProfile.awg_private_key || updatedProfile.password || "").trim();
+        updatedProfile.awg_private_key = priv;
+        updatedProfile.password = priv;
+        updatedProfile.awg_version = "2.0";
+        updatedProfile.awg_jc = undefined;
+        updatedProfile.awg_jmin = undefined;
+        updatedProfile.awg_jmax = undefined;
+        updatedProfile.awg_s1 = undefined;
+        updatedProfile.awg_s2 = undefined;
+        updatedProfile.awg_s3 = undefined;
+        updatedProfile.awg_s4 = undefined;
+        updatedProfile.awg_h1 = undefined;
+        updatedProfile.awg_h2 = undefined;
+        updatedProfile.awg_h3 = undefined;
+        updatedProfile.awg_h4 = undefined;
+        updatedProfile.awg_header_protection_key = undefined;
+        updatedProfile.awg_hop_ports = undefined;
+        updatedProfile.hop_ports = undefined;
+        updatedProfile.awg_persistent_keepalive = undefined;
+        updatedProfile.awg_port_probing = false;
+      } else if (updatedProfile.protocol === "amneziawg") {
         const priv = (updatedProfile.awg_private_key || updatedProfile.password || "").trim();
         updatedProfile.awg_private_key = priv;
         updatedProfile.password = priv;
@@ -604,15 +658,16 @@ export default function App() {
       showNotice("success", `Конфигурация «${updatedProfile.name}» успешно сохранена!`);
       setEditingProfile(null);
 
-      // If active profile was updated while connected, reconnect
+      // If active profile was updated while connected, restart with updated parameters without rotating ListenPort
       if (status.connected && status.active_profile_id === updatedProfile.id) {
         showNotice("info", "Переподключение туннеля с новыми параметрами...");
         const st = await invoke<VpnStatus>("connect_vpn", {
           profileId: updatedProfile.id,
           mode: routing.mode,
           splitTunneling: routing.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
       }
     } catch (err: any) {
       showNotice("error", "Ошибка сохранения профиля: " + String(err));
@@ -644,8 +699,9 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: nextRouting.mode,
           splitTunneling: nextRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -675,8 +731,9 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: nextRouting.mode,
           splitTunneling: nextRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -706,8 +763,9 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: nextRouting.mode,
           splitTunneling: nextRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -765,6 +823,14 @@ export default function App() {
             deploy_awg: appState.saved_vps!.deploy_awg !== undefined ? appState.saved_vps!.deploy_awg : true,
             deploy_awg2: appState.saved_vps!.deploy_awg2 !== undefined ? appState.saved_vps!.deploy_awg2 : false,
             deploy_ssh: appState.saved_vps!.deploy_ssh !== undefined ? appState.saved_vps!.deploy_ssh : true,
+            deploy_shadowtls: appState.saved_vps!.deploy_shadowtls !== undefined ? appState.saved_vps!.deploy_shadowtls : true,
+            shadowtls_port: appState.saved_vps!.shadowtls_port || 8443,
+            shadowtls_sni: appState.saved_vps!.shadowtls_sni || "www.microsoft.com",
+            deploy_vless_ws: appState.saved_vps!.deploy_vless_ws !== undefined ? appState.saved_vps!.deploy_vless_ws : true,
+            vless_ws_port: appState.saved_vps!.vless_ws_port || 2096,
+            cdn_domain: appState.saved_vps!.cdn_domain || "",
+            deploy_webrtc: appState.saved_vps!.deploy_webrtc !== undefined ? appState.saved_vps!.deploy_webrtc : true,
+            webrtc_port: appState.saved_vps!.webrtc_port || 3478,
             awg_port: (appState.saved_vps!.awg_port && appState.saved_vps!.awg_port !== 51820) ? appState.saved_vps!.awg_port : getRandomInt(21000, 55000),
             awg_hop_ports: appState.saved_vps!.awg_hop_ports || "20000:65000",
             awg_jc: appState.saved_vps!.awg_jc ?? 5,
@@ -779,16 +845,6 @@ export default function App() {
             awg_h3: appState.saved_vps!.awg_h3 ?? "3",
             awg_h4: appState.saved_vps!.awg_h4 ?? "4",
             awg2_port: (appState.saved_vps!.awg2_port && appState.saved_vps!.awg2_port !== 51821) ? appState.saved_vps!.awg2_port : getRandomInt(21000, 55000),
-            awg2_hop_ports: appState.saved_vps!.awg2_hop_ports || "20000:65000",
-            awg2_jc: appState.saved_vps!.awg2_jc ?? 4,
-            awg2_jmin: appState.saved_vps!.awg2_jmin ?? 20,
-            awg2_jmax: appState.saved_vps!.awg2_jmax ?? 60,
-            awg2_s1: appState.saved_vps!.awg2_s1 ?? 30,
-            awg2_s2: appState.saved_vps!.awg2_s2 ?? 40,
-            awg2_h1: appState.saved_vps!.awg2_h1 ?? "89472914",
-            awg2_h2: appState.saved_vps!.awg2_h2 ?? "194820194",
-            awg2_h3: appState.saved_vps!.awg2_h3 ?? "492019482",
-            awg2_h4: appState.saved_vps!.awg2_h4 ?? "1582910492",
             vless_port: appState.saved_vps!.vless_port || 443,
             hy2_port: appState.saved_vps!.hy2_port || 8443,
             tuic_port: appState.saved_vps!.tuic_port || 9443,
@@ -809,7 +865,7 @@ export default function App() {
         }
 
         const st = await invoke<VpnStatus>("get_vpn_status");
-        setStatus(st);
+        applyStatusUpdate(st);
       } catch (err) {
         console.error("Failed to load initial state:", err);
       }
@@ -825,7 +881,7 @@ export default function App() {
       isPolling = true;
       try {
         const st = await invoke<VpnStatus>("get_vpn_status");
-        setStatus(st);
+        applyStatusUpdate(st);
         if (st.connected && st.active_profile_id) {
           if (lastTrackedPid !== st.active_profile_id) {
             lastTrackedPid = st.active_profile_id;
@@ -974,9 +1030,15 @@ export default function App() {
           profileId,
           mode: targetRouting.mode,
           splitTunneling: targetRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
-        showNotice("success", `Переключено на ${target?.name || "профиль"}`);
+        applyStatusUpdate(st);
+        showNotice(
+          "success",
+          st.active_listen_port
+            ? `Переключено на ${target?.name || "профиль"} (ListenPort: ${st.active_listen_port})`
+            : `Переключено на ${target?.name || "профиль"}`
+        );
       } catch (err: any) {
         showNotice("error", String(err));
       } finally {
@@ -995,8 +1057,9 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: newMode,
           splitTunneling: profRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
         showNotice(
           "info",
           `Режим переключен: ${newMode === "tun" ? "TUN (Весь ПК)" : "System Proxy"}`
@@ -1050,8 +1113,9 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: saved.mode,
           splitTunneling: saved.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
         showNotice(
           "info",
           nextSplit
@@ -1091,7 +1155,7 @@ export default function App() {
         setReconnectCooldown(true);
         setTimeout(() => setReconnectCooldown(false), 2000);
         const st = await invoke<VpnStatus>("disconnect_vpn");
-        setStatus(st);
+        applyStatusUpdate(st);
         showNotice("info", "VPN отключен. Защитная пауза WireGuard (2 сек)...");
       } else {
         if (!selectedProfile) {
@@ -1120,13 +1184,44 @@ export default function App() {
           profileId: selectedProfile.id,
           mode: profRouting.mode,
           splitTunneling: profRouting.split_tunneling,
+          preserveListenPort: true,
         });
-        setStatus(st);
+        applyStatusUpdate(st);
+        const lpSuffix = st.active_listen_port ? ` (ListenPort: ${st.active_listen_port})` : "";
         if (st.is_handshaking) {
-          showNotice("info", `Запуск туннеля ${selectedProfile.name}. Ожидание рукопожатия WireGuard...`);
+          showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}. Ожидание рукопожатия WireGuard...`);
         } else {
-          showNotice("success", `Подключено к ${selectedProfile.name}`);
+          showNotice("success", `Подключено к ${selectedProfile.name}${lpSuffix}`);
         }
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleReconnect = async () => {
+    if (connecting || reconnectCooldown) return;
+    const targetId = status.active_profile_id || selectedProfile?.id;
+    if (!targetId) return;
+    setConnecting(true);
+    try {
+      const targetProf = profiles.find((p) => p.id === targetId) || selectedProfile;
+      const profRouting = targetProf?.routing || routing;
+      const st = await invoke<VpnStatus>("reconnect_vpn", {
+        profileId: targetId,
+        mode: profRouting.mode,
+        splitTunneling: profRouting.split_tunneling,
+      });
+      applyStatusUpdate(st);
+      if (st.active_listen_port) {
+        showNotice(
+          st.is_handshaking ? "info" : "success",
+          `Переподключено • Новый порт прослушивания (ListenPort): ${st.active_listen_port}`
+        );
+      } else {
+        showNotice("success", `Туннель ${st.active_profile_name || ""} переподключен!`);
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -1196,10 +1291,22 @@ export default function App() {
       showNotice("error", "Укажите IP-адрес сервера и пароль SSH");
       return;
     }
-    if (!vpsCreds.deploy_vless && !vpsCreds.deploy_hy2 && !vpsCreds.deploy_tuic && !vpsCreds.deploy_ss && !vpsCreds.deploy_awg && !vpsCreds.deploy_ssh) {
+    const hasAnyProtocol =
+      vpsCreds.deploy_vless ||
+      vpsCreds.deploy_hy2 ||
+      vpsCreds.deploy_tuic ||
+      vpsCreds.deploy_ss ||
+      vpsCreds.deploy_awg ||
+      vpsCreds.deploy_awg2 ||
+      vpsCreds.deploy_ssh ||
+      vpsCreds.deploy_shadowtls ||
+      vpsCreds.deploy_vless_ws ||
+      vpsCreds.deploy_webrtc;
+
+    if (!hasAnyProtocol) {
       showNotice(
         "error",
-        "Выберите хотя бы один протокол для развертывания (SSH Tunnel, VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks или Amnezia 3.1)"
+        "Выберите хотя бы один протокол для развертывания (VLESS, Hysteria 2, TUIC, Shadowsocks, Amnezia 3.1, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH)"
       );
       return;
     }
@@ -1208,9 +1315,12 @@ export default function App() {
     const autoAwgPort = getRandomInt(21000, 55000);
     const r31 = generateRandomAwg31Params();
 
+    const autoAwg2Port = (vpsCreds.awg2_port && vpsCreds.awg2_port !== 51821 && vpsCreds.awg2_port !== 51820) ? vpsCreds.awg2_port : getRandomInt(21000, 55000);
+
     const deployedCreds: VpsCredentials = {
       ...vpsCreds,
-      deploy_awg2: false,
+      deploy_awg2: vpsCreds.deploy_awg2 ?? false,
+      awg2_port: autoAwg2Port,
       ...r31,
       awg_port: autoAwgPort,
       awg_disable_cookies: vpsCreds.awg_disable_cookies ?? true,
@@ -1220,9 +1330,15 @@ export default function App() {
     setVpsCreds(deployedCreds);
 
     setVpsBusy("deploying");
+    const logMessages = [
+      `[Авто-рандомизация] Сгенерирован порт Amnezia 3.1 (UDP ${autoAwgPort}) и уникальные параметры обфускации.`,
+    ];
+    if (vpsCreds.deploy_awg2) {
+      logMessages.push(`[Авто-рандомизация] Сгенерирован порт AmneziaWG 2.0 (UDP ${autoAwg2Port}).`);
+    }
     setVpsLogs((prev) => [
       ...prev,
-      `[Авто-рандомизация] Сгенерирован порт Amnezia 3.1 (UDP ${autoAwgPort}) и уникальные параметры обфускации.`,
+      ...logMessages,
     ]);
     try {
       const res = await invoke<DeployResult>("deploy_vps_server", { creds: deployedCreds });
@@ -1316,13 +1432,30 @@ export default function App() {
           : newProfile.protocol === "amneziawg"
           ? "Amnezia 3.1"
           : "Hysteria 2";
-      const isProfileAwg = newProfile.protocol === "amneziawg" || newProfile.protocol === "awg2";
+      const isAwg31 = newProfile.protocol === "amneziawg";
+      const isAwg20 = newProfile.protocol === "awg2";
+      const isProfileAwg = isAwg31 || isAwg20;
       const profToSave: VpnProfile = {
         ...newProfile,
         pinned_on_pc: true,
-        awg_version: newProfile.protocol === "awg2" ? "2.0" : newProfile.protocol === "amneziawg" ? "3.1" : newProfile.awg_version,
+        awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
         awg_private_key: isProfileAwg ? (newProfile.awg_private_key || newProfile.password) : newProfile.awg_private_key,
-        awg_port_probing: isProfileAwg ? (newProfile.awg_port_probing ?? true) : newProfile.awg_port_probing,
+        awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : newProfile.awg_local_address,
+        awg_hop_ports: isAwg31 ? newProfile.awg_hop_ports : undefined,
+        hop_ports: isAwg31 ? newProfile.hop_ports : isAwg20 ? undefined : newProfile.hop_ports,
+        awg_jc: isAwg20 ? undefined : newProfile.awg_jc,
+        awg_jmin: isAwg20 ? undefined : newProfile.awg_jmin,
+        awg_jmax: isAwg20 ? undefined : newProfile.awg_jmax,
+        awg_s1: isAwg20 ? undefined : newProfile.awg_s1,
+        awg_s2: isAwg20 ? undefined : newProfile.awg_s2,
+        awg_s3: isAwg20 ? undefined : newProfile.awg_s3,
+        awg_s4: isAwg20 ? undefined : newProfile.awg_s4,
+        awg_h1: isAwg20 ? undefined : newProfile.awg_h1,
+        awg_h2: isAwg20 ? undefined : newProfile.awg_h2,
+        awg_h3: isAwg20 ? undefined : newProfile.awg_h3,
+        awg_h4: isAwg20 ? undefined : newProfile.awg_h4,
+        awg_persistent_keepalive: isAwg20 ? undefined : newProfile.awg_persistent_keepalive,
+        awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 ? false : newProfile.awg_port_probing,
         name:
           newProfile.name.trim() ||
           `${defaultLabel} (${newProfile.server.trim()})`,
@@ -1946,116 +2079,7 @@ export default function App() {
     }
   };
 
-  const handleProbeListeningPorts = async (resetHistory = false) => {
-    if (!selectedProfile) {
-      showNotice("error", "Профиль подключения не выбран");
-      return;
-    }
-    setIsProbingListeningPorts(true);
-    try {
-      const prevExcluded = resetHistory ? [] : (probedHistoryPorts[selectedProfile.id] || []);
-      showNotice(
-        "info",
-        `Сканирование диапазона портов 20000–65000 на сервере «${selectedProfile.name}» (${selectedProfile.server})...`
-      );
 
-      const results = await invoke<PortProbeResult[]>("probe_profile_ports", {
-        profileId: selectedProfile.id,
-        profile: selectedProfile,
-        customPorts: null,
-        excludePorts: prevExcluded,
-      });
-
-      setListeningProbeResults((prev) => ({
-        ...prev,
-        [selectedProfile.id]: results,
-      }));
-
-      const newHistory = [...prevExcluded, ...results.map((r) => r.port)];
-      setProbedHistoryPorts((prev) => ({
-        ...prev,
-        [selectedProfile.id]: newHistory,
-      }));
-
-      if (results.length > 0) {
-        showNotice(
-          "success",
-          `⚡ Найдено ${results.length} открытых портов в диапазоне 20000–65000! Нажмите на нужный порт для применения.`
-        );
-      } else {
-        showNotice(
-          "info",
-          `В диапазоне 20000–65000 открытых портов не обнаружено. Если переадресация NAT на VPS отключена, работает только исходный порт (${selectedProfile.original_port || selectedProfile.port}).`
-        );
-      }
-    } catch (err: any) {
-      showNotice("error", `Ошибка проверки портов: ${String(err)}`);
-    } finally {
-      setIsProbingListeningPorts(false);
-    }
-  };
-
-  const handleResetPortHistory = async () => {
-    if (!selectedProfile) return;
-    setProbedHistoryPorts((prev) => ({
-      ...prev,
-      [selectedProfile.id]: [],
-    }));
-    await handleProbeListeningPorts(true);
-  };
-
-  const handleApplyListeningPort = async (newPort: number) => {
-    if (!selectedProfile) {
-      showNotice("error", "Профиль подключения не выбран");
-      return;
-    }
-    if (selectedProfile.port === newPort) {
-      showNotice("info", `Порт ${newPort} уже установлен в конфиге «${selectedProfile.name}»`);
-      return;
-    }
-
-    const currentResults = listeningProbeResults[selectedProfile.id] || [];
-    const probeItem = currentResults.find((r) => r.port === newPort);
-    if (probeItem && !probeItem.reachable) {
-      const confirmed = window.confirm(
-        `⚠️ Внимание: порт ${newPort} не ответил на проверку (вероятно закрыт или заблокирован).\n\nПодключение через него может зависнуть на этапе рукопожатия. Всё равно применить к «${selectedProfile.name}»?`
-      );
-      if (!confirmed) {
-        return;
-      }
-    }
-
-    setIsApplyingListeningPort(true);
-    const updatedProfile: VpnProfile = {
-      ...selectedProfile,
-      port: newPort,
-      original_port: selectedProfile.original_port || selectedProfile.port,
-    };
-
-    try {
-      const updatedList = await invoke<VpnProfile[]>("add_or_update_profile", {
-        profile: updatedProfile,
-      });
-      setProfiles(updatedList);
-
-      if (status.connected && status.active_profile_id === selectedProfile.id) {
-        showNotice("info", `Переподключение VPN на порт ${newPort}...`);
-        const st = await invoke<VpnStatus>("connect_vpn", {
-          profileId: updatedProfile.id,
-          mode: routing.mode,
-          splitTunneling: routing.split_tunneling,
-        });
-        setStatus(st);
-        showNotice("success", `⚡ Порт ${newPort} успешно применен к «${selectedProfile.name}», VPN переподключен!`);
-      } else {
-        showNotice("success", `Порт прослушивания ${newPort} применен к конфигу «${selectedProfile.name}»`);
-      }
-    } catch (err: any) {
-      showNotice("error", `Ошибка применения порта: ${String(err)}`);
-    } finally {
-      setIsApplyingListeningPort(false);
-    }
-  };
 
   const renderProtocolBadge = (protocol: string, version?: string | null) => {
     const p = (protocol || "").toLowerCase();
@@ -2063,7 +2087,11 @@ export default function App() {
     let colorClass = "bg-slate-800 text-slate-100 border-slate-600/80";
     let dotClass = "bg-slate-400";
 
-    if (p === "awg2" || (p === "amneziawg" && version === "2.0")) {
+    if (p === "wireguard" || p === "wg") {
+      label = "WireGuard";
+      colorClass = "bg-rose-950/80 text-rose-300 border-rose-500/40 shadow-sm";
+      dotClass = "bg-rose-400";
+    } else if (p === "awg2" || (p === "amneziawg" && version === "2.0")) {
       label = "AWG 2.0";
       colorClass = "bg-teal-950/80 text-teal-300 border-teal-500/40 shadow-sm";
       dotClass = "bg-teal-400";
@@ -2091,6 +2119,18 @@ export default function App() {
       label = "SSH Tunnel";
       colorClass = "bg-violet-950/80 text-violet-300 border-violet-500/40 shadow-sm";
       dotClass = "bg-violet-400";
+    } else if (p === "shadowtls") {
+      label = "ShadowTLS v3";
+      colorClass = "bg-pink-950/80 text-pink-300 border-pink-500/40 shadow-sm";
+      dotClass = "bg-pink-400";
+    } else if (p === "vless_ws") {
+      label = "Cloudflare WS";
+      colorClass = "bg-orange-950/80 text-orange-300 border-orange-500/40 shadow-sm";
+      dotClass = "bg-orange-400";
+    } else if (p === "webrtc") {
+      label = "WebRTC Стелс";
+      colorClass = "bg-lime-950/80 text-lime-300 border-lime-500/40 shadow-sm";
+      dotClass = "bg-lime-400";
     }
 
     return (
@@ -2193,7 +2233,7 @@ export default function App() {
                 transform: `translateY(${
                   Math.max(
                     0,
-                    ["dashboard", "vps", "profiles", "routing", "settings", "about"].indexOf(
+                    ["dashboard", "routing", "vps", "profiles", "settings", "about"].indexOf(
                       activeTab
                     )
                   ) * 48
@@ -2277,6 +2317,23 @@ export default function App() {
             </button>
 
             <button
+              onClick={() => setActiveTab("routing")}
+              title={sidebarCollapsed ? t.navRouting : undefined}
+              className={`relative z-10 w-full h-[42px] flex items-center ${
+                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
+              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+                activeTab === "routing"
+                  ? "text-cyan-300 font-semibold"
+                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              }`}
+            >
+              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
+                <Globe className="w-4 h-4 shrink-0" />
+                {!sidebarCollapsed && <span>{t.navRouting}</span>}
+              </span>
+            </button>
+
+            <button
               onClick={() => setActiveTab("vps")}
               title={sidebarCollapsed ? `${t.navVps} (SSH)` : undefined}
               className={`relative z-10 w-full h-[42px] flex items-center ${
@@ -2318,23 +2375,6 @@ export default function App() {
                   {profiles.length}
                 </span>
               )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab("routing")}
-              title={sidebarCollapsed ? t.navRouting : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "routing"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
-              }`}
-            >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Globe className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navRouting}</span>}
-              </span>
             </button>
 
             <button
@@ -2551,14 +2591,14 @@ export default function App() {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 sm:gap-4">
-                {/* Left Column: Power Button & Speed Meter */}
-                <div className="col-span-1 lg:col-span-5 p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-col justify-between space-y-2.5 relative overflow-hidden">
-                  {/* Modern Main Action Button - Fills the top space completely */}
+              <div className="p-3.5 sm:p-4 rounded-2xl bg-[#111827] border border-slate-800/90 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch relative overflow-hidden">
+                {/* Left Column: Power Button, Reconnect & Speed Meter */}
+                <div className="col-span-1 lg:col-span-5 flex flex-col justify-between gap-2.5 lg:pr-4 lg:border-r lg:border-slate-800/80">
+                  {/* Modern Main Action Button - Stretches to match server list height */}
                   <button
                     onClick={handleToggleConnect}
                     disabled={connecting || reconnectCooldown}
-                    className={`w-full min-h-[64px] py-2 rounded-xl px-3.5 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
+                    className={`w-full flex-1 min-h-[76px] py-3 rounded-xl px-4 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
                       status.connected
                         ? status.is_handshaking
                           ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-1 ring-amber-500/30"
@@ -2637,10 +2677,30 @@ export default function App() {
                     </div>
                   </button>
 
+                  {status.connected && (
+                    <button
+                      type="button"
+                      onClick={handleReconnect}
+                      disabled={connecting || reconnectCooldown}
+                      className="w-full py-1.5 px-3 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-xs font-semibold text-cyan-300 flex items-center justify-between gap-2 transition cursor-pointer disabled:opacity-50"
+                      title="Переподключить туннель и сменить локальный UDP порт прослушивания (ListenPort)"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <RotateCcw className={`w-3.5 h-3.5 ${connecting ? "animate-spin" : ""}`} />
+                        Переподключиться
+                      </span>
+                      {status.active_listen_port && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30">
+                          ListenPort: {status.active_listen_port}
+                        </span>
+                      )}
+                    </button>
+                  )}
+
                   {/* Compact Live Speed Meter */}
-                  <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-slate-800/80">
-                    <div className="px-2 py-1 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
-                      <Download className="w-3 h-3 text-cyan-400 shrink-0" />
+                  <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
+                    <div className="px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
+                      <Download className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
                       <div className="min-w-0">
                         <div className="text-[9px] text-slate-400 leading-none">Входящий</div>
                         <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
@@ -2649,8 +2709,8 @@ export default function App() {
                       </div>
                     </div>
 
-                    <div className="px-2 py-1 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
-                      <Upload className="w-3 h-3 text-indigo-400 shrink-0" />
+                    <div className="px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
+                      <Upload className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
                       <div className="min-w-0">
                         <div className="text-[9px] text-slate-400 leading-none">Исходящий</div>
                         <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
@@ -2661,130 +2721,139 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Right Column: Server Selector */}
-                <div className="col-span-1 lg:col-span-7">
-                  {/* Active Profile Selection Card */}
-                  <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 shrink-0">
-                        <Layers className="w-3.5 h-3.5 text-cyan-400" />
-                        Выбранный сервер и протокол
-                      </span>
-                      <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-                        <button
-                          onClick={() => setActiveTab("profiles")}
-                          className="text-xs text-slate-400 hover:text-slate-200 font-medium transition cursor-pointer"
-                        >
-                          Управление ({effectiveDashboardProfiles.length})
-                        </button>
+                {/* Right Column: Server & Protocol Selector (fits 3 rows comfortably) */}
+                <div className="col-span-1 lg:col-span-7 flex flex-col justify-between space-y-2.5 min-w-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-800/80">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 shrink-0">
+                      <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                      Выбранный сервер и протокол
+                    </span>
+                    <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
+                      <button
+                        onClick={() => setActiveTab("profiles")}
+                        className="text-xs text-slate-400 hover:text-slate-200 font-medium transition cursor-pointer"
+                      >
+                        Управление ({effectiveDashboardProfiles.length})
+                      </button>
+                      <button
+                        onClick={() => setActiveTab("vps")}
+                        className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 cursor-pointer"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> Добавить VPS
+                      </button>
+                    </div>
+                  </div>
+
+                  {!selectedProfile ? (
+                    <div className="flex-1 flex flex-col justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2">
+                      <p className="text-xs text-slate-400">
+                        Нет сохраненных профилей.
+                      </p>
+                      <div className="flex justify-center gap-2">
                         <button
                           onClick={() => setActiveTab("vps")}
-                          className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 cursor-pointer"
+                          className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition"
                         >
-                          <Plus className="w-3.5 h-3.5" /> Добавить VPS
+                          Автодеплой
+                        </button>
+                        <button
+                          onClick={() => setActiveTab("profiles")}
+                          className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
+                        >
+                          Вручную
                         </button>
                       </div>
                     </div>
+                  ) : (
+                    <div className="max-h-[174px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar flex-1">
+                      {effectiveDashboardProfiles.map((p) => {
+                        const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
+                        const isLiveConnected = status.connected && status.active_profile_id === p.id;
+                        const shownListenPort =
+                          isLiveConnected && status.active_listen_port
+                            ? status.active_listen_port
+                            : p.listen_port;
 
-                    {!selectedProfile ? (
-                      <div className="p-3 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-1.5">
-                        <p className="text-xs text-slate-400">
-                          Нет сохраненных профилей.
-                        </p>
-                        <div className="flex justify-center gap-2">
-                          <button
-                            onClick={() => setActiveTab("vps")}
-                            className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition"
+                        return (
+                          <div
+                            key={p.id}
+                            onClick={() => handleQuickSwitchProfile(p.id)}
+                            className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2.5 group ${
+                              isCurrentSelected
+                                ? "bg-cyan-500/10 border-cyan-500/60 shadow-sm ring-1 ring-cyan-500/30"
+                                : "bg-[#0b101d] border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
+                            }`}
                           >
-                            Автодеплой
-                          </button>
-                          <button
-                            onClick={() => setActiveTab("profiles")}
-                            className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
-                          >
-                            Вручную
-                          </button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="max-h-[108px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
-                        {effectiveDashboardProfiles.map((p) => {
-                          const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
-                          const isLiveConnected = status.connected && status.active_profile_id === p.id;
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              {renderProtocolBadge(p.protocol, p.awg_version)}
 
-                          return (
-                            <div
-                              key={p.id}
-                              onClick={() => handleQuickSwitchProfile(p.id)}
-                              className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2.5 group ${
-                                isCurrentSelected
-                                  ? "bg-cyan-500/10 border-cyan-500/60 shadow-sm ring-1 ring-cyan-500/30"
-                                  : "bg-[#0b101d] border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
-                              }`}
-                            >
-                              <div className="flex items-center gap-2.5 min-w-0">
-                                {renderProtocolBadge(p.protocol, p.awg_version)}
-
-                                <div className="min-w-0">
-                                  <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
-                                    <span className="truncate">{p.name}</span>
-                                    {isLiveConnected && (
-                                      <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono font-medium shrink-0">
-                                        В эфире
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
-                                    <span>
-                                      {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                                  <span className="truncate">{p.name}</span>
+                                  {isLiveConnected && (
+                                    <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono font-medium shrink-0">
+                                      В эфире
                                     </span>
-                                    <span
-                                      className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono hidden sm:inline-block shrink-0"
-                                      title={`Трафик: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}`}
-                                    >
-                                      ↓{formatBytes(p.total_down_bytes || 0)} • ↑{formatBytes(p.total_up_bytes || 0)}
-                                    </span>
-                                  </div>
+                                  )}
                                 </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 shrink-0">
-                                {p.ping_ms != null ? (
-                                  <span className="text-[10px] font-mono text-emerald-400 font-semibold">
-                                    {p.ping_ms} мс
+                                <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
+                                  <span>
+                                    {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
                                   </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handlePingProfile(p.id);
-                                    }}
-                                    disabled={pingingId === p.id}
-                                    className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition"
+                                  {(p.protocol === "amneziawg" || p.protocol === "awg2" || p.protocol === "wireguard") && shownListenPort && (
+                                    <span
+                                      className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-mono shrink-0"
+                                      title="Локальный порт прослушивания (ListenPort)"
+                                    >
+                                      Listen:{shownListenPort}
+                                    </span>
+                                  )}
+                                  <span
+                                    className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono hidden sm:inline-block shrink-0"
+                                    title={`Трафик: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}`}
                                   >
-                                    {pingingId === p.id ? "..." : "Пинг"}
-                                  </button>
-                                )}
-
-                                <div
-                                  className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
-                                    isCurrentSelected
-                                      ? isLiveConnected
-                                        ? "border-emerald-400 bg-emerald-500"
-                                        : "border-cyan-400 bg-cyan-500"
-                                      : "border-slate-600 bg-transparent group-hover:border-slate-500"
-                                  }`}
-                                >
-                                  {isCurrentSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                                    ↓{formatBytes(p.total_down_bytes || 0)} • ↑{formatBytes(p.total_up_bytes || 0)}
+                                  </span>
                                 </div>
                               </div>
                             </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {p.ping_ms != null ? (
+                                <span className="text-[10px] font-mono text-emerald-400 font-semibold">
+                                  {p.ping_ms} мс
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handlePingProfile(p.id);
+                                  }}
+                                  disabled={pingingId === p.id}
+                                  className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition"
+                                >
+                                  {pingingId === p.id ? "..." : "Пинг"}
+                                </button>
+                              )}
+
+                              <div
+                                className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
+                                  isCurrentSelected
+                                    ? isLiveConnected
+                                      ? "border-emerald-400 bg-emerald-500"
+                                      : "border-cyan-400 bg-cyan-500"
+                                    : "border-slate-600 bg-transparent group-hover:border-slate-500"
+                                }`}
+                              >
+                                {isCurrentSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -2915,187 +2984,7 @@ export default function App() {
                 </div>
               </div>
 
-              {/* LISTENING PORT DETECTOR (Dashboard) */}
-              <div className="p-4 rounded-2xl bg-[#111827] border border-cyan-500/30 shadow-[0_0_20px_-10px_rgba(6,182,212,0.15)] space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-400">
-                      <Radio className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white flex flex-wrap items-center gap-2">
-                        <span>Определение порта прослушивания</span>
-                        {selectedProfile && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                            Порт: {selectedProfile.port}
-                          </span>
-                        )}
-                        {selectedProfile && selectedProfile.original_port && selectedProfile.port !== selectedProfile.original_port && (
-                          <button
-                            type="button"
-                            onClick={() => handleApplyListeningPort(selectedProfile.original_port!)}
-                            disabled={isApplyingListeningPort}
-                            className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold flex items-center gap-1 transition cursor-pointer select-none"
-                            title={`Вернуть исходный рабочий порт сервера (${selectedProfile.original_port})`}
-                          >
-                            <RotateCcw className="w-2.5 h-2.5" />
-                            <span>Вернуть исходный порт ({selectedProfile.original_port})</span>
-                          </button>
-                        )}
-                        {(probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 font-mono">
-                            Всего проверено: {(probedHistoryPorts[selectedProfile?.id || ""] || []).length}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-400">
-                        Поиск работающих портов прослушивания и быстрое применение к выбранному конфигу
-                      </p>
-                    </div>
-                  </div>
 
-                  <div className="flex items-center gap-2">
-                    {(probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handleResetPortHistory}
-                        disabled={isProbingListeningPorts}
-                        className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-cyan-300 border border-slate-700 transition cursor-pointer"
-                        title="Сбросить историю и начать поиск портов с начала"
-                      >
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => handleProbeListeningPorts(false)}
-                      disabled={isProbingListeningPorts || !selectedProfile}
-                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer select-none shadow-md ${
-                        isProbingListeningPorts
-                          ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 cursor-wait"
-                          : "bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-white shadow-cyan-500/20 active:scale-95"
-                      }`}
-                      title={
-                        (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0
-                          ? "Найти следующие порты в диапазоне 20000–65000"
-                          : "Сканировать диапазон 20000–65000 на сервере и показать открытые"
-                      }
-                    >
-                      {isProbingListeningPorts ? (
-                        <>
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Сканирование...</span>
-                        </>
-                      ) : (probedHistoryPorts[selectedProfile?.id || ""] || []).length > 0 ? (
-                        <>
-                          <Search className="w-3.5 h-3.5" />
-                          <span>Определить еще порты ⚡</span>
-                        </>
-                      ) : (
-                        <>
-                          <Search className="w-3.5 h-3.5" />
-                          <span>Определить рабочий порт</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Render Port Icons */}
-                {isProbingListeningPorts ? (
-                  <div className="p-4 rounded-xl bg-[#0b101d] border border-cyan-500/20 flex items-center justify-center gap-2.5 text-xs text-cyan-300 animate-pulse">
-                    <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
-                    <span>
-                      Сканирование диапазона портов 20000–65000 на сервере {selectedProfile ? `«${selectedProfile.name}» (${selectedProfile.server})` : ""}...
-                    </span>
-                  </div>
-                ) : listeningProbeResults[selectedProfile?.id || ""] ? (
-                  listeningProbeResults[selectedProfile?.id || ""].length > 0 ? (
-                    <div className="space-y-2 pt-1">
-                      <div className="flex items-center justify-between text-[11px] text-slate-400 px-0.5">
-                        <span className="flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#10b981]" />
-                          Нажмите на открытый порт для применения к профилю:
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-mono">
-                          Найдено открытых портов: <span className="text-emerald-400 font-bold">{listeningProbeResults[selectedProfile?.id || ""].length}</span>
-                        </span>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 max-h-56 overflow-y-auto pr-1">
-                        {listeningProbeResults[selectedProfile?.id || ""].map((res) => {
-                          const isCurrent = selectedProfile?.port === res.port;
-                          return (
-                            <button
-                              key={res.port}
-                              type="button"
-                              onClick={() => handleApplyListeningPort(res.port)}
-                              disabled={isApplyingListeningPort}
-                              className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
-                                isCurrent
-                                  ? "bg-gradient-to-r from-cyan-600/30 to-indigo-600/30 border-cyan-400 text-white shadow-md shadow-cyan-500/25 ring-1 ring-cyan-400"
-                                  : "bg-[#0b101d] border-emerald-500/35 hover:border-emerald-400 text-emerald-200 hover:text-white hover:bg-emerald-500/10 hover:shadow-sm"
-                              }`}
-                              title={`${res.port}: ${res.message}${res.latency_ms ? ` (${res.latency_ms} мс)` : ""}. Нажмите для применения к «${selectedProfile?.name}»`}
-                            >
-                              {isCurrent ? (
-                                <div className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-400 flex items-center justify-center shrink-0">
-                                  <Check className="w-2.5 h-2.5 text-cyan-300" />
-                                </div>
-                              ) : (
-                                <div className="w-4 h-4 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center shrink-0">
-                                  <Zap className="w-2.5 h-2.5 text-emerald-400" />
-                                </div>
-                              )}
-
-                              <div className="flex flex-col items-start leading-tight">
-                                <span className="font-mono font-bold text-[12px] tracking-wide">
-                                  {res.port}
-                                </span>
-                                {res.latency_ms != null && (
-                                  <span className="text-[9px] text-emerald-400 font-mono">
-                                    {res.latency_ms} мс
-                                  </span>
-                                )}
-                              </div>
-
-                              {isCurrent && (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold uppercase tracking-wider ml-0.5">
-                                  Активен
-                                </span>
-                              )}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-2.5 text-xs text-amber-200">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <div className="space-y-1">
-                        <div className="font-semibold text-amber-300">Открытых портов в проверенном диапазоне 20000–65000 не найдено</div>
-                        <div className="text-[11px] text-amber-300/80 leading-relaxed">
-                          Сервер не ответил на проверенные порты из диапазона. Возможно, переадресация портов (NAT iptables PREROUTING) на VPS не настроена для этих портов или сервер выключен.
-                          {selectedProfile?.original_port && selectedProfile.port !== selectedProfile.original_port && (
-                            <span> Рекомендуется вернуть исходный порт сервера: <strong className="text-white">{selectedProfile.original_port}</strong>.</span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )
-                ) : (
-                  <div className="p-3 rounded-xl bg-[#0b101d]/60 border border-slate-800/60 flex items-center justify-between text-xs text-slate-400">
-                    <div className="flex items-center gap-2">
-                      <Radio className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                      <span>
-                        {selectedProfile
-                          ? `Текущий порт конфига «${selectedProfile.name}»: ${selectedProfile.port}. Нажмите кнопку «Определить рабочий порт» для поиска открытых портов.`
-                          : "Выберите профиль подключения для определения портов"}
-                      </span>
-                    </div>
-                  </div>
-                )}
-              </div>
             </div>
 
             {/* Bottom Live Core Logs - Anchored to bottom edge */}
@@ -4102,6 +3991,219 @@ export default function App() {
                       </div>
                     )}
                   </div>
+
+                  {/* Protocol 6: AmneziaWG 2.0 (AWG 2.0) */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_awg2
+                        ? "bg-teal-950/20 border-teal-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_awg2 ?? false}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_awg2: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-teal-500 focus:ring-teal-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2">
+                            <span>AmneziaWG 2.0 (AWG 2.0)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/30">
+                              Чистый конфиг • MTU 1420
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Чистая WireGuard-совместимая конфигурация (PrivateKey, Address, DNS, MTU 1420, PublicKey, PresharedKey, AllowedIPs, Endpoint) без лишних заголовков и параметров обфускации.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {vpsCreds.deploy_awg2 && (
+                      <div className="mt-3 pt-3 border-t border-teal-500/20 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-bold text-teal-300">Настройки AmneziaWG 2.0</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/40 font-mono">
+                              Standard UDP • PresharedKey • MTU 1420
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newPort = getRandomInt(21000, 55000);
+                              setVpsCreds({
+                                ...vpsCreds,
+                                awg2_port: newPort,
+                              });
+                              showNotice("success", `Выбран случайный порт AWG 2.0: UDP ${newPort}!`);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-teal-600/30 hover:bg-teal-600/50 border border-teal-500/40 text-[11px] font-semibold text-teal-300 flex items-center gap-1 transition cursor-pointer"
+                            title="Сгенерировать случайный UDP порт"
+                          >
+                            🎲 Случайный порт
+                          </button>
+                        </div>
+
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">
+                            Основной порт AmneziaWG 2.0 (UDP)
+                          </label>
+                          <input
+                            type="number"
+                            value={vpsCreds.awg2_port || ""}
+                            onChange={(e) =>
+                              setVpsCreds({
+                                ...vpsCreds,
+                                awg2_port: Number(e.target.value) || 0,
+                              })
+                            }
+                            placeholder="Случайный порт UDP (20000-55000)"
+                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-teal-500 focus:outline-none"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Protocol 7: ShadowTLS v3 */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_shadowtls
+                        ? "bg-pink-950/20 border-pink-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_shadowtls ?? true}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_shadowtls: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-pink-500 focus:ring-pink-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2">
+                            <span>ShadowTLS v3 (L7 Паразитическая мимикрия)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-pink-500/20 text-pink-300 font-semibold border border-pink-500/30">
+                              🎭 Не детектируется ТСПУ
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Паразитирует на реальном TLS-рукопожатии сайта Microsoft/Apple. Имеет 100% защиту от активного зондирования (DPI не отличит от белого трафика).
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Protocol 8: Cloudflare CDN WebSocket */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_vless_ws
+                        ? "bg-orange-950/20 border-orange-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_vless_ws ?? true}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_vless_ws: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-orange-500 focus:ring-orange-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2">
+                            <span>VLESS + WebSocket (Cloudflare CDN Shield)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-orange-500/20 text-orange-300 font-semibold border border-orange-500/30">
+                              ☁️ Защита от блокировки IP VPS
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Трафик может проксироваться через белый CDN (Cloudflare Workers/Edge). Если цензор заблокирует IP вашего VPS, соединение продолжит работать!
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {vpsCreds.deploy_vless_ws && (
+                      <div className="mt-3 pl-6 border-t border-slate-800/80 pt-2.5">
+                        <label className="block text-[11px] text-slate-400 mb-1">
+                          Домен Cloudflare Worker / CDN (опционально):
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="например: my-worker.username.workers.dev (или пусто для прямого IP)"
+                          value={vpsCreds.cdn_domain || ""}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              cdn_domain: e.target.value,
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#080d19] border border-orange-500/30 text-xs text-white placeholder-slate-600 focus:border-orange-500 focus:outline-none font-mono"
+                        />
+                        <span className="text-[10px] text-slate-500 mt-1 block">
+                          Если указан Worker, трафик пойдет через Cloudflare Edge, скрывая реальный IP сервера.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Protocol 9: WebRTC Media Steganography */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_webrtc
+                        ? "bg-lime-950/20 border-lime-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_webrtc ?? true}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_webrtc: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-lime-500 focus:ring-lime-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2">
+                            <span>WebRTC Steganography (Маскировка под аудиозвонок)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-lime-500/20 text-lime-300 font-semibold border border-lime-500/30">
+                              🎙️ Потоковый Стелс
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Имитирует медиа-потоки мессенджеров (Telegram/Discord/Zoom). DPI видит обычный зашифрованный разговор и не трогает его.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -4313,27 +4415,32 @@ export default function App() {
                     <select
                       value={newProfile.protocol}
                       onChange={(e) => {
-                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg2" | "ssh";
+                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg2" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
                         const isAwg31 = proto === "amneziawg";
                         const isAwg20 = proto === "awg2";
                         setNewProfile({
                           ...newProfile,
                           protocol: proto,
-                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : (isAwg20 || isAwg31) ? getRandomInt(21000, 55000) : 8443,
-                          sni: proto === "ssh" ? (newProfile.sni || "root") : newProfile.sni,
+                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : proto === "vless_ws" ? 2096 : proto === "webrtc" ? 3478 : proto === "shadowtls" ? 8443 : (isAwg20 || isAwg31) ? getRandomInt(21000, 55000) : 8443,
+                          sni: proto === "ssh" ? (newProfile.sni || "root") : proto === "shadowtls" ? (newProfile.sni || "gateway.icloud.com") : proto === "webrtc" ? (newProfile.sni || "zoom.us") : newProfile.sni,
+                          shadowtls_sni: proto === "shadowtls" ? (newProfile.shadowtls_sni || "gateway.icloud.com") : newProfile.shadowtls_sni,
+                          ws_path: proto === "vless_ws" ? (newProfile.ws_path || "/ws-tunnel") : proto === "webrtc" ? (newProfile.ws_path || "webrtc-media") : newProfile.ws_path,
                           tls_fragment: proto === "ssh" ? false : true,
                           awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
-                          awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/32") : isAwg31 ? (newProfile.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
-                          awg_hop_ports: (isAwg31 || isAwg20) ? (newProfile.awg_hop_ports || "20000:65000") : newProfile.awg_hop_ports,
-                          awg_port_probing: (isAwg31 || isAwg20) ? (newProfile.awg_port_probing ?? true) : newProfile.awg_port_probing,
+                          awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : isAwg31 ? (newProfile.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
+                          awg_hop_ports: isAwg31 ? (newProfile.awg_hop_ports || "20000:65000") : isAwg20 ? undefined : newProfile.awg_hop_ports,
+                          awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 ? false : newProfile.awg_port_probing,
                         });
                       }}
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                     >
                       <option value="ssh">SSH Tunnel (порт 22 • 100% обход блокировок)</option>
                       <option value="vless">VLESS Reality (порт 443 + Anti-DPI)</option>
+                      <option value="shadowtls">ShadowTLS v3 (L7 TLS-паразит Microsoft/Apple)</option>
+                      <option value="vless_ws">VLESS + WebSocket (Cloudflare CDN Shield)</option>
+                      <option value="webrtc">WebRTC Steganography (VLESS over gRPC Media)</option>
                       <option value="amneziawg">Amnezia 3.1 (Header Protection + S1-S4 ≥ 12)</option>
-                      <option value="awg2">AmneziaWG 2.0 (AWG 2.0 • Магические заголовки H1-H4)</option>
+                      <option value="awg2">AmneziaWG 2.0 (AWG 2.0 • Чистый конфиг)</option>
                       <option value="hysteria2">Hysteria 2 (QUIC + Salamander)</option>
                       <option value="tuic">TUIC v5 (QUIC BBR)</option>
                       <option value="shadowsocks">Shadowsocks 2022</option>
@@ -4364,7 +4471,7 @@ export default function App() {
                     />
                   </div>
                   <div>
-                    <label className="block text-xs text-slate-400 mb-1">Порт</label>
+                    <label className="block text-xs text-slate-400 mb-1">Порт (сервера)</label>
                     <input
                       type="number"
                       value={newProfile.port}
@@ -4375,6 +4482,21 @@ export default function App() {
                         })
                       }
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Порт прослушивания (Listen Port)</label>
+                    <input
+                      type="number"
+                      value={newProfile.listen_port || ""}
+                      placeholder="Авто / случайный"
+                      onChange={(e) =>
+                        setNewProfile({
+                          ...newProfile,
+                          listen_port: e.target.value ? Number(e.target.value) || null : null,
+                        })
+                      }
+                      className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
                     />
                   </div>
                 </div>
@@ -4645,29 +4767,16 @@ export default function App() {
                   </div>
                 ) : newProfile.protocol === "awg2" ? (
                   <div className="space-y-3 pt-1">
-                    <div className="flex items-center justify-between p-3 rounded-xl bg-teal-950/25 border border-teal-500/30">
-                      <div>
-                        <div className="text-xs font-bold text-teal-300">
-                          Параметры протокола AmneziaWG 2.0
-                        </div>
-                        <div className="text-[11px] text-slate-400">
-                          Классическая обфускация WireGuard со случайными 32-битными заголовками H1-H4
-                        </div>
+                    <div className="p-3 rounded-xl bg-teal-950/25 border border-teal-500/30">
+                      <div className="text-xs font-bold text-teal-300">
+                        Параметры протокола AmneziaWG 2.0
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const r = generateRandomAwg20Params();
-                          setNewProfile({ ...newProfile, ...r });
-                          showNotice("success", "Параметры AWG 2.0 рандомизированы!");
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-teal-600/30 hover:bg-teal-600/50 border border-teal-500/40 text-xs font-semibold text-teal-300 flex items-center gap-1.5 transition"
-                      >
-                        🎲 Рандомизировать параметры 2.0
-                      </button>
+                      <div className="text-[11px] text-slate-400">
+                        Чистая WireGuard-совместимая конфигурация (MTU 1420, DNS 1.1.1.1, без лишних параметров)
+                      </div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs text-slate-400 mb-1">Приватный ключ клиента (Base64)</label>
                         <input
@@ -4696,17 +4805,14 @@ export default function App() {
                         <label className="block text-xs text-slate-400 mb-1">IP клиента (Address)</label>
                         <input
                           type="text"
-                          placeholder="10.8.1.2/32"
-                          value={newProfile.awg_local_address || "10.8.1.2/32"}
+                          placeholder="10.8.1.2/24"
+                          value={newProfile.awg_local_address || "10.8.1.2/24"}
                           onChange={(e) =>
                             setNewProfile({ ...newProfile, awg_local_address: e.target.value })
                           }
-                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
                         />
                       </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="block text-xs text-slate-400 mb-1">PresharedKey (Base64 32 байта, опционально)</label>
                         <input
@@ -4718,94 +4824,6 @@ export default function App() {
                           }
                           className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
                         />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-slate-400 mb-1">Диапазон авто-подбора портов (Port Hunting)</label>
-                        <input
-                          type="text"
-                          placeholder="20000:65000"
-                          value={newProfile.awg_hop_ports || "20000:65000"}
-                          onChange={(e) =>
-                            setNewProfile({ ...newProfile, awg_hop_ports: e.target.value })
-                          }
-                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
-                        />
-                      </div>
-                    </div>
-
-                    {/* AWG 2.0 Obfuscation params */}
-                    <div className="p-3 rounded-xl bg-[#070b14] border border-slate-800 grid grid-cols-4 gap-2 text-xs">
-                      <div>
-                        <span className="text-slate-400 block mb-1">Jc (Мусорные пакеты)</span>
-                        <input
-                          type="number"
-                          value={newProfile.awg_jc ?? 4}
-                          onChange={(e) => setNewProfile({ ...newProfile, awg_jc: Number(e.target.value) || 4 })}
-                          className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-white"
-                        />
-                      </div>
-                      <div>
-                        <span className="text-slate-400 block mb-1">Jmin / Jmax</span>
-                        <div className="flex items-center gap-1">
-                          <input
-                            type="number"
-                            value={newProfile.awg_jmin ?? 20}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_jmin: Number(e.target.value) || 20 })}
-                            className="w-full px-1.5 py-1 rounded bg-[#0b101d] border border-slate-700 text-white"
-                          />
-                          <input
-                            type="number"
-                            value={newProfile.awg_jmax ?? 65}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_jmax: Number(e.target.value) || 65 })}
-                            className="w-full px-1.5 py-1 rounded bg-[#0b101d] border border-slate-700 text-white"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 block mb-1">S1 / S2</span>
-                        <div className="grid grid-cols-2 gap-1">
-                          <input
-                            type="number"
-                            value={newProfile.awg_s1 ?? 30}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_s1: Number(e.target.value) || 30 })}
-                            className="w-full px-1 py-1 rounded bg-[#0b101d] border border-slate-700 text-white text-[11px] text-center"
-                          />
-                          <input
-                            type="number"
-                            value={newProfile.awg_s2 ?? 30}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_s2: Number(e.target.value) || 30 })}
-                            className="w-full px-1 py-1 rounded bg-[#0b101d] border border-slate-700 text-white text-[11px] text-center"
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 block mb-1">H1-H4 (32-бит числа)</span>
-                        <div className="grid grid-cols-2 gap-1">
-                          <input
-                            type="text"
-                            value={newProfile.awg_h1 ?? "10000001"}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_h1: e.target.value })}
-                            className="w-full px-1 py-0.5 rounded bg-[#0b101d] border border-slate-700 text-white text-[10px] text-center font-mono"
-                          />
-                          <input
-                            type="text"
-                            value={newProfile.awg_h2 ?? "20000002"}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_h2: e.target.value })}
-                            className="w-full px-1 py-0.5 rounded bg-[#0b101d] border border-slate-700 text-white text-[10px] text-center font-mono"
-                          />
-                          <input
-                            type="text"
-                            value={newProfile.awg_h3 ?? "30000003"}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_h3: e.target.value })}
-                            className="w-full px-1 py-0.5 rounded bg-[#0b101d] border border-slate-700 text-white text-[10px] text-center font-mono"
-                          />
-                          <input
-                            type="text"
-                            value={newProfile.awg_h4 ?? "40000004"}
-                            onChange={(e) => setNewProfile({ ...newProfile, awg_h4: e.target.value })}
-                            className="w-full px-1 py-0.5 rounded bg-[#0b101d] border border-slate-700 text-white text-[10px] text-center font-mono"
-                          />
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -4886,6 +4904,129 @@ export default function App() {
                         }
                         className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                       />
+                    </div>
+                  </div>
+                ) : newProfile.protocol === "shadowtls" ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Пароль Shadowsocks</label>
+                        <input
+                          type="text"
+                          placeholder="Пароль внутреннего SS"
+                          value={newProfile.password}
+                          onChange={(e) => setNewProfile({ ...newProfile, password: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Пароль ShadowTLS</label>
+                        <input
+                          type="text"
+                          placeholder="Секрет рукопожатия ShadowTLS v3"
+                          value={newProfile.shadowtls_password || ""}
+                          onChange={(e) => setNewProfile({ ...newProfile, shadowtls_password: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Паразитный SNI</label>
+                        <input
+                          type="text"
+                          placeholder="gateway.icloud.com"
+                          value={newProfile.shadowtls_sni || newProfile.sni || "gateway.icloud.com"}
+                          onChange={(e) => setNewProfile({ ...newProfile, shadowtls_sni: e.target.value, sni: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-pink-950/30 border border-pink-500/30 text-xs text-pink-200 flex items-start gap-2">
+                      <span className="text-base">🪞</span>
+                      <div>
+                        <span className="font-bold">ShadowTLS v3</span> — паразитирует на рукопожатиях легитимных серверов (Apple / Microsoft). Блокираторы DPI получают настоящий валидный TLS-сертификат Apple/Microsoft при сканировании и не могут заблокировать сервер.
+                      </div>
+                    </div>
+                  </div>
+                ) : newProfile.protocol === "vless_ws" ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">UUID пользователя</label>
+                        <input
+                          type="text"
+                          placeholder="00000000-0000-0000-0000-000000000000"
+                          value={newProfile.password}
+                          onChange={(e) => setNewProfile({ ...newProfile, password: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">WebSocket Path</label>
+                        <input
+                          type="text"
+                          placeholder="/ws-tunnel"
+                          value={newProfile.ws_path || "/ws-tunnel"}
+                          onChange={(e) => setNewProfile({ ...newProfile, ws_path: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">CDN Домен / SNI</label>
+                        <input
+                          type="text"
+                          placeholder="worker.domain.workers.dev"
+                          value={newProfile.cdn_host || newProfile.sni || ""}
+                          onChange={(e) => setNewProfile({ ...newProfile, cdn_host: e.target.value, sni: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-orange-950/30 border border-orange-500/30 text-xs text-orange-200 flex items-start gap-2">
+                      <span className="text-base">☁️</span>
+                      <div>
+                        <span className="font-bold">Cloudflare CDN Shield</span> — туннелирование VLESS трафика через глобальную сеть Cloudflare Edge. Скрывает реальный IP VPS за миллионами белых IP Cloudflare.
+                      </div>
+                    </div>
+                  </div>
+                ) : newProfile.protocol === "webrtc" ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">UUID пользователя</label>
+                        <input
+                          type="text"
+                          placeholder="00000000-0000-0000-0000-000000000000"
+                          value={newProfile.password}
+                          onChange={(e) => setNewProfile({ ...newProfile, password: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Медиа-поток (Service Name)</label>
+                        <input
+                          type="text"
+                          placeholder="webrtc-media"
+                          value={newProfile.ws_path || "webrtc-media"}
+                          onChange={(e) => setNewProfile({ ...newProfile, ws_path: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">SNI (Маскировка хоста)</label>
+                        <input
+                          type="text"
+                          placeholder="zoom.us"
+                          value={newProfile.sni || "zoom.us"}
+                          onChange={(e) => setNewProfile({ ...newProfile, sni: e.target.value })}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        />
+                      </div>
+                    </div>
+                    <div className="p-3 rounded-xl bg-lime-950/30 border border-lime-500/30 text-xs text-lime-200 flex items-start gap-2">
+                      <span className="text-base">🎙️</span>
+                      <div>
+                        <span className="font-bold">WebRTC Steganography</span> — пакеты трафика упаковываются в непрерывный медиа-поток с pacing-задержками реального аудио/видео звонка. ТСПУ не видит VPN сигнатур.
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -5013,7 +5154,7 @@ export default function App() {
                         <div className="min-w-0">
                           <div className="text-sm font-bold text-white flex items-center gap-2 truncate">
                             <span>{prof.name}</span>
-                            {(prof.protocol === "amneziawg" || prof.protocol === "awg2") && !(prof.awg_private_key || prof.password)?.trim() && (
+                            {(prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
                               <span
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -5038,9 +5179,17 @@ export default function App() {
                               {prof.protocol === "ssh"
                                 ? ` • SSH порт ${prof.port} • 100% обход DPI`
                                 : prof.protocol === "awg2"
-                                ? ` • AWG 2.0 (Jc: ${prof.awg_jc ?? 4}) ${prof.awg_hop_ports ? `• Hunting (${prof.awg_hop_ports})` : ""}`
+                                ? ` • AmneziaWG 2.0${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
                                 : prof.protocol === "amneziawg"
-                                ? ` • Amnezia 3.1 (Jc: ${prof.awg_jc ?? 5}) ${prof.awg_hop_ports ? `• Hunting (${prof.awg_hop_ports})` : ""}`
+                                ? ` • Amnezia 3.1 (Jc: ${prof.awg_jc ?? 5})${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""} ${prof.awg_hop_ports ? `• Hunting (${prof.awg_hop_ports})` : ""}`
+                                : prof.protocol === "wireguard"
+                                ? ` • Чистый WireGuard (Standard UDP)${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
+                                : prof.protocol === "shadowtls"
+                                ? ` • ShadowTLS v3 • Decoy: ${prof.shadowtls_sni || "www.microsoft.com"}`
+                                : prof.protocol === "vless_ws"
+                                ? ` • Cloudflare WS • Path: ${prof.ws_path || "/neuroveil-ws"}`
+                                : prof.protocol === "webrtc"
+                                ? ` • WebRTC Steganography • gRPC`
                                 : prof.protocol === "shadowsocks"
                                 ? ` • ${prof.ss_method || "2022-blake3-aes-128-gcm"}`
                                 : ` • SNI: ${prof.sni}`}
@@ -5063,25 +5212,27 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg2") && (
+                        {(prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
                           <>
                             <button
                               onClick={() => handleDownloadAwgConf(prof)}
                               className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5"
-                              title="Скачать .conf для AmneziaVPN"
+                              title="Скачать .conf для WireGuard / AmneziaVPN"
                             >
                               <FileDown className="w-3.5 h-3.5" />
                               .conf
                             </button>
-                            <button
-                              onClick={() => handleProbeAwgPorts(prof.id)}
-                              disabled={probingAwgId === prof.id}
-                              className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1"
-                              title="Тест портов AWG"
-                            >
-                              <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                              {probingAwgId === prof.id ? "Тест..." : "Тест портов"}
-                            </button>
+                            {prof.protocol === "amneziawg" && (
+                              <button
+                                onClick={() => handleProbeAwgPorts(prof.id)}
+                                disabled={probingAwgId === prof.id}
+                                className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1"
+                                title="Тест портов AWG"
+                              >
+                                <Zap className="w-3.5 h-3.5 text-cyan-400" />
+                                {probingAwgId === prof.id ? "Тест..." : "Тест портов"}
+                              </button>
+                            )}
                           </>
                         )}
 
@@ -5103,8 +5254,8 @@ export default function App() {
                           onClick={async () => {
                             await handlePinProfileOnPc(prof.id);
                             handleQuickSwitchProfile(prof.id);
-                            if ((prof.protocol === "amneziawg" || prof.protocol === "awg2") && !(prof.awg_private_key || prof.password)?.trim()) {
-                              showNotice("info", "Внимание: в профиле Amnezia не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл.");
+                            if ((prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim()) {
+                              showNotice("info", "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл.");
                             }
                             setActiveTab("dashboard");
                           }}
@@ -5136,6 +5287,15 @@ export default function App() {
                         >
                           <Edit3 className="w-3.5 h-3.5" />
                           Изменить
+                        </button>
+
+                        <button
+                          onClick={() => handleOpenEditModal(prof, "text")}
+                          className="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 transition"
+                          title="Редактировать текст конфигурации (.conf / JSON)"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          Текст конфига
                         </button>
 
                         <button
@@ -5321,6 +5481,7 @@ export default function App() {
                           <option value="tuic">TUIC v5</option>
                           <option value="shadowsocks">Shadowsocks (TCP/UDP классический прокси)</option>
                           <option value="amneziawg">Amnezia 3.1 (AWG 3.1 — Header Protection + Anti-DPI)</option>
+                          <option value="awg2">AmneziaWG 2.0 (AWG 2.0 — Чистый конфиг)</option>
                         </select>
                       </div>
 
@@ -5899,111 +6060,81 @@ export default function App() {
                 </div>
               </div>
 
-              {/* 2. Default Routing Mode Selector */}
-              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
-                <div className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  Режим раздельного туннелирования по умолчанию
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextRouting = buildCurrentRoutingObject({
-                        default_outbound: "direct",
-                      });
-                      void syncAndApplyRoutingImmediately(nextRouting);
-                    }}
-                    className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between cursor-pointer ${
-                      routing.default_outbound === "direct"
-                        ? "bg-cyan-500/15 border-cyan-500/60 text-white shadow-[0_0_20px_-5px_rgba(6,182,212,0.25)]"
-                        : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Shield className="w-4 h-4 text-cyan-400 shrink-0" />
-                        <span className="text-xs font-bold text-cyan-300">
-                          Только выбранное через VPN (Белый список)
-                        </span>
-                      </div>
-                      {routing.default_outbound === "direct" && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 shrink-0 whitespace-nowrap">
-                          Активен (колонка «Через VPN» ↓)
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-slate-400 leading-relaxed">
-                      Весь ПК и игры работают напрямую без VPN, а через VPN идут ТОЛЬКО программы, папки и сайты из левого мастер-блока «Через VPN» ниже.
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const nextRouting = buildCurrentRoutingObject({
-                        default_outbound: "proxy",
-                      });
-                      void syncAndApplyRoutingImmediately(nextRouting);
-                    }}
-                    className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between cursor-pointer ${
-                      (routing.default_outbound || "proxy") === "proxy"
-                        ? "bg-emerald-500/15 border-emerald-500/60 text-white shadow-[0_0_20px_-5px_rgba(16,185,129,0.25)]"
-                        : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Zap className="w-4 h-4 text-emerald-400 shrink-0" />
-                        <span className="text-xs font-bold text-emerald-300">
-                          Весь трафик через VPN (Черный список)
-                        </span>
-                      </div>
-                      {(routing.default_outbound || "proxy") === "proxy" && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                          Активен (колонка «Мимо VPN» ↓)
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-[11px] text-slate-400 leading-relaxed">
-                      Все программы и сайты идут через VPN, а выбранные в правом мастер-блоке «Мимо VPN» ниже и RU-сайты — напрямую.
-                    </div>
-                  </button>
-                </div>
-              </div>
-
-              {/* 3. ДВА РАЗДЕЛЬНЫХ МАСТЕР-БЛОКА: ЧЕРЕЗ VPN (Слева) и МИМО VPN (Справа) */}
+              {/* ДВА РАЗДЕЛЬНЫХ МАСТЕР-БЛОКА: ТОЛЬКО ВЫБРАННОЕ ЧЕРЕЗ VPN (Слева) и ВЕСЬ ТРАФИК ЧЕРЕЗ VPN (Справа) */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                {/* МАСТЕР-БЛОК 1: ЧЕРЕЗ VPN (Туннелируемые ресурсы) */}
+                {/* МАСТЕР-БЛОК 1: ТОЛЬКО ВЫБРАННОЕ ЧЕРЕЗ VPN (Белый список) */}
                 <div
-                  className={`p-5 rounded-2xl bg-[#0b1220]/90 border-2 transition-all space-y-4 ${
+                  className={`p-5 rounded-2xl transition-all space-y-4 border-2 ${
                     routing.default_outbound === "direct"
-                      ? "border-cyan-500/70 shadow-[0_0_30px_-6px_rgba(6,182,212,0.35)]"
-                      : "border-cyan-500/30 opacity-90"
+                      ? "bg-[#0b1424]/95 border-cyan-500 shadow-[0_0_35px_-5px_rgba(6,182,212,0.35)]"
+                      : "bg-[#070d18]/70 border-slate-800/80 hover:border-cyan-500/40 opacity-80"
                   }`}
                 >
-                  {/* Master Header Left */}
-                  <div className="flex items-start justify-between gap-3 pb-3.5 border-b border-cyan-500/25">
-                    <div className="flex items-start gap-3 min-w-0 flex-1">
-                      <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0 mt-0.5">
-                        <Shield className="w-4 h-4 text-cyan-400" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2 flex-wrap">
-                          <span>Через VPN (Только выбранное)</span>
-                          {routing.default_outbound === "direct" && (
-                            <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/25 text-cyan-200 border border-cyan-500/40 font-semibold font-mono shrink-0">
-                              Активный режим
+                  {/* Интерактивный переключатель режима прямо в шапке блока */}
+                  <div
+                    onClick={() => {
+                      if (routing.default_outbound !== "direct") {
+                        const nextRouting = buildCurrentRoutingObject({
+                          default_outbound: "direct",
+                        });
+                        void syncAndApplyRoutingImmediately(nextRouting);
+                      }
+                    }}
+                    className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
+                      routing.default_outbound === "direct"
+                        ? "bg-cyan-500/15 border-cyan-500/70 shadow-[0_0_20px_-3px_rgba(6,182,212,0.25)] ring-1 ring-cyan-500/50"
+                        : "bg-[#050b16] border-slate-800 hover:border-cyan-500/50 hover:bg-cyan-950/20"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                            routing.default_outbound === "direct"
+                              ? "bg-cyan-500/25 border border-cyan-400/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
+                              : "bg-slate-800 border border-slate-700 text-slate-400"
+                          }`}
+                        >
+                          <Shield className="w-5 h-5 text-cyan-400" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span
+                              className={`text-sm font-bold tracking-tight ${
+                                routing.default_outbound === "direct"
+                                  ? "text-cyan-200"
+                                  : "text-slate-300"
+                              }`}
+                            >
+                              Только выбранное через VPN
                             </span>
-                          )}
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 font-semibold font-mono">
+                              Белый список
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                            Весь ПК и игры работают напрямую без задержек. Через VPN идут{" "}
+                            <strong className="text-cyan-300 font-semibold">только</strong> программы,
+                            папки и сайты из списка ниже.
+                          </div>
                         </div>
-                        <div className="text-[11px] text-cyan-400/80 mt-1 leading-relaxed">
-                          Программы, папки, домены и IP-адреса, направляемые в защищенный туннель
-                        </div>
+                      </div>
+
+                      <div className="shrink-0 flex items-center mt-0.5">
+                        {routing.default_outbound === "direct" ? (
+                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-cyan-500 text-slate-950 font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.5)]">
+                            <Check className="w-3.5 h-3.5 stroke-[3]" /> Активен
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-[10px] px-3 py-1 rounded-full bg-slate-800 text-slate-300 hover:bg-cyan-500/20 hover:text-cyan-300 border border-slate-700 transition font-medium"
+                          >
+                            Включить режим
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <span className="text-[10px] px-2.5 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold font-mono shrink-0 mt-0.5">
-                      Proxy Route
-                    </span>
                   </div>
 
                   {/* 1.1: Программы и папки через VPN */}
@@ -6148,37 +6279,79 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* МАСТЕР-БЛОК 2: МИМО VPN (Прямой интернет / Исключения) */}
+                {/* МАСТЕР-БЛОК 2: ВЕСЬ ТРАФИК ЧЕРЕЗ VPN (Черный список / Исключения) */}
                 <div
-                  className={`p-5 rounded-2xl bg-[#091515]/90 border-2 transition-all space-y-4 ${
+                  className={`p-5 rounded-2xl transition-all space-y-4 border-2 ${
                     (routing.default_outbound || "proxy") === "proxy"
-                      ? "border-emerald-500/70 shadow-[0_0_30px_-6px_rgba(16,185,129,0.35)]"
-                      : "border-emerald-500/30 opacity-90"
+                      ? "bg-[#071616]/95 border-emerald-500 shadow-[0_0_35px_-5px_rgba(16,185,129,0.35)]"
+                      : "bg-[#050f0f]/70 border-slate-800/80 hover:border-emerald-500/40 opacity-80"
                   }`}
                 >
-                  {/* Master Header Right */}
-                  <div className="flex items-start justify-between gap-3 pb-3.5 border-b border-emerald-500/25">
-                    <div className="flex items-start gap-3 min-w-0 flex-1">
-                      <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
-                        <ExternalLink className="w-4 h-4 text-emerald-400" />
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="text-xs font-bold uppercase tracking-wider text-emerald-300 flex items-center gap-2 flex-wrap">
-                          <span>Мимо VPN (Прямой интернет / Исключения)</span>
-                          {(routing.default_outbound || "proxy") === "proxy" && (
-                            <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/25 text-emerald-200 border border-emerald-500/40 font-semibold font-mono shrink-0">
-                              Активный режим
+                  {/* Интерактивный переключатель режима прямо в шапке блока */}
+                  <div
+                    onClick={() => {
+                      if ((routing.default_outbound || "proxy") !== "proxy") {
+                        const nextRouting = buildCurrentRoutingObject({
+                          default_outbound: "proxy",
+                        });
+                        void syncAndApplyRoutingImmediately(nextRouting);
+                      }
+                    }}
+                    className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
+                      (routing.default_outbound || "proxy") === "proxy"
+                        ? "bg-emerald-500/15 border-emerald-500/70 shadow-[0_0_20px_-3px_rgba(16,185,129,0.25)] ring-1 ring-emerald-500/50"
+                        : "bg-[#040e0e] border-slate-800 hover:border-emerald-500/50 hover:bg-emerald-950/20"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-3 min-w-0 flex-1">
+                        <div
+                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
+                            (routing.default_outbound || "proxy") === "proxy"
+                              ? "bg-emerald-500/25 border border-emerald-400/50 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+                              : "bg-slate-800 border border-slate-700 text-slate-400"
+                          }`}
+                        >
+                          <Zap className="w-5 h-5 text-emerald-400" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span
+                              className={`text-sm font-bold tracking-tight ${
+                                (routing.default_outbound || "proxy") === "proxy"
+                                  ? "text-emerald-200"
+                                  : "text-slate-300"
+                              }`}
+                            >
+                              Весь трафик через VPN
                             </span>
-                          )}
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-700/60 font-semibold font-mono">
+                              Черный список
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                            Все программы и сайты шифруются через VPN. Напрямую идут{" "}
+                            <strong className="text-emerald-300 font-semibold">только</strong> выбранные
+                            исключения, игры и RU-сайты ниже.
+                          </div>
                         </div>
-                        <div className="text-[11px] text-emerald-400/80 mt-1 leading-relaxed">
-                          Игры, торренты, российские сайты и прямой трафик без задержек
-                        </div>
+                      </div>
+
+                      <div className="shrink-0 flex items-center mt-0.5">
+                        {(routing.default_outbound || "proxy") === "proxy" ? (
+                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-500 text-slate-950 font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-[0_0_12px_rgba(16,185,129,0.5)]">
+                            <Check className="w-3.5 h-3.5 stroke-[3]" /> Активен
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-[10px] px-3 py-1 rounded-full bg-slate-800 text-slate-300 hover:bg-emerald-500/20 hover:text-emerald-300 border border-slate-700 transition font-medium"
+                          >
+                            Включить режим
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold font-mono shrink-0 mt-0.5">
-                      Direct Bypass
-                    </span>
                   </div>
 
                   {/* 2.1: Программы и папки мимо VPN */}
@@ -7648,10 +7821,26 @@ export default function App() {
                 </div>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setEditModeRaw(!editModeRaw)}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-cyan-300 border border-slate-700 transition"
+                    onClick={async () => {
+                      if (!editModeRaw) {
+                        const isAwgOrWg = editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard";
+                        if (isAwgOrWg) {
+                          try {
+                            const conf = await invoke<string>("export_awg_conf", {
+                              profileId: editingProfile.id,
+                              profile: { ...editingProfile, ...editForm },
+                            });
+                            setEditRawConf(conf);
+                          } catch {}
+                        }
+                        setEditRawJson(JSON.stringify({ ...editingProfile, ...editForm }, null, 2));
+                      }
+                      setEditModeRaw(!editModeRaw);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 text-xs font-semibold text-cyan-300 border border-cyan-500/40 flex items-center gap-1.5 transition"
                   >
-                    {editModeRaw ? "Визуальный редактор" : "Прямой JSON / Raw"}
+                    <FileText className="w-3.5 h-3.5" />
+                    {editModeRaw ? "Визуальный редактор" : "Редактировать текст конфига"}
                   </button>
                   <button
                     onClick={() => setEditingProfile(null)}
@@ -7663,18 +7852,56 @@ export default function App() {
               </div>
 
               {editModeRaw ? (
-                <div className="space-y-2">
-                  <label className="text-xs text-slate-300 font-medium">
-                    Полный JSON-объект конфигурации профиля:
-                  </label>
-                  <textarea
-                    rows={14}
-                    value={editRawJson}
-                    onChange={(e) => setEditRawJson(e.target.value)}
-                    className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500"
-                  />
-                  <p className="text-[11px] text-slate-500">
-                    Вы можете напрямую отредактировать любые поля sing-box / WireGuard ключей.
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-slate-300 font-bold">Текстовый редактор конфигурации:</span>
+                      {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
+                        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-800 border border-slate-700">
+                          <button
+                            type="button"
+                            onClick={() => setRawTextFormat("conf")}
+                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition ${
+                              rawTextFormat === "conf" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
+                            }`}
+                          >
+                            .conf (WireGuard / Amnezia)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setRawTextFormat("json")}
+                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition ${
+                              rawTextFormat === "json" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
+                            }`}
+                          >
+                            JSON (Sing-box)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      {rawTextFormat === "conf" ? "Синтаксис .conf [Interface] / [Peer]" : "Синтаксис JSON"}
+                    </span>
+                  </div>
+
+                  {rawTextFormat === "conf" ? (
+                    <textarea
+                      rows={15}
+                      value={editRawConf}
+                      onChange={(e) => setEditRawConf(e.target.value)}
+                      placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;ListenPort = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."
+                      className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-emerald-300 focus:outline-none focus:border-cyan-500 leading-relaxed"
+                    />
+                  ) : (
+                    <textarea
+                      rows={15}
+                      value={editRawJson}
+                      onChange={(e) => setEditRawJson(e.target.value)}
+                      className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500 leading-relaxed"
+                    />
+                  )}
+                  <p className="text-[11px] text-slate-400">
+                    💡 Вы можете напрямую отредактировать или вставить текст конфигурации. При сохранении параметры будут проверены и применены.
                   </p>
                 </div>
               ) : (
@@ -7699,7 +7926,7 @@ export default function App() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-slate-400 mb-1">Порт</label>
+                      <label className="block text-xs text-slate-400 mb-1">Порт (сервера)</label>
                       <input
                         type="number"
                         value={editForm.port || 0}
@@ -7708,6 +7935,61 @@ export default function App() {
                       />
                     </div>
                     <div>
+                      <label className="block text-xs text-slate-400 mb-1">Порт прослушивания (Listen Port)</label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          value={editForm.listen_port ?? ""}
+                          placeholder="Случайный / не задан"
+                          onChange={(e) =>
+                            setEditForm({
+                              ...editForm,
+                              listen_port: e.target.value ? parseInt(e.target.value, 10) || null : null,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditForm({
+                              ...editForm,
+                              listen_port: getRandomInt(10000, 64999),
+                            })
+                          }
+                          className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-cyan-300 shrink-0 transition"
+                          title="Выбрать случайный порт прослушивания"
+                        >
+                          🎲
+                        </button>
+                      </div>
+                    </div>
+                    {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
+                      <div className="col-span-2">
+                        <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-[#0b101d] border border-slate-800 hover:border-cyan-500/40 cursor-pointer transition">
+                          <input
+                            type="checkbox"
+                            checked={editForm.auto_rotate_listen_port ?? true}
+                            onChange={(e) =>
+                              setEditForm({
+                                ...editForm,
+                                auto_rotate_listen_port: e.target.checked,
+                              })
+                            }
+                            className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                          />
+                          <div>
+                            <div className="text-xs font-semibold text-slate-200">
+                              Менять порт прослушивания (ListenPort) при переподключении
+                            </div>
+                            <div className="text-[10px] text-slate-400">
+                              При нажатии кнопки «Переподключиться» выбирается новый свободный UDP-порт; основная кнопка подключения сохраняет текущий порт
+                            </div>
+                          </div>
+                        </label>
+                      </div>
+                    )}
+                    <div className={editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" ? "col-span-1" : "col-span-2"}>
                       <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
                       <input
                         type="text"
@@ -7716,7 +7998,7 @@ export default function App() {
                         className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                       />
                     </div>
-                    {editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg2" && (
+                    {editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" && (
                       <div className="col-span-2">
                         <label className="block text-xs text-slate-400 mb-1">Пароль / UUID / Секретный ключ</label>
                         <input
@@ -8004,22 +8286,11 @@ export default function App() {
 
                   {editingProfile.protocol === "awg2" && (
                     <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-xs font-bold text-teal-400">Параметры AmneziaWG 2.0:</div>
-                          <span className="text-[10px] text-slate-400">Классическая обфускация WireGuard со случайными 32-битными заголовками H1-H4</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const r = generateRandomAwg20Params();
-                            setEditForm({ ...editForm, ...r });
-                            showNotice("success", "Параметры AWG 2.0 рандомизированы!");
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-teal-600/30 hover:bg-teal-600/50 border border-teal-500/40 text-[11px] font-semibold text-teal-300 flex items-center gap-1 transition"
-                        >
-                          🎲 Рандомизировать 2.0
-                        </button>
+                      <div>
+                        <div className="text-xs font-bold text-teal-400">Параметры AmneziaWG 2.0:</div>
+                        <span className="text-[10px] text-slate-400">
+                          Чистая конфигурация (PrivateKey, Address, DNS 1.1.1.1, MTU 1420, PublicKey, PresharedKey, Endpoint)
+                        </span>
                       </div>
 
                       <div className="grid grid-cols-2 gap-2 text-xs">
@@ -8052,7 +8323,7 @@ export default function App() {
                           <input
                             type="text"
                             value={editForm.awg_local_address || ""}
-                            placeholder="10.8.1.2/32"
+                            placeholder="10.8.1.2/24"
                             onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
@@ -8067,120 +8338,62 @@ export default function App() {
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
                         </div>
-                        <div className="col-span-2">
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Диапазон перебора портов (Port Hunting Range)</label>
+                      </div>
+                    </div>
+                  )}
+
+                  {editingProfile.protocol === "wireguard" && (
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+                      <div>
+                        <div className="text-xs font-bold text-rose-400">Параметры стандартного WireGuard:</div>
+                        <span className="text-[10px] text-slate-400">Чистый протокол WireGuard (без обфускации AWG)</span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">
+                            Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                          </label>
                           <input
                             type="text"
-                            value={editForm.awg_hop_ports || ""}
-                            placeholder="20000:65000"
-                            onChange={(e) => setEditForm({ ...editForm, awg_hop_ports: e.target.value })}
+                            value={editForm.awg_private_key || editForm.password || ""}
+                            placeholder="Вставьте PrivateKey из .conf"
+                            onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">
+                            Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                          </label>
+                          <input
+                            type="text"
+                            value={editForm.awg_public_key || ""}
+                            placeholder="Вставьте PublicKey сервера"
+                            onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
+                          <input
+                            type="text"
+                            value={editForm.awg_local_address || ""}
+                            placeholder="10.8.0.2/32"
+                            onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
                         </div>
-                        <div className="col-span-2 grid grid-cols-3 gap-2">
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jc (Мусорные пакеты)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jc ?? 4}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jc: parseInt(e.target.value, 10) || 4 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jmin (Мин. размер)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jmin ?? 20}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jmin: parseInt(e.target.value, 10) || 20 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jmax (Макс. размер)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jmax ?? 65}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jmax: parseInt(e.target.value, 10) || 65 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
+                          <input
+                            type="text"
+                            value={editForm.awg_preshared_key || ""}
+                            placeholder="Опциональный pre-shared key"
+                            onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
                         </div>
-
-                        {/* Shifts S1-S2 */}
-                        <div className="col-span-2">
-                          <label className="block text-[10px] text-slate-400 mb-1">Сдвиги пакетов S1 - S2</label>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S1"
-                                value={editForm.awg_s1 ?? 30}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s1: parseInt(e.target.value, 10) || 30 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S1</span>
-                            </div>
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S2"
-                                value={editForm.awg_s2 ?? 30}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s2: parseInt(e.target.value, 10) || 30 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S2</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Magic Headers H1-H4 (32-bit integers) */}
-                        <div className="col-span-2">
-                          <label className="block text-[10px] text-slate-400 mb-1">Случайные заголовки H1 - H4 (32-битные числа)</label>
-                          <div className="grid grid-cols-4 gap-2">
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H1"
-                                value={editForm.awg_h1 ?? "10000001"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h1: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H1</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H2"
-                                value={editForm.awg_h2 ?? "20000002"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h2: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H2</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H3"
-                                value={editForm.awg_h3 ?? "30000003"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h3: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H3</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H4"
-                                value={editForm.awg_h4 ?? "40000004"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h4: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H4</span>
-                            </div>
-                          </div>
-                        </div>
-
                         <div className="col-span-2">
                           <label className="block text-[11px] text-slate-400 mb-0.5">PersistentKeepalive (секунды)</label>
                           <input
@@ -8215,6 +8428,89 @@ export default function App() {
                             value={editForm.hop_ports || ""}
                             placeholder="20000:65000"
                             onChange={(e) => setEditForm({ ...editForm, hop_ports: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {editingProfile.protocol === "shadowtls" && (
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                      <div className="text-xs font-bold text-pink-400">Параметры ShadowTLS v3:</div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Пароль ShadowTLS рукопожатия</label>
+                          <input
+                            type="text"
+                            value={editForm.shadowtls_password || ""}
+                            onChange={(e) => setEditForm({ ...editForm, shadowtls_password: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Паразитный SNI (Apple / Microsoft)</label>
+                          <input
+                            type="text"
+                            value={editForm.shadowtls_sni || ""}
+                            placeholder="gateway.icloud.com"
+                            onChange={(e) => setEditForm({ ...editForm, shadowtls_sni: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {editingProfile.protocol === "vless_ws" && (
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                      <div className="text-xs font-bold text-orange-400">Параметры VLESS + WebSocket (CDN Shield):</div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">WebSocket Path</label>
+                          <input
+                            type="text"
+                            value={editForm.ws_path || ""}
+                            placeholder="/ws-tunnel"
+                            onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">CDN Domain / Host header (опционально)</label>
+                          <input
+                            type="text"
+                            value={editForm.cdn_host || ""}
+                            placeholder="worker.example.workers.dev"
+                            onChange={(e) => setEditForm({ ...editForm, cdn_host: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {editingProfile.protocol === "webrtc" && (
+                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                      <div className="text-xs font-bold text-lime-400">Параметры WebRTC Steganography:</div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">gRPC Service / Media stream</label>
+                          <input
+                            type="text"
+                            value={editForm.ws_path || "webrtc-media"}
+                            placeholder="webrtc-media"
+                            onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">SNI (Маскировочный хост)</label>
+                          <input
+                            type="text"
+                            value={editForm.sni || ""}
+                            placeholder="zoom.us или meet.google.com"
+                            onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
                             className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                           />
                         </div>

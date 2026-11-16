@@ -1,9 +1,11 @@
 export interface VpnProfile {
   id: string;
   name: string;
-  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "ssh";
+  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "wireguard" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
   server: string;
   port: number;
+  listen_port?: number | null;
+  auto_rotate_listen_port?: boolean | null;
   original_port?: number | null;
   sni: string;
   insecure: boolean;
@@ -18,6 +20,10 @@ export interface VpnProfile {
   ss_method?: string | null;
   ss_plugin?: string | null;
   ss_plugin_opts?: string | null;
+  shadowtls_password?: string | null;
+  shadowtls_sni?: string | null;
+  ws_path?: string | null;
+  cdn_host?: string | null;
   awg_private_key?: string | null;
   awg_public_key?: string | null;
   awg_preshared_key?: string | null;
@@ -39,6 +45,7 @@ export interface VpnProfile {
   awg_i4?: string | null;
   awg_hop_ports?: string | null;
   awg_port_probing?: boolean | null;
+  auto_port_hunting?: boolean | null;
   awg_header_protection_key?: string | null;
   awg_rekey_after_time?: string | null;
   awg_rekey_timeout?: string | null;
@@ -154,6 +161,14 @@ export interface VpsCredentials {
   deploy_ss?: boolean;
   deploy_awg?: boolean;
   deploy_ssh?: boolean;
+  deploy_shadowtls?: boolean;
+  shadowtls_port?: number;
+  shadowtls_sni?: string;
+  deploy_vless_ws?: boolean;
+  vless_ws_port?: number;
+  cdn_domain?: string;
+  deploy_webrtc?: boolean;
+  webrtc_port?: number;
   enable_salamander: boolean;
   enable_port_hopping?: boolean;
   ssh_proxy: string;
@@ -192,6 +207,7 @@ export interface VpnStatus {
   singbox_path: string;
   logs: string[];
   active_port?: number | null;
+  active_listen_port?: number | null;
   port_hunting_status?: string | null;
   is_handshaking?: boolean;
   handshake_status?: string | null;

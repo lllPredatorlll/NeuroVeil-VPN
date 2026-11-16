@@ -8,6 +8,10 @@ pub struct VpnProfile {
     pub server: String,
     pub port: u16,
     #[serde(default)]
+    pub listen_port: Option<u16>,           // Local listen port (e.g. WireGuard/AWG ListenPort)
+    #[serde(default)]
+    pub auto_rotate_listen_port: Option<bool>, // Rotate local ListenPort on every connect/reconnect (Amnezia behavior)
+    #[serde(default)]
     pub original_port: Option<u16>,
     pub sni: String,
     pub insecure: bool,
@@ -73,6 +77,8 @@ pub struct VpnProfile {
     #[serde(default)]
     pub awg_port_probing: Option<bool>,     // Enable automatic port probing / failover
     #[serde(default)]
+    pub auto_port_hunting: Option<bool>,    // Enable automatic port hunting loop until connection is established
+    #[serde(default)]
     pub awg_header_protection_key: Option<String>, // Base64 32-byte header protection key for AWG 3.1
     #[serde(default)]
     pub awg_rekey_after_time: Option<String>,      // AWG 3.1 rekey interval e.g. "100-120"
@@ -94,6 +100,14 @@ pub struct VpnProfile {
     pub awg_version: Option<String>,               // "3.1" | "2.0"
     #[serde(default)]
     pub tls_fragment: Option<bool>,         // Anti-DPI TLS ClientHello fragmentation
+    #[serde(default)]
+    pub shadowtls_password: Option<String>, // ShadowTLS v3 password
+    #[serde(default)]
+    pub shadowtls_sni: Option<String>,      // Target decoy domain for ShadowTLS (e.g. "www.microsoft.com")
+    #[serde(default)]
+    pub ws_path: Option<String>,            // WebSocket path for VLESS-WS (e.g. "/neuroveil-ws")
+    #[serde(default)]
+    pub cdn_host: Option<String>,           // Cloudflare or custom CDN host/Worker domain
     pub up_mbps: u32,
     pub down_mbps: u32,
     pub uri: String,
@@ -116,6 +130,8 @@ impl Default for VpnProfile {
             protocol: "amneziawg".to_string(),
             server: String::new(),
             port: 51820,
+            listen_port: None,
+            auto_rotate_listen_port: Some(true),
             original_port: None,
             sni: String::new(),
             insecure: false,
@@ -151,6 +167,7 @@ impl Default for VpnProfile {
             awg_i4: None,
             awg_hop_ports: None,
             awg_port_probing: None,
+            auto_port_hunting: None,
             awg_header_protection_key: None,
             awg_rekey_after_time: None,
             awg_rekey_timeout: None,
@@ -162,6 +179,10 @@ impl Default for VpnProfile {
             awg_persistent_keepalive: None,
             awg_version: None,
             tls_fragment: Some(true),
+            shadowtls_password: None,
+            shadowtls_sni: None,
+            ws_path: None,
+            cdn_host: None,
             up_mbps: 100,
             down_mbps: 100,
             uri: String::new(),
@@ -438,6 +459,18 @@ fn default_ss_method() -> String {
     "2022-blake3-aes-128-gcm".to_string()
 }
 
+fn default_shadowtls_port() -> u16 {
+    8443
+}
+
+fn default_vless_ws_port() -> u16 {
+    2096
+}
+
+fn default_webrtc_port() -> u16 {
+    3478
+}
+
 fn default_awg_port() -> u16 {
     51820
 }
@@ -452,7 +485,7 @@ fn default_awg2_port() -> u16 {
 
 pub fn is_awg_protocol(proto: &str) -> bool {
     let p = proto.trim().to_lowercase();
-    p == "amneziawg" || p == "awg" || p == "awg2" || p == "amneziawg2" || p == "amnezia31" || p == "awg3"
+    p == "amneziawg" || p == "awg" || p == "awg2" || p == "amneziawg2" || p == "amnezia31" || p == "awg3" || p == "wireguard" || p == "wg"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,6 +595,22 @@ pub struct VpsCredentials {
     pub deploy_awg: bool,
     #[serde(default = "default_true")]
     pub deploy_ssh: bool,
+    #[serde(default = "default_true")]
+    pub deploy_shadowtls: bool,
+    #[serde(default = "default_shadowtls_port")]
+    pub shadowtls_port: u16,
+    #[serde(default = "default_reality_sni")]
+    pub shadowtls_sni: String,
+    #[serde(default = "default_true")]
+    pub deploy_vless_ws: bool,
+    #[serde(default = "default_vless_ws_port")]
+    pub vless_ws_port: u16,
+    #[serde(default)]
+    pub cdn_domain: Option<String>,
+    #[serde(default = "default_true")]
+    pub deploy_webrtc: bool,
+    #[serde(default = "default_webrtc_port")]
+    pub webrtc_port: u16,
     pub enable_salamander: bool,
     #[serde(default)]
     pub enable_port_hopping: bool,
@@ -587,6 +636,8 @@ pub struct VpnStatus {
     pub logs: Vec<String>,
     #[serde(default)]
     pub active_port: Option<u16>,
+    #[serde(default)]
+    pub active_listen_port: Option<u16>,
     #[serde(default)]
     pub port_hunting_status: Option<String>,
     #[serde(default)]

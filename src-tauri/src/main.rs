@@ -40,6 +40,7 @@ struct RuntimeState {
     active_profile_name: Option<String>,
     active_protocol: Option<String>,
     active_port: Option<u16>,
+    active_listen_port: Option<u16>,
     port_hunting_status: Option<String>,
     is_handshaking: bool,
     handshake_status: Option<String>,
@@ -58,27 +59,118 @@ fn get_state_file_path() -> std::path::PathBuf {
     get_app_data_dir().join("state.json")
 }
 
+fn try_parse_state_content(raw: &str) -> Option<AppPersistentState> {
+    // Очищаем от возможных нулей (\0), которые NTFS записывает при внезапном сбросе питания
+    let clean: String = raw.chars().filter(|c| *c != '\0').collect();
+    let trimmed = clean.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(mut state) = serde_json::from_str::<AppPersistentState>(trimmed) {
+        for p in &mut state.profiles {
+            p.uri = build_profile_uri(p);
+        }
+        state.profiles.retain(|p| p.pinned_on_pc != Some(false));
+        if state.routing_presets.is_empty() {
+            state.routing_presets = default_routing_presets();
+        }
+        return Some(state);
+    }
+    None
+}
+
 fn load_persistent_state() -> AppPersistentState {
-    let path = get_state_file_path();
-    if let Ok(content) = fs::read_to_string(&path) {
-        if let Ok(mut state) = serde_json::from_str::<AppPersistentState>(&content) {
-            for p in &mut state.profiles {
-                p.uri = build_profile_uri(p);
-            }
-            state.profiles.retain(|p| p.pinned_on_pc != Some(false));
-            if state.routing_presets.is_empty() {
-                state.routing_presets = default_routing_presets();
+    let dir = get_app_data_dir();
+    let primary_path = get_state_file_path();
+    let bak_path = dir.join("state.json.bak");
+    let tmp_path = dir.join("state.json.tmp");
+
+    // 1. Проверяем основной файл state.json
+    if let Ok(content) = fs::read_to_string(&primary_path) {
+        if let Some(state) = try_parse_state_content(&content) {
+            // Если бэкапа нет или он поврежден, сохраняем рабочую копию
+            if !bak_path.exists() {
+                let _ = fs::copy(&primary_path, &bak_path);
             }
             return state;
         }
     }
+
+    // 2. Если основной файл пуст, поврежден или обнулен (например при резком отключении питания ПК),
+    // восстанавливаем данные из резервной копии state.json.bak
+    if let Ok(content) = fs::read_to_string(&bak_path) {
+        if let Some(state) = try_parse_state_content(&content) {
+            eprintln!("[State Recovery] ВНИМАНИЕ: state.json был поврежден или обнулен (сбой питания). Настройки успешно восстановлены из state.json.bak!");
+            save_persistent_state(&state);
+            return state;
+        }
+    }
+
+    // 3. Резервный шанс: проверяем state.json.tmp
+    if let Ok(content) = fs::read_to_string(&tmp_path) {
+        if let Some(state) = try_parse_state_content(&content) {
+            eprintln!("[State Recovery] Настройки восстановлены из временного файла state.json.tmp!");
+            save_persistent_state(&state);
+            return state;
+        }
+    }
+
+    eprintln!("[State] Не найден сохраненный профиль/конфиг, загружаются стандартные настройки.");
     AppPersistentState::default()
 }
 
 fn save_persistent_state(state: &AppPersistentState) {
-    let path = get_state_file_path();
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = fs::write(path, json);
+    let dir = get_app_data_dir();
+    let _ = fs::create_dir_all(&dir);
+    let primary_path = get_state_file_path();
+    let tmp_path = dir.join("state.json.tmp");
+    let bak_path = dir.join("state.json.bak");
+
+    let json = match serde_json::to_string_pretty(state) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    // 1. Атомарно пишем во временный файл и вызываем fsync (FlushFileBuffers на Windows)
+    let write_tmp = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)?;
+        file.write_all(json.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?; // Гарантия физической записи данных на диск
+        Ok(())
+    })();
+
+    if write_tmp.is_err() {
+        return;
+    }
+
+    // 2. Если текущий state.json существует и не пуст, делаем актуальный бэкап state.json.bak
+    if primary_path.exists() {
+        if let Ok(meta) = fs::metadata(&primary_path) {
+            if meta.len() > 20 {
+                let _ = fs::copy(&primary_path, &bak_path);
+            }
+        }
+    }
+
+    // 3. Заменяем целевой файл state.json файлом tmp_path
+    if fs::rename(&tmp_path, &primary_path).is_err() {
+        let _ = fs::remove_file(&primary_path);
+        if fs::rename(&tmp_path, &primary_path).is_err() {
+            if let Ok(_) = fs::copy(&tmp_path, &primary_path) {
+                let _ = fs::remove_file(&tmp_path);
+            }
+        }
+    }
+
+    // 4. Финальный sync_all на целевом файле для сброса метаданных NTFS
+    if let Ok(f) = fs::OpenOptions::new().read(true).open(&primary_path) {
+        let _ = f.sync_all();
     }
 }
 
@@ -115,6 +207,30 @@ fn push_log(logs: &mut Vec<String>, line: String) {
     }
 }
 
+fn pick_random_free_udp_port(exclude: &[u16]) -> u16 {
+    for _ in 0..64 {
+        let raw = Uuid::new_v4().as_u128();
+        let mixed = ((raw >> 64) ^ raw) as u32;
+        let candidate = 10000 + (mixed % 55000) as u16;
+        if exclude.contains(&candidate) {
+            continue;
+        }
+        if std::net::UdpSocket::bind(("0.0.0.0", candidate)).is_ok() {
+            return candidate;
+        }
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) {
+        if let Ok(addr) = sock.local_addr() {
+            let p = addr.port();
+            if p >= 1024 && !exclude.contains(&p) {
+                return p;
+            }
+        }
+    }
+    let fallback_raw = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
+    10000 + (fallback_raw % 55000) as u16
+}
+
 fn stop_singbox_internal(rt: &mut RuntimeState) {
     if let Some(mut child) = rt.child.take() {
         let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
@@ -133,6 +249,7 @@ fn stop_singbox_internal(rt: &mut RuntimeState) {
     rt.active_profile_name = None;
     rt.active_protocol = None;
     rt.active_port = None;
+    rt.active_listen_port = None;
     rt.port_hunting_status = None;
     rt.is_handshaking = false;
     rt.handshake_status = None;
@@ -155,6 +272,7 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
             rt.active_profile_name = None;
             rt.active_protocol = None;
             rt.active_port = None;
+            rt.active_listen_port = None;
             rt.port_hunting_status = None;
             rt.is_handshaking = false;
             rt.handshake_status = None;
@@ -181,6 +299,7 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
         active_profile_name: rt.active_profile_name.clone(),
         active_protocol: rt.active_protocol.clone(),
         active_port: rt.active_port,
+        active_listen_port: rt.active_listen_port,
         port_hunting_status: rt.port_hunting_status.clone(),
         is_handshaking: rt.is_handshaking,
         handshake_status: rt.handshake_status.clone(),
@@ -238,13 +357,12 @@ async fn download_core(state: State<'_, SharedState>) -> Result<String, String> 
     .map_err(|e| e.to_string())?
 }
 
-fn spawn_and_monitor_singbox(
+fn start_singbox_child(
     state_clone: &Arc<Mutex<RuntimeState>>,
     profile: &VpnProfile,
     routing_snapshot: &RoutingConfig,
     active_port: u16,
-    custom_log: Option<String>,
-) -> Result<VpnStatus, String> {
+) -> Result<std::process::Child, String> {
     let bin_path = get_singbox_bin_path();
     if !bin_path.exists() {
         return Err(
@@ -297,6 +415,18 @@ fn spawn_and_monitor_singbox(
         });
     }
 
+    Ok(child)
+}
+
+fn spawn_and_monitor_singbox(
+    state_clone: &Arc<Mutex<RuntimeState>>,
+    profile: &VpnProfile,
+    routing_snapshot: &RoutingConfig,
+    active_port: u16,
+    custom_log: Option<String>,
+) -> Result<VpnStatus, String> {
+    let child = start_singbox_child(state_clone, profile, routing_snapshot, active_port)?;
+
     if routing_snapshot.mode == "system_proxy" {
         let port = routing_snapshot.local_mixed_port;
         let _ = set_windows_system_proxy(true, port);
@@ -306,6 +436,7 @@ fn spawn_and_monitor_singbox(
     let state_for_warmup = state_clone.clone();
     let warmup_clash_port = routing_snapshot.clash_api_port;
     let warmup_procs = routing_snapshot.proxy_processes.clone();
+    let warmup_is_awg = is_awg_protocol(&profile.protocol);
     thread::spawn(move || {
         let check_url = format!("http://127.0.0.1:{}/proxies", warmup_clash_port);
         for _ in 0..35 {
@@ -331,6 +462,12 @@ fn spawn_and_monitor_singbox(
                 if g.is_handshaking {
                     g.is_handshaking = false;
                     g.handshake_status = None;
+                    if warmup_is_awg {
+                        push_log(
+                            &mut g.logs,
+                            "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -344,7 +481,7 @@ fn spawn_and_monitor_singbox(
         reset_stale_app_sockets(&warmup_procs);
     });
 
-    // Update runtime state and spawn traffic monitor
+    // Update runtime state and return status
     let status = {
         let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
         if let Some(msg) = custom_log {
@@ -380,6 +517,7 @@ fn spawn_and_monitor_singbox(
         rt.down_bytes = 0;
 
         let is_awg = is_awg_protocol(&profile.protocol);
+        rt.active_listen_port = if is_awg { profile.listen_port } else { None };
         if is_awg {
             rt.is_handshaking = true;
             rt.handshake_status = Some("Установка соединения (рукопожатие WireGuard)...".to_string());
@@ -395,6 +533,21 @@ fn spawn_and_monitor_singbox(
     let clash_port = routing_snapshot.clash_api_port;
     let is_awg = is_awg_protocol(&profile.protocol);
 
+    // Active handshake probe for WireGuard / AmneziaWG:
+    // Proactively triggers WireGuard Handshake Initiation via local proxy (127.0.0.1:2081)
+    if is_awg {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(500));
+            if let Ok(proxy) = ureq::Proxy::new("http://127.0.0.1:2081") {
+                let client = ureq::AgentBuilder::new()
+                    .timeout(Duration::from_millis(3000))
+                    .proxy(proxy)
+                    .build();
+                let _ = client.get("http://cp.cloudflare.com/generate_204").call();
+            }
+        });
+    }
+
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(400));
         let url = format!("http://127.0.0.1:{}/connections", clash_port);
@@ -405,6 +558,8 @@ fn spawn_and_monitor_singbox(
         let mut save_tick_counter = 0u32;
         let start_time = Instant::now();
         let mut warned_handshake_cooldown = false;
+        let mut warned_no_udp_reply = false;
+
         loop {
             {
                 if let Ok(guard) = state_for_traffic.lock() {
@@ -415,10 +570,33 @@ fn spawn_and_monitor_singbox(
                     break;
                 }
             }
+
             if let Ok(resp) = ureq::get(&url).timeout(Duration::from_millis(700)).call() {
                 if let Ok(val) = resp.into_json::<serde_json::Value>() {
                     let total_up = val["uploadTotal"].as_u64().unwrap_or(0);
                     let total_down = val["downloadTotal"].as_u64().unwrap_or(0);
+
+                    let mut proxy_conn_count = 0usize;
+                    let mut proxy_up = 0u64;
+                    let mut proxy_down = 0u64;
+                    if let Some(conns) = val.get("connections").and_then(|v| v.as_array()) {
+                        for c in conns {
+                            let uses_proxy = c
+                                .get("chains")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().any(|x| x.as_str() == Some("proxy")))
+                                .unwrap_or(false);
+                            if uses_proxy {
+                                proxy_conn_count += 1;
+                                proxy_up = proxy_up.saturating_add(
+                                    c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0),
+                                );
+                                proxy_down = proxy_down.saturating_add(
+                                    c.get("download").and_then(|v| v.as_u64()).unwrap_or(0),
+                                );
+                            }
+                        }
+                    }
 
                     if let Ok(mut guard) = state_for_traffic.lock() {
                         if initialized {
@@ -449,47 +627,58 @@ fn spawn_and_monitor_singbox(
                             }
 
                             if is_awg {
-                                if total_down > 0 {
+                                if proxy_down > 0 {
+                                    consecutive_rx_zero = 0;
                                     if guard.is_handshaking {
                                         guard.is_handshaking = false;
                                         guard.handshake_status = None;
                                         push_log(
                                             &mut guard.logs,
-                                            "[WireGuard] Рукопожатие успешно установлено, сессия активна!".to_string(),
+                                            "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
                                         );
                                     }
-                                } else {
-                                    // Traffic sent but 0 bytes returned from server
-                                    if start_time.elapsed().as_secs() >= 4 && !warned_handshake_cooldown {
+                                } else if guard.is_handshaking {
+                                    let elapsed = start_time.elapsed().as_secs();
+                                    if (proxy_up > 0 || proxy_conn_count > 0) && elapsed >= 4 && !warned_handshake_cooldown {
                                         warned_handshake_cooldown = true;
-                                        guard.is_handshaking = true;
-                                        guard.handshake_status = Some("Ожидание подтверждения сессии сервером (cooldown WireGuard)...".to_string());
+                                        guard.handshake_status = Some("Пакеты отправлены, ожидание ответа сервера по UDP...".to_string());
                                         push_log(
                                             &mut guard.logs,
-                                            "[WireGuard] Ожидание подтверждения сессии сервером (cooldown WireGuard)...".to_string(),
+                                            "[WireGuard] Пакеты отправлены через proxy, ожидание ответа сервера по UDP...".to_string(),
                                         );
                                     }
-                                }
-
-                                if guard.up_speed > 0 && guard.down_speed == 0 {
+                                    if proxy_up > 0 || proxy_conn_count > 0 {
+                                        consecutive_rx_zero += 1;
+                                        if consecutive_rx_zero >= 15 && !warned_no_udp_reply {
+                                            warned_no_udp_reply = true;
+                                            guard.handshake_status = Some("Нет ответа по UDP от сервера (проверьте доступность VPS, порт или блокировку WireGuard)".to_string());
+                                            push_log(
+                                                &mut guard.logs,
+                                                "[AmneziaWG] Нет ответа от сервера по UDP: пакеты через proxy отправляются, но входящих данных нет (проверьте доступность VPS, фаервол или блокировку UDP/WireGuard провайдером).".to_string(),
+                                            );
+                                        }
+                                    }
+                                } else if proxy_conn_count > 0 && proxy_up > 0 && proxy_down == 0 {
                                     consecutive_rx_zero += 1;
                                     if consecutive_rx_zero == 25 {
                                         push_log(
                                             &mut guard.logs,
-                                            "[AmneziaWG] Внимание: трафик отправляется, но входящие пакеты заблокированы (вероятна DPI блокировка UDP-порта).".to_string(),
+                                            "[AmneziaWG] Внимание: трафик отправляется через proxy, но входящие пакеты не возвращаются (проверьте порт подключения или блокировку UDP).".to_string(),
                                         );
                                     }
-                                } else if guard.down_speed > 0 {
-                                    consecutive_rx_zero = 0;
                                 }
                             }
                         } else {
                             guard.up_speed = 0;
                             guard.down_speed = 0;
                             initialized = true;
-                            if is_awg && total_down > 0 {
+                            if is_awg && proxy_down > 0 && guard.is_handshaking {
                                 guard.is_handshaking = false;
                                 guard.handshake_status = None;
+                                push_log(
+                                    &mut guard.logs,
+                                    "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                                );
                             }
                         }
                         guard.up_bytes = total_up;
@@ -709,14 +898,13 @@ fn hot_reload_or_restart_singbox(
     Ok(build_vpn_status(&mut rt))
 }
 
-#[tauri::command]
-async fn connect_vpn(
+async fn connect_vpn_internal(
+    state_clone: SharedState,
     profile_id: String,
     mode: String,
     split_tunneling: bool,
-    state: State<'_, SharedState>,
+    preserve_listen_port: bool,
 ) -> Result<VpnStatus, String> {
-    let state_clone = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let bin_path = get_singbox_bin_path();
         if !bin_path.exists() {
@@ -768,7 +956,7 @@ async fn connect_vpn(
         }
 
         // 1. Stop existing process and snapshot profile & routing without holding lock during I/O
-        let (profile, routing_snapshot, had_tracked_child) = {
+        let (mut profile, routing_snapshot, had_tracked_child) = {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
             let had_child = rt.child.is_some();
             stop_singbox_internal(&mut rt);
@@ -802,8 +990,63 @@ async fn connect_vpn(
                     .args(["/F", "/IM", "sing-box.exe"])
                     .creation_flags(CREATE_NO_WINDOW);
                 let _ = kill_cmd.output();
+                thread::sleep(Duration::from_millis(120));
+            } else {
+                thread::sleep(Duration::from_millis(250));
             }
-            thread::sleep(Duration::from_millis(100));
+        }
+
+        // 1.5. Amnezia-style automatic UDP listen_port rotation on connect/reconnect
+        if is_awg_protocol(&profile.protocol)
+            && profile.auto_rotate_listen_port.unwrap_or(true)
+            && !preserve_listen_port
+        {
+            let old_listen_port = profile.listen_port;
+            let mut exclude = vec![
+                profile.port,
+                routing_snapshot.local_mixed_port,
+                routing_snapshot.clash_api_port,
+                2081,
+            ];
+            if let Some(old_lp) = old_listen_port {
+                if old_lp > 0 {
+                    exclude.push(old_lp);
+                }
+            }
+            let new_lp = pick_random_free_udp_port(&exclude);
+            profile.listen_port = Some(new_lp);
+            profile.uri = build_profile_uri(&profile);
+
+            if let Ok(mut rt) = state_clone.lock() {
+                if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile.id) {
+                    p.listen_port = Some(new_lp);
+                    p.uri = profile.uri.clone();
+                }
+                save_persistent_state(&rt.persistent);
+
+                let proto_tag = if profile.protocol == "wireguard" || profile.protocol == "wg" {
+                    "WireGuard"
+                } else {
+                    "AmneziaWG"
+                };
+                if let Some(old_lp) = old_listen_port.filter(|&p| p > 0) {
+                    push_log(
+                        &mut rt.logs,
+                        format!(
+                            "[{}] Порт прослушивания (ListenPort) изменен при переподключении: {} → {}",
+                            proto_tag, old_lp, new_lp
+                        ),
+                    );
+                } else {
+                    push_log(
+                        &mut rt.logs,
+                        format!(
+                            "[{}] Назначен случайный порт прослушивания (ListenPort): {}",
+                            proto_tag, new_lp
+                        ),
+                    );
+                }
+            }
         }
 
         // 2. Direct fast launch of sing-box without blocking loops (< 50ms)
@@ -812,6 +1055,11 @@ async fn connect_vpn(
             if let Ok(mut g) = state_clone.lock() {
                 g.port_hunting_status = None;
                 g.active_port = Some(active_port);
+                g.active_listen_port = if is_awg_protocol(&profile.protocol) {
+                    profile.listen_port
+                } else {
+                    None
+                };
             }
         }
 
@@ -819,6 +1067,55 @@ async fn connect_vpn(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn connect_vpn(
+    profile_id: String,
+    mode: String,
+    split_tunneling: bool,
+    preserve_listen_port: Option<bool>,
+    state: State<'_, SharedState>,
+) -> Result<VpnStatus, String> {
+    connect_vpn_internal(
+        state.inner().clone(),
+        profile_id,
+        mode,
+        split_tunneling,
+        preserve_listen_port.unwrap_or(true),
+    )
+    .await
+}
+
+#[tauri::command]
+async fn reconnect_vpn(
+    profile_id: Option<String>,
+    mode: Option<String>,
+    split_tunneling: Option<bool>,
+    state: State<'_, SharedState>,
+) -> Result<VpnStatus, String> {
+    let state_clone = state.inner().clone();
+    let (pid, resolved_mode, resolved_split) = {
+        let rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+        let pid = profile_id
+            .or_else(|| rt.active_profile_id.clone())
+            .or_else(|| rt.persistent.selected_profile_id.clone())
+            .or_else(|| rt.persistent.profiles.first().map(|p| p.id.clone()))
+            .ok_or_else(|| "Не найден профиль для переподключения".to_string())?;
+        let prof_routing = rt
+            .persistent
+            .profiles
+            .iter()
+            .find(|p| p.id == pid)
+            .and_then(|p| p.routing.as_ref())
+            .unwrap_or(&rt.persistent.routing);
+        (
+            pid,
+            mode.unwrap_or_else(|| prof_routing.mode.clone()),
+            split_tunneling.unwrap_or(prof_routing.split_tunneling),
+        )
+    };
+    connect_vpn_internal(state_clone, pid, resolved_mode, resolved_split, false).await
 }
 
 #[tauri::command]
@@ -1082,6 +1379,15 @@ fn add_or_update_profile(
         }
     }
     if is_awg_protocol(&profile.protocol) {
+        if profile.auto_rotate_listen_port.is_none() {
+            profile.auto_rotate_listen_port = rt
+                .persistent
+                .profiles
+                .iter()
+                .find(|p| p.id == profile.id)
+                .and_then(|e| e.auto_rotate_listen_port)
+                .or(Some(true));
+        }
         if let Some(ref priv_key) = profile.awg_private_key {
             let trimmed = priv_key.trim();
             if !trimmed.is_empty() && profile.password.trim().is_empty() {
@@ -1122,6 +1428,11 @@ fn import_profile_uri(uri: String, state: State<'_, SharedState>) -> Result<VpnP
     }
     save_persistent_state(&rt.persistent);
     Ok(profile)
+}
+
+#[tauri::command]
+fn parse_profile_text(text: String) -> Result<VpnProfile, String> {
+    parse_profile_uri(&text)
 }
 
 #[tauri::command]
@@ -2881,6 +3192,7 @@ fn main() {
         active_profile_name: None,
         active_protocol: None,
         active_port: None,
+        active_listen_port: None,
         port_hunting_status: None,
         is_handshaking: false,
         handshake_status: None,
@@ -3071,7 +3383,7 @@ fn main() {
                     }
                 };
                 if let Some((pid, mode, split)) = auto_connect_profile {
-                    let _ = connect_vpn(pid, mode, split, app_handle_for_connect.state()).await;
+                    let _ = connect_vpn(pid, mode, split, Some(true), app_handle_for_connect.state()).await;
                 }
             });
 
@@ -3082,9 +3394,11 @@ fn main() {
             get_vpn_status,
             download_core,
             connect_vpn,
+            reconnect_vpn,
             disconnect_vpn,
             add_or_update_profile,
             import_profile_uri,
+            parse_profile_text,
             delete_profile,
             ping_profile,
             save_routing_config,
