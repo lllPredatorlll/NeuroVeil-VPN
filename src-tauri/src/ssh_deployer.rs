@@ -700,7 +700,7 @@ chmod 600 /etc/sing-box/reality.json
         emit_log(app, "Ключи VLESS Reality созданы и сохранены в /etc/sing-box/reality.json.");
         (uuid, priv_key, pub_key, sid)
     } else {
-        (String::new(), String::new(), String::new(), String::new())
+        (Uuid::new_v4().to_string(), String::new(), String::new(), String::new())
     };
 
     let (
@@ -766,14 +766,17 @@ chmod 600 /etc/sing-box/reality.json
         let jc = creds.awg_jc.unwrap_or_else(|| random_u32_in_range(4, 7) as u16);
         let jmin = creds.awg_jmin.unwrap_or_else(|| random_u32_in_range(10, 25) as u16);
         let jmax = creds.awg_jmax.unwrap_or_else(|| random_u32_in_range(45, 75) as u16);
-        let s1 = creds.awg_s1.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 18) as u16);
-        let s2 = creds.awg_s2.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 18) as u16);
-        let s3 = creds.awg_s3.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 18) as u16);
-        let s4 = creds.awg_s4.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 18) as u16);
-        let h1 = creds.awg_h1.clone().unwrap_or_else(|| "1".to_string());
-        let h2 = creds.awg_h2.clone().unwrap_or_else(|| "2".to_string());
-        let h3 = creds.awg_h3.clone().unwrap_or_else(|| "3".to_string());
-        let h4 = creds.awg_h4.clone().unwrap_or_else(|| "4".to_string());
+        let s1 = creds.awg_s1.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+        let mut s2 = creds.awg_s2.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+        if s1 + 56 == s2 {
+            s2 += 1;
+        }
+        let s3 = creds.awg_s3.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+        let s4 = creds.awg_s4.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+        let h1 = creds.awg_h1.clone().filter(|s| !s.trim().is_empty() && s.trim() != "1").unwrap_or_else(|| random_u32_in_range(100_000_000, 499_999_999).to_string());
+        let h2 = creds.awg_h2.clone().filter(|s| !s.trim().is_empty() && s.trim() != "2").unwrap_or_else(|| random_u32_in_range(500_000_000, 999_999_999).to_string());
+        let h3 = creds.awg_h3.clone().filter(|s| !s.trim().is_empty() && s.trim() != "3").unwrap_or_else(|| random_u32_in_range(1_000_000_000, 1_499_999_999).to_string());
+        let h4 = creds.awg_h4.clone().filter(|s| !s.trim().is_empty() && s.trim() != "4").unwrap_or_else(|| random_u32_in_range(1_500_000_000, 2_140_000_000).to_string());
 
         let rekey_after = creds.awg_rekey_after_time.clone().filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(90, 110), random_u32_in_range(115, 140)));
@@ -1213,10 +1216,11 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
     }
 
     if creds.deploy_ss || creds.deploy_shadowtls {
+        let ss_listen = if creds.deploy_ss { "::" } else { "127.0.0.1" };
         let ss_in = json!({
             "type": "shadowsocks",
             "tag": "ss-in",
-            "listen": "::",
+            "listen": ss_listen,
             "listen_port": creds.ss_port,
             "method": creds.ss_method,
             "password": ss_password.clone(),
@@ -1293,6 +1297,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
             "tls": {
                 "enabled": true,
                 "server_name": sni.clone(),
+                "alpn": ["http/1.1"],
                 "certificate_path": "/etc/sing-box/cert.pem",
                 "key_path": "/etc/sing-box/key.pem"
             }
@@ -1326,6 +1331,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
             "tls": {
                 "enabled": true,
                 "server_name": sni.clone(),
+                "alpn": ["h2"],
                 "certificate_path": "/etc/sing-box/cert.pem",
                 "key_path": "/etc/sing-box/key.pem"
             }
@@ -1589,8 +1595,8 @@ systemctl is-active sing-box
             uuid: Some(vless_uuid.clone()),
             up_mbps: 100,
             down_mbps: 100,
-            reality_public_key: Some(vless_pub),
-            reality_short_id: Some(vless_sid),
+            reality_public_key: Some(vless_pub.clone()),
+            reality_short_id: Some(vless_sid.clone()),
             reality_flow: Some("xtls-rprx-vision".to_string()),
             tls_fragment: Some(true),
             ..Default::default()
@@ -1711,7 +1717,36 @@ systemctl is-active sing-box
             ..Default::default()
         };
         awg_profile.uri = build_profile_uri(&awg_profile);
-        created_profiles.push(awg_profile);
+        created_profiles.push(awg_profile.clone());
+
+        if creds.deploy_awg_quic {
+            let mut quic_profile = awg_profile.clone();
+            quic_profile.id = Uuid::new_v4().to_string();
+            quic_profile.name = format!("AWG + QUIC Pre-Warm ({})", creds.host.trim());
+            quic_profile.protocol = "awg_quic".to_string();
+            quic_profile.uri = build_profile_uri(&quic_profile);
+            created_profiles.push(quic_profile);
+        }
+
+        if creds.deploy_awg_vless && creds.deploy_vless {
+            let reality_sni = if creds.reality_sni.trim().is_empty() {
+                "www.microsoft.com".to_string()
+            } else {
+                creds.reality_sni.trim().to_string()
+            };
+            let mut hybrid_profile = awg_profile.clone();
+            hybrid_profile.id = Uuid::new_v4().to_string();
+            hybrid_profile.name = format!("Hybrid AWG + Reality ({})", creds.host.trim());
+            hybrid_profile.protocol = "awg_vless".to_string();
+            hybrid_profile.vless_port = Some(creds.vless_port);
+            hybrid_profile.uuid = Some(vless_uuid.clone());
+            hybrid_profile.reality_public_key = Some(vless_pub.clone());
+            hybrid_profile.reality_short_id = Some(vless_sid.clone());
+            hybrid_profile.reality_flow = Some("xtls-rprx-vision".to_string());
+            hybrid_profile.sni = reality_sni;
+            hybrid_profile.uri = build_profile_uri(&hybrid_profile);
+            created_profiles.push(hybrid_profile);
+        }
     }
 
     if creds.deploy_awg2 {
@@ -1792,13 +1827,14 @@ systemctl is-active sing-box
 
     if creds.deploy_vless_ws {
         let cdn_name = format!("Cloudflare CDN WS ({})", creds.host.trim());
-        let cdn_host = creds.cdn_domain.clone().unwrap_or_else(|| connect_host.clone());
+        let cdn_host = creds.cdn_domain.clone().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| connect_host.clone());
         let mut cdn_profile = VpnProfile {
             id: Uuid::new_v4().to_string(),
             name: cdn_name,
             protocol: "vless_ws".to_string(),
             server: connect_host.clone(),
             port: creds.vless_ws_port,
+            insecure: true,
             uuid: Some(vless_uuid.clone()),
             password: vless_uuid.clone(),
             ws_path: Some("/neuroveil-ws".to_string()),
@@ -1821,6 +1857,7 @@ systemctl is-active sing-box
             protocol: "webrtc".to_string(),
             server: connect_host.clone(),
             port: creds.webrtc_port,
+            insecure: true,
             uuid: Some(vless_uuid.clone()),
             password: vless_uuid.clone(),
             ws_path: Some("neuroveil-webrtc".to_string()),
@@ -2420,18 +2457,109 @@ pub async fn fetch_vps_profiles(
 
     for inbound in inbounds {
         let ib_type = inbound["type"].as_str().unwrap_or("");
-        if ib_type != "hysteria2" && ib_type != "tuic" && ib_type != "vless" && ib_type != "shadowsocks" {
+        if ib_type != "hysteria2" && ib_type != "tuic" && ib_type != "vless" && ib_type != "shadowsocks" && ib_type != "shadowtls" {
             continue;
         }
 
+        // Skip internal-only Shadowsocks detour inbound when not exposed externally
+        if ib_type == "shadowsocks" && inbound["listen"].as_str() == Some("127.0.0.1") {
+            continue;
+        }
+
+        if ib_type == "shadowtls" {
+            let port = inbound["listen_port"].as_u64().unwrap_or(8443) as u16;
+            let st_sni = inbound["handshake"]["server"]
+                .as_str()
+                .unwrap_or("www.microsoft.com")
+                .to_string();
+            let detour_tag = inbound["detour"].as_str().unwrap_or("ss-in");
+            let ss_ib = inbounds.iter().find(|i| i["tag"].as_str() == Some(detour_tag));
+            let ss_password = ss_ib
+                .and_then(|i| {
+                    i["password"].as_str().or_else(|| {
+                        i["users"].as_array().and_then(|u| u.first()).and_then(|u| u["password"].as_str())
+                    })
+                })
+                .unwrap_or("")
+                .to_string();
+            let ss_method = ss_ib
+                .and_then(|i| i["method"].as_str())
+                .unwrap_or("2022-blake3-aes-128-gcm")
+                .to_string();
+
+            if let Some(users) = inbound["users"].as_array() {
+                for u in users {
+                    let user_name = u["name"].as_str().unwrap_or("neuroveil-user");
+                    let st_pass = u["password"].as_str().unwrap_or("").to_string();
+                    if st_pass.is_empty() || ss_password.is_empty() {
+                        continue;
+                    }
+                    let is_base = user_name == "neuroveil-user" || user_name == "default";
+                    let prof_name = if is_base {
+                        format!("ShadowTLS v3 ({})", connect_host)
+                    } else {
+                        user_name.to_string()
+                    };
+                    let mut prof = VpnProfile {
+                        id: Uuid::new_v4().to_string(),
+                        name: prof_name,
+                        protocol: "shadowtls".to_string(),
+                        server: connect_host.clone(),
+                        port,
+                        sni: st_sni.clone(),
+                        shadowtls_sni: Some(st_sni.clone()),
+                        shadowtls_password: Some(st_pass),
+                        password: ss_password.clone(),
+                        ss_method: Some(ss_method.clone()),
+                        up_mbps: 100,
+                        down_mbps: 100,
+                        tls_fragment: Some(false),
+                        pinned_on_pc: if is_base { Some(true) } else { Some(false) },
+                        ..Default::default()
+                    };
+                    prof.uri = build_profile_uri(&prof);
+                    profiles.push(prof);
+                }
+            }
+            continue;
+        }
+
+        let transport_type = inbound["transport"]["type"].as_str().unwrap_or("");
+        let actual_protocol = if ib_type == "vless" && transport_type == "ws" {
+            "vless_ws"
+        } else if ib_type == "vless" && transport_type == "grpc" {
+            "webrtc"
+        } else {
+            ib_type
+        };
+
         let port = inbound["listen_port"]
             .as_u64()
-            .unwrap_or(if ib_type == "vless" { 443 } else if ib_type == "tuic" { 9443 } else if ib_type == "shadowsocks" { 8388 } else { 8443 }) as u16;
+            .unwrap_or(match actual_protocol {
+                "vless" => 443,
+                "vless_ws" => 8080,
+                "webrtc" => 2053,
+                "tuic" => 9443,
+                "shadowsocks" => 8388,
+                _ => 8443,
+            }) as u16;
         let sni = inbound["tls"]["server_name"]
             .as_str()
-            .unwrap_or(if ib_type == "vless" { "www.microsoft.com" } else { "www.bing.com" })
+            .unwrap_or(if actual_protocol == "vless" { "www.microsoft.com" } else { "www.bing.com" })
             .to_string();
         let obfs_password = inbound["obfs"]["password"].as_str().map(|s| s.to_string());
+        let ws_path = if actual_protocol == "vless_ws" {
+            Some(inbound["transport"]["path"].as_str().unwrap_or("/neuroveil-ws").to_string())
+        } else if actual_protocol == "webrtc" {
+            Some(inbound["transport"]["service_name"].as_str().unwrap_or("neuroveil-webrtc").to_string())
+        } else {
+            None
+        };
+        let cdn_host = if actual_protocol == "vless_ws" {
+            Some(creds.cdn_domain.clone().filter(|d| !d.trim().is_empty()).unwrap_or_else(|| connect_host.clone()))
+        } else {
+            None
+        };
 
         if let Some(users) = inbound["users"].as_array() {
             for u in users {
@@ -2446,16 +2574,18 @@ pub async fn fetch_vps_profiles(
                     continue;
                 }
 
-                let proto_label = if ib_type == "vless" {
-                    "VLESS Reality"
-                } else if ib_type == "tuic" {
-                    "TUIC v5"
-                } else if ib_type == "shadowsocks" {
-                    "Shadowsocks"
-                } else {
-                    "Hysteria 2"
+                let proto_label = match actual_protocol {
+                    "vless" => "VLESS Reality",
+                    "vless_ws" => "Cloudflare CDN WS",
+                    "webrtc" => "WebRTC Steganography",
+                    "tuic" => "TUIC v5",
+                    "shadowsocks" => "Shadowsocks",
+                    _ => "Hysteria 2",
                 };
-                let is_base = user_name == "neuroveil-user" || user_name == "default";
+                let is_base = user_name == "neuroveil-user"
+                    || user_name == "default"
+                    || user_name == "neuroveil-ws-user"
+                    || user_name == "neuroveil-webrtc-user";
                 let prof_name = if is_base {
                     format!("{} ({})", proto_label, connect_host)
                 } else {
@@ -2464,30 +2594,32 @@ pub async fn fetch_vps_profiles(
                 let mut prof = VpnProfile {
                     id: Uuid::new_v4().to_string(),
                     name: prof_name,
-                    protocol: ib_type.to_string(),
+                    protocol: actual_protocol.to_string(),
                     server: connect_host.clone(),
                     port,
                     sni: sni.clone(),
-                    insecure: ib_type != "vless",
+                    insecure: actual_protocol != "vless",
                     password,
                     uuid,
                     obfs_password: obfs_password.clone(),
                     up_mbps: 100,
                     down_mbps: 100,
-                    hop_ports: if ib_type == "hysteria2" && creds.enable_port_hopping {
+                    hop_ports: if actual_protocol == "hysteria2" && creds.enable_port_hopping {
                         Some("20000:65000".to_string())
                     } else {
                         None
                     },
-                    hop_interval: if ib_type == "hysteria2" && creds.enable_port_hopping {
+                    hop_interval: if actual_protocol == "hysteria2" && creds.enable_port_hopping {
                         Some("30s".to_string())
                     } else {
                         None
                     },
-                    reality_public_key: if ib_type == "vless" { cached_real_pub.clone() } else { None },
-                    reality_short_id: if ib_type == "vless" { cached_real_sid.clone() } else { None },
-                    reality_flow: if ib_type == "vless" { Some("xtls-rprx-vision".to_string()) } else { None },
-                    ss_method: if ib_type == "shadowsocks" { inbound["method"].as_str().map(|s| s.to_string()) } else { None },
+                    reality_public_key: if actual_protocol == "vless" { cached_real_pub.clone() } else { None },
+                    reality_short_id: if actual_protocol == "vless" { cached_real_sid.clone() } else { None },
+                    reality_flow: if actual_protocol == "vless" { Some("xtls-rprx-vision".to_string()) } else { None },
+                    ss_method: if actual_protocol == "shadowsocks" { inbound["method"].as_str().map(|s| s.to_string()) } else { None },
+                    ws_path: ws_path.clone(),
+                    cdn_host: cdn_host.clone(),
                     pinned_on_pc: if is_base { Some(true) } else { Some(false) },
                     ..Default::default()
                 };
@@ -2510,6 +2642,7 @@ pub async fn fetch_vps_profiles(
                     up_mbps: 100,
                     down_mbps: 100,
                     ss_method: inbound["method"].as_str().map(|s| s.to_string()),
+                    pinned_on_pc: Some(true),
                     ..Default::default()
                 };
                 prof.uri = build_profile_uri(&prof);

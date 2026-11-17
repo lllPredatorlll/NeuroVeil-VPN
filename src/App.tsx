@@ -75,6 +75,10 @@ import {
   VpnStatus,
   VpsCredentials,
 } from "./types";
+import pkg from "../package.json";
+
+const APP_VERSION = pkg.version;
+const APP_BUILD = "1058";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -322,18 +326,23 @@ export default function App() {
   }
 
   function generateRandomAwg31Params() {
+    const s1 = getRandomInt(12, 28);
+    let s2 = getRandomInt(12, 28);
+    if (s1 + 56 === s2) {
+      s2 += 1;
+    }
     return {
       awg_jc: getRandomInt(4, 7),
       awg_jmin: getRandomInt(10, 25),
       awg_jmax: getRandomInt(45, 75),
-      awg_s1: getRandomInt(12, 18),
-      awg_s2: getRandomInt(12, 18),
-      awg_s3: getRandomInt(12, 18),
-      awg_s4: getRandomInt(12, 18),
-      awg_h1: "1",
-      awg_h2: "2",
-      awg_h3: "3",
-      awg_h4: "4",
+      awg_s1: s1,
+      awg_s2: s2,
+      awg_s3: getRandomInt(12, 28),
+      awg_s4: getRandomInt(12, 28),
+      awg_h1: String(getRandomInt(100000000, 499999999)),
+      awg_h2: String(getRandomInt(500000000, 999999999)),
+      awg_h3: String(getRandomInt(1000000000, 1499999999)),
+      awg_h4: String(getRandomInt(1500000000, 2140000000)),
       awg_header_protection_key: getRandomBase64Key(),
       awg_preshared_key: getRandomBase64Key(),
       awg_rekey_after_time: `${getRandomInt(90, 110)}-${getRandomInt(115, 140)}`,
@@ -368,6 +377,8 @@ export default function App() {
       deploy_tuic: false,
       deploy_ss: false,
       deploy_awg: true,
+      deploy_awg_quic: true,
+      deploy_awg_vless: true,
       deploy_awg2: false,
       deploy_ssh: true,
       deploy_shadowtls: true,
@@ -421,7 +432,7 @@ export default function App() {
         } else {
           showNotice(
             "success",
-            `Проверка завершена: установлена актуальная версия NeuroVeil VPN v${info.current_version} (Build 1050)`
+            `Проверка завершена: установлена актуальная версия NeuroVeil VPN v${info.current_version} (Build ${APP_BUILD})`
           );
         }
       }
@@ -471,6 +482,9 @@ export default function App() {
   );
   const [connecting, setConnecting] = useState(false);
   const [reconnectCooldown, setReconnectCooldown] = useState(false);
+  const [autoPortHunting, setAutoPortHunting] = useState(false);
+  const [autoPortAttempt, setAutoPortAttempt] = useState(0);
+  const autoPortStopRef = useRef(false);
   const [showAwgAdvanced, setShowAwgAdvanced] = useState(false);
   const [downloadingCore, setDownloadingCore] = useState(false);
   const [uriInput, setUriInput] = useState("");
@@ -546,7 +560,12 @@ export default function App() {
     setEditingProfile(prof);
     setEditForm({ ...prof });
     setEditRawJson(JSON.stringify(prof, null, 2));
-    const isAwgOrWg = prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard";
+    const isAwgOrWg =
+      prof.protocol === "amneziawg" ||
+      prof.protocol === "awg_quic" ||
+      prof.protocol === "awg_vless" ||
+      prof.protocol === "awg2" ||
+      prof.protocol === "wireguard";
     if (isAwgOrWg) {
       try {
         const conf = await invoke<string>("export_awg_conf", {
@@ -596,12 +615,18 @@ export default function App() {
               editingProfile.protocol === "awg2" &&
               parsed.awg_jc == null &&
               !parsed.awg_header_protection_key;
+            const preservedProto =
+              editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless"
+                ? editingProfile.protocol
+                : keepAwg2
+                ? "awg2"
+                : parsed.protocol;
             updatedProfile = {
               ...editingProfile,
               ...parsed,
               id: editingProfile.id,
               name: editForm.name || parsed.name || editingProfile.name,
-              protocol: keepAwg2 ? "awg2" : parsed.protocol,
+              protocol: preservedProto,
               awg_version: keepAwg2 ? "2.0" : parsed.awg_version,
               pinned_on_pc: editingProfile.pinned_on_pc,
               auto_rotate_listen_port: editForm.auto_rotate_listen_port ?? editingProfile.auto_rotate_listen_port,
@@ -645,7 +670,11 @@ export default function App() {
         updatedProfile.hop_ports = undefined;
         updatedProfile.awg_persistent_keepalive = undefined;
         updatedProfile.awg_port_probing = false;
-      } else if (updatedProfile.protocol === "amneziawg") {
+      } else if (
+        updatedProfile.protocol === "amneziawg" ||
+        updatedProfile.protocol === "awg_quic" ||
+        updatedProfile.protocol === "awg_vless"
+      ) {
         const priv = (updatedProfile.awg_private_key || updatedProfile.password || "").trim();
         updatedProfile.awg_private_key = priv;
         updatedProfile.password = priv;
@@ -813,6 +842,10 @@ export default function App() {
         }
 
         if (appState.saved_vps) {
+          const savedH1 = appState.saved_vps!.awg_h1;
+          const savedH2 = appState.saved_vps!.awg_h2;
+          const savedH3 = appState.saved_vps!.awg_h3;
+          const savedH4 = appState.saved_vps!.awg_h4;
           setVpsCreds((prev) => ({
             ...prev,
             ...appState.saved_vps!,
@@ -821,6 +854,8 @@ export default function App() {
             deploy_tuic: appState.saved_vps!.deploy_tuic !== undefined ? appState.saved_vps!.deploy_tuic : false,
             deploy_ss: appState.saved_vps!.deploy_ss !== undefined ? appState.saved_vps!.deploy_ss : false,
             deploy_awg: appState.saved_vps!.deploy_awg !== undefined ? appState.saved_vps!.deploy_awg : true,
+            deploy_awg_quic: appState.saved_vps!.deploy_awg_quic !== undefined ? appState.saved_vps!.deploy_awg_quic : true,
+            deploy_awg_vless: appState.saved_vps!.deploy_awg_vless !== undefined ? appState.saved_vps!.deploy_awg_vless : true,
             deploy_awg2: appState.saved_vps!.deploy_awg2 !== undefined ? appState.saved_vps!.deploy_awg2 : false,
             deploy_ssh: appState.saved_vps!.deploy_ssh !== undefined ? appState.saved_vps!.deploy_ssh : true,
             deploy_shadowtls: appState.saved_vps!.deploy_shadowtls !== undefined ? appState.saved_vps!.deploy_shadowtls : true,
@@ -840,10 +875,10 @@ export default function App() {
             awg_s2: appState.saved_vps!.awg_s2 ?? 12,
             awg_s3: appState.saved_vps!.awg_s3 ?? 12,
             awg_s4: appState.saved_vps!.awg_s4 ?? 12,
-            awg_h1: appState.saved_vps!.awg_h1 ?? "1",
-            awg_h2: appState.saved_vps!.awg_h2 ?? "2",
-            awg_h3: appState.saved_vps!.awg_h3 ?? "3",
-            awg_h4: appState.saved_vps!.awg_h4 ?? "4",
+            awg_h1: savedH1 && savedH1 !== "1" ? savedH1 : String(getRandomInt(100000000, 499999999)),
+            awg_h2: savedH2 && savedH2 !== "2" ? savedH2 : String(getRandomInt(500000000, 999999999)),
+            awg_h3: savedH3 && savedH3 !== "3" ? savedH3 : String(getRandomInt(1000000000, 1499999999)),
+            awg_h4: savedH4 && savedH4 !== "4" ? savedH4 : String(getRandomInt(1500000000, 2140000000)),
             awg2_port: (appState.saved_vps!.awg2_port && appState.saved_vps!.awg2_port !== 51821) ? appState.saved_vps!.awg2_port : getRandomInt(21000, 55000),
             vless_port: appState.saved_vps!.vless_port || 443,
             hy2_port: appState.saved_vps!.hy2_port || 8443,
@@ -1013,7 +1048,12 @@ export default function App() {
     setProxyProcessesList(targetRouting.proxy_processes || []);
 
     if (status.connected && !connecting && status.active_profile_id !== profileId) {
-      if (target?.protocol === "amneziawg" || target?.protocol === "awg2") {
+      if (
+        target?.protocol === "amneziawg" ||
+        target?.protocol === "awg_quic" ||
+        target?.protocol === "awg_vless" ||
+        target?.protocol === "awg2"
+      ) {
         const privKey = (target.awg_private_key || target.password || "").trim();
         if (!privKey) {
           showNotice(
@@ -1148,7 +1188,11 @@ export default function App() {
 
   // Actions
   const handleToggleConnect = async () => {
-    if (connecting || reconnectCooldown) return;
+    if (autoPortHunting) {
+      autoPortStopRef.current = true;
+      setAutoPortHunting(false);
+    }
+    if ((connecting && !autoPortHunting) || reconnectCooldown) return;
     setConnecting(true);
     try {
       if (status.connected) {
@@ -1167,7 +1211,12 @@ export default function App() {
           setConnecting(false);
           return;
         }
-        if (selectedProfile.protocol === "amneziawg" || selectedProfile.protocol === "awg2") {
+        if (
+          selectedProfile.protocol === "amneziawg" ||
+          selectedProfile.protocol === "awg_quic" ||
+          selectedProfile.protocol === "awg_vless" ||
+          selectedProfile.protocol === "awg2"
+        ) {
           const privKey = (selectedProfile.awg_private_key || selectedProfile.password || "").trim();
           if (!privKey) {
             showNotice(
@@ -1202,7 +1251,7 @@ export default function App() {
   };
 
   const handleReconnect = async () => {
-    if (connecting || reconnectCooldown) return;
+    if (connecting || reconnectCooldown || autoPortHunting) return;
     const targetId = status.active_profile_id || selectedProfile?.id;
     if (!targetId) return;
     setConnecting(true);
@@ -1226,6 +1275,92 @@ export default function App() {
     } catch (err: any) {
       showNotice("error", String(err));
     } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleAutoPortHunt = async () => {
+    if (autoPortHunting) {
+      autoPortStopRef.current = true;
+      setAutoPortHunting(false);
+      showNotice("info", "Автоматический перебор портов остановлен");
+      return;
+    }
+    if (connecting || reconnectCooldown) return;
+    const targetId = status.active_profile_id || selectedProfile?.id;
+    if (!targetId) return;
+
+    autoPortStopRef.current = false;
+    setAutoPortHunting(true);
+    setAutoPortAttempt(0);
+
+    try {
+      let attempt = 1;
+      while (!autoPortStopRef.current) {
+        setAutoPortAttempt(attempt);
+        setConnecting(true);
+
+        const targetProf = profiles.find((p) => p.id === targetId) || selectedProfile;
+        const profRouting = targetProf?.routing || routing;
+        const st = await invoke<VpnStatus>("reconnect_vpn", {
+          profileId: targetId,
+          mode: profRouting.mode,
+          splitTunneling: profRouting.split_tunneling,
+        });
+        applyStatusUpdate(st);
+        setConnecting(false);
+
+        const triedPort = st.active_listen_port || st.active_port;
+        showNotice(
+          "info",
+          `Автоподбор порта (#${attempt}): проверка ${
+            st.active_listen_port ? `ListenPort ${st.active_listen_port}` : `порта ${triedPort || ""}`
+          }...`
+        );
+
+        let established = false;
+        let finalSt = st;
+
+        // Ожидаем до ~4.2 сек подтверждения рукопожатия / входящего трафика на текущем порту
+        for (let tick = 0; tick < 12; tick++) {
+          if (autoPortStopRef.current) break;
+          await new Promise((r) => setTimeout(r, 350));
+          if (autoPortStopRef.current) break;
+
+          const pollSt = await invoke<VpnStatus>("get_vpn_status");
+          applyStatusUpdate(pollSt);
+          finalSt = pollSt;
+
+          if (!pollSt.connected) {
+            break;
+          }
+          if (!pollSt.is_handshaking && (tick >= 2 || pollSt.down_bytes > 0)) {
+            established = true;
+            break;
+          }
+        }
+
+        if (autoPortStopRef.current) {
+          break;
+        }
+
+        if (established) {
+          const workingPort = finalSt.active_listen_port || finalSt.active_port;
+          showNotice(
+            "success",
+            `Подключение установлено с попытки #${attempt}! Рабочий порт: ${workingPort || "активен"}`
+          );
+          break;
+        }
+
+        attempt++;
+      }
+    } catch (err: any) {
+      if (!autoPortStopRef.current) {
+        showNotice("error", `Ошибка автоподбора порта: ${String(err)}`);
+      }
+    } finally {
+      setAutoPortHunting(false);
       setConnecting(false);
     }
   };
@@ -1319,6 +1454,8 @@ export default function App() {
 
     const deployedCreds: VpsCredentials = {
       ...vpsCreds,
+      deploy_awg_quic: vpsCreds.deploy_awg_quic ?? true,
+      deploy_awg_vless: vpsCreds.deploy_awg_vless ?? true,
       deploy_awg2: vpsCreds.deploy_awg2 ?? false,
       awg2_port: autoAwg2Port,
       ...r31,
@@ -1331,7 +1468,7 @@ export default function App() {
 
     setVpsBusy("deploying");
     const logMessages = [
-      `[Авто-рандомизация] Сгенерирован порт Amnezia 3.1 (UDP ${autoAwgPort}) и уникальные параметры обфускации.`,
+      `[Авто-рандомизация] Сгенерирован порт Amnezia 3.1 (UDP ${autoAwgPort}), 32-битные заголовки H1-H4 (${r31.awg_h1}..${r31.awg_h4}) и непересекающиеся сдвиги S1/S2 (${r31.awg_s1}/${r31.awg_s2}).`,
     ];
     if (vpsCreds.deploy_awg2) {
       logMessages.push(`[Авто-рандомизация] Сгенерирован порт AmneziaWG 2.0 (UDP ${autoAwg2Port}).`);
@@ -1345,7 +1482,6 @@ export default function App() {
       if (res.new_ssh_port) {
         setVpsCreds((prev) => ({
           ...prev,
-          port: res.new_ssh_port!,
           ssh_port: res.new_ssh_port!,
         }));
       }
@@ -1423,21 +1559,41 @@ export default function App() {
           ? "SSH Tunnel"
           : newProfile.protocol === "vless"
           ? "VLESS Reality"
+          : newProfile.protocol === "vless_ws"
+          ? "VLESS CDN Shield"
+          : newProfile.protocol === "webrtc"
+          ? "WebRTC Media"
+          : newProfile.protocol === "shadowtls"
+          ? "ShadowTLS v3"
           : newProfile.protocol === "tuic"
           ? "TUIC v5"
           : newProfile.protocol === "shadowsocks"
           ? "Shadowsocks"
           : newProfile.protocol === "awg2"
           ? "AmneziaWG 2.0"
+          : newProfile.protocol === "awg_quic"
+          ? "AWG + QUIC Pre-Warm"
+          : newProfile.protocol === "awg_vless"
+          ? "Hybrid AWG + Reality"
           : newProfile.protocol === "amneziawg"
           ? "Amnezia 3.1"
+          : newProfile.protocol === "wireguard"
+          ? "WireGuard"
           : "Hysteria 2";
-      const isAwg31 = newProfile.protocol === "amneziawg";
+      const isAwg31 =
+        newProfile.protocol === "amneziawg" ||
+        newProfile.protocol === "awg_quic" ||
+        newProfile.protocol === "awg_vless";
       const isAwg20 = newProfile.protocol === "awg2";
-      const isProfileAwg = isAwg31 || isAwg20;
+      const isProfileAwg = isAwg31 || isAwg20 || newProfile.protocol === "wireguard";
+      const isUuidProto =
+        newProfile.protocol === "vless" ||
+        newProfile.protocol === "vless_ws" ||
+        newProfile.protocol === "webrtc";
       const profToSave: VpnProfile = {
         ...newProfile,
         pinned_on_pc: true,
+        uuid: isUuidProto ? newProfile.uuid || newProfile.password : newProfile.uuid,
         awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
         awg_private_key: isProfileAwg ? (newProfile.awg_private_key || newProfile.password) : newProfile.awg_private_key,
         awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : newProfile.awg_local_address,
@@ -2095,6 +2251,14 @@ export default function App() {
       label = "AWG 2.0";
       colorClass = "bg-teal-950/80 text-teal-300 border-teal-500/40 shadow-sm";
       dotClass = "bg-teal-400";
+    } else if (p === "awg_quic") {
+      label = "AWG + QUIC";
+      colorClass = "bg-sky-950/80 text-sky-300 border-sky-500/40 shadow-sm";
+      dotClass = "bg-sky-400";
+    } else if (p === "awg_vless") {
+      label = "AWG + Reality";
+      colorClass = "bg-fuchsia-950/80 text-fuchsia-300 border-fuchsia-500/40 shadow-sm";
+      dotClass = "bg-fuchsia-400";
     } else if (p === "amneziawg") {
       label = "Amnezia 3.1";
       colorClass = "bg-emerald-950/80 text-emerald-300 border-emerald-500/40 shadow-sm";
@@ -2209,7 +2373,7 @@ export default function App() {
                     </h1>
                   </div>
                   <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 mt-1 inline-block">
-                    v1.0.4
+                    v{APP_VERSION}
                   </span>
                 </div>
               </div>
@@ -2597,7 +2761,7 @@ export default function App() {
                   {/* Modern Main Action Button - Stretches to match server list height */}
                   <button
                     onClick={handleToggleConnect}
-                    disabled={connecting || reconnectCooldown}
+                    disabled={(connecting && !autoPortHunting) || reconnectCooldown}
                     className={`w-full flex-1 min-h-[76px] py-3 rounded-xl px-4 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
                       status.connected
                         ? status.is_handshaking
@@ -2625,7 +2789,7 @@ export default function App() {
                               : "bg-slate-700/80 group-hover:bg-cyan-500 text-white"
                           }`}
                         >
-                          {connecting ? (
+                          {connecting || autoPortHunting ? (
                             <RefreshCw className="w-5 h-5 animate-spin text-cyan-300" />
                           ) : status.connected ? (
                             status.is_handshaking ? (
@@ -2639,7 +2803,9 @@ export default function App() {
                         </div>
                         <div className="text-left min-w-0">
                           <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
-                            {connecting
+                            {autoPortHunting
+                              ? `Автоподбор порта (#${autoPortAttempt})`
+                              : connecting
                               ? "Подождите..."
                               : reconnectCooldown
                               ? "Защитная пауза WireGuard"
@@ -2650,7 +2816,7 @@ export default function App() {
                               : "VPN Выключен"}
                           </div>
                           <div className="text-sm font-bold text-white leading-tight truncate mt-0.5">
-                            {connecting
+                            {connecting && !autoPortHunting
                               ? "ИНИЦИАЛИЗАЦИЯ..."
                               : reconnectCooldown
                               ? "ПАУЗА..."
@@ -2677,24 +2843,54 @@ export default function App() {
                     </div>
                   </button>
 
-                  {status.connected && (
-                    <button
-                      type="button"
-                      onClick={handleReconnect}
-                      disabled={connecting || reconnectCooldown}
-                      className="w-full py-1.5 px-3 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-xs font-semibold text-cyan-300 flex items-center justify-between gap-2 transition cursor-pointer disabled:opacity-50"
-                      title="Переподключить туннель и сменить локальный UDP порт прослушивания (ListenPort)"
-                    >
-                      <span className="flex items-center gap-1.5">
-                        <RotateCcw className={`w-3.5 h-3.5 ${connecting ? "animate-spin" : ""}`} />
-                        Переподключиться
-                      </span>
-                      {status.active_listen_port && (
-                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30">
-                          ListenPort: {status.active_listen_port}
+                  {(status.connected || autoPortHunting) && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={handleReconnect}
+                        disabled={connecting || reconnectCooldown || autoPortHunting}
+                        className="w-full py-1.5 px-2.5 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-xs font-semibold text-cyan-300 flex items-center justify-between gap-1.5 transition cursor-pointer disabled:opacity-50 min-w-0"
+                        title="Переподключить туннель и один раз сменить локальный UDP порт прослушивания (ListenPort)"
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <RotateCcw className={`w-3.5 h-3.5 shrink-0 ${connecting && !autoPortHunting ? "animate-spin" : ""}`} />
+                          <span className="truncate">Переподкл.</span>
                         </span>
-                      )}
-                    </button>
+                        {status.active_listen_port && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 shrink-0">
+                            :{status.active_listen_port}
+                          </span>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleAutoPortHunt}
+                        disabled={reconnectCooldown && !autoPortHunting}
+                        className={`w-full py-1.5 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between gap-1.5 transition cursor-pointer disabled:opacity-50 min-w-0 ${
+                          autoPortHunting
+                            ? "bg-amber-500/20 hover:bg-rose-500/25 border-amber-400/60 text-amber-200 animate-pulse"
+                            : "bg-[#0b101d] hover:bg-slate-800/90 border-emerald-500/35 hover:border-emerald-400/60 text-emerald-300"
+                        }`}
+                        title={
+                          autoPortHunting
+                            ? "Нажмите, чтобы остановить автоматический перебор портов"
+                            : "Автоматически перебирать порты (ListenPort), пока не установится подключение"
+                        }
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${autoPortHunting ? "animate-spin text-amber-300" : "text-emerald-400"}`} />
+                          <span className="truncate">
+                            {autoPortHunting ? `Стоп (#${autoPortAttempt})` : "Автоподбор"}
+                          </span>
+                        </span>
+                        {autoPortHunting && status.active_listen_port && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 shrink-0">
+                            :{status.active_listen_port}
+                          </span>
+                        )}
+                      </button>
+                    </div>
                   )}
 
                   {/* Compact Live Speed Meter */}
@@ -3772,6 +3968,55 @@ export default function App() {
                           </label>
                         </div>
 
+                        {/* Special Handshake Protection Protocols (Option 1 & Option 2) */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pt-1">
+                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-sky-950/20 border border-sky-500/35 hover:border-sky-400/60 cursor-pointer transition">
+                            <input
+                              type="checkbox"
+                              checked={vpsCreds.deploy_awg_quic ?? true}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  deploy_awg_quic: e.target.checked,
+                                })
+                              }
+                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
+                            />
+                            <div className="text-left min-w-0">
+                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
+                                <span>Спецпротокол: AWG + QUIC Pre-Warm</span>
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 font-mono">UDP Pre-Warm</span>
+                              </div>
+                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
+                                Отправляет QUIC v1 Initial (1200B) и WebRTC STUN Binding Request с рабочего ListenPort за 15 мс до рукопожатия AWG, ослепляя ТСПУ.
+                              </p>
+                            </div>
+                          </label>
+
+                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/35 hover:border-fuchsia-400/60 cursor-pointer transition">
+                            <input
+                              type="checkbox"
+                              checked={vpsCreds.deploy_awg_vless ?? true}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  deploy_awg_vless: e.target.checked,
+                                })
+                              }
+                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-fuchsia-500 focus:ring-fuchsia-500"
+                            />
+                            <div className="text-left min-w-0">
+                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
+                                <span>Спецпротокол: Гибрид AWG + Reality</span>
+                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-fuchsia-500/20 text-fuchsia-300 font-mono">TCP 443 Detour</span>
+                              </div>
+                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
+                                Упаковывает рукопожатие и поток AmneziaWG внутрь VLESS Reality (TCP 443). Обходит 100% UDP-блокировок провайдера.
+                              </p>
+                            </div>
+                          </label>
+                        </div>
+
                         {/* Ports */}
                         <div className="grid grid-cols-2 gap-3">
                           <div>
@@ -3868,7 +4113,7 @@ export default function App() {
                             </div>
                           </div>
                           <div>
-                            <span className="text-slate-400 block mb-0.5">H1-H4 (1-4)</span>
+                            <span className="text-slate-400 block mb-0.5">H1-H4 (32-bit Random)</span>
                             <div className="grid grid-cols-4 gap-0.5">
                               <input
                                 type="text"
@@ -4415,20 +4660,36 @@ export default function App() {
                     <select
                       value={newProfile.protocol}
                       onChange={(e) => {
-                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg2" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
-                        const isAwg31 = proto === "amneziawg";
+                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
+                        const isAwg31 = proto === "amneziawg" || proto === "awg_quic" || proto === "awg_vless";
                         const isAwg20 = proto === "awg2";
+                        const existingAwg = profiles.find((p) => p.protocol === "amneziawg");
+                        const existingVless = profiles.find((p) => p.protocol === "vless" && p.reality_public_key);
                         setNewProfile({
                           ...newProfile,
                           protocol: proto,
-                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : proto === "vless_ws" ? 2096 : proto === "webrtc" ? 3478 : proto === "shadowtls" ? 8443 : (isAwg20 || isAwg31) ? getRandomInt(21000, 55000) : 8443,
-                          sni: proto === "ssh" ? (newProfile.sni || "root") : proto === "shadowtls" ? (newProfile.sni || "gateway.icloud.com") : proto === "webrtc" ? (newProfile.sni || "zoom.us") : newProfile.sni,
+                          server: newProfile.server || existingAwg?.server || existingVless?.server || "",
+                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : proto === "vless_ws" ? 8080 : proto === "webrtc" ? 2053 : proto === "shadowtls" ? 8443 : isAwg31 ? (existingAwg?.port || getRandomInt(21000, 55000)) : isAwg20 ? getRandomInt(21000, 55000) : 8443,
+                          vless_port: proto === "awg_vless" ? (newProfile.vless_port || existingVless?.port || 443) : newProfile.vless_port,
+                          uuid: proto === "awg_vless" ? (newProfile.uuid || existingVless?.uuid || existingVless?.password || "") : newProfile.uuid,
+                          reality_public_key: proto === "awg_vless" ? (newProfile.reality_public_key || existingVless?.reality_public_key || "") : newProfile.reality_public_key,
+                          reality_short_id: proto === "awg_vless" ? (newProfile.reality_short_id || existingVless?.reality_short_id || "") : newProfile.reality_short_id,
+                          sni: proto === "ssh" ? (newProfile.sni || "root") : proto === "shadowtls" ? (newProfile.sni || "gateway.icloud.com") : proto === "webrtc" ? (newProfile.sni || "zoom.us") : proto === "awg_vless" ? (existingVless?.sni || newProfile.sni || "www.microsoft.com") : newProfile.sni,
                           shadowtls_sni: proto === "shadowtls" ? (newProfile.shadowtls_sni || "gateway.icloud.com") : newProfile.shadowtls_sni,
-                          ws_path: proto === "vless_ws" ? (newProfile.ws_path || "/ws-tunnel") : proto === "webrtc" ? (newProfile.ws_path || "webrtc-media") : newProfile.ws_path,
+                          ws_path: proto === "vless_ws" ? (newProfile.ws_path || "/neuroveil-ws") : proto === "webrtc" ? (newProfile.ws_path || "neuroveil-webrtc") : newProfile.ws_path,
                           tls_fragment: proto === "ssh" ? false : true,
+                          password: isAwg31 ? (newProfile.password || existingAwg?.awg_private_key || existingAwg?.password || "") : newProfile.password,
+                          awg_private_key: isAwg31 ? (newProfile.awg_private_key || existingAwg?.awg_private_key || existingAwg?.password || "") : newProfile.awg_private_key,
+                          awg_public_key: isAwg31 ? (newProfile.awg_public_key || existingAwg?.awg_public_key || "") : newProfile.awg_public_key,
+                          awg_preshared_key: isAwg31 ? (newProfile.awg_preshared_key || existingAwg?.awg_preshared_key || "") : newProfile.awg_preshared_key,
+                          awg_header_protection_key: isAwg31 ? (newProfile.awg_header_protection_key || existingAwg?.awg_header_protection_key || "") : newProfile.awg_header_protection_key,
+                          awg_h1: isAwg31 ? (newProfile.awg_h1 || existingAwg?.awg_h1 || String(getRandomInt(100000000, 499999999))) : newProfile.awg_h1,
+                          awg_h2: isAwg31 ? (newProfile.awg_h2 || existingAwg?.awg_h2 || String(getRandomInt(500000000, 999999999))) : newProfile.awg_h2,
+                          awg_h3: isAwg31 ? (newProfile.awg_h3 || existingAwg?.awg_h3 || String(getRandomInt(1000000000, 1499999999))) : newProfile.awg_h3,
+                          awg_h4: isAwg31 ? (newProfile.awg_h4 || existingAwg?.awg_h4 || String(getRandomInt(1500000000, 2140000000))) : newProfile.awg_h4,
                           awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
-                          awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : isAwg31 ? (newProfile.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
-                          awg_hop_ports: isAwg31 ? (newProfile.awg_hop_ports || "20000:65000") : isAwg20 ? undefined : newProfile.awg_hop_ports,
+                          awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : isAwg31 ? (newProfile.awg_local_address || existingAwg?.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
+                          awg_hop_ports: isAwg31 ? (newProfile.awg_hop_ports || existingAwg?.awg_hop_ports || "20000:65000") : isAwg20 ? undefined : newProfile.awg_hop_ports,
                           awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 ? false : newProfile.awg_port_probing,
                         });
                       }}
@@ -4439,7 +4700,9 @@ export default function App() {
                       <option value="shadowtls">ShadowTLS v3 (L7 TLS-паразит Microsoft/Apple)</option>
                       <option value="vless_ws">VLESS + WebSocket (Cloudflare CDN Shield)</option>
                       <option value="webrtc">WebRTC Steganography (VLESS over gRPC Media)</option>
-                      <option value="amneziawg">Amnezia 3.1 (Header Protection + S1-S4 ≥ 12)</option>
+                      <option value="amneziawg">Amnezia 3.1 (Header Protection + 32-bit H1-H4)</option>
+                      <option value="awg_quic">Спецпротокол: AWG + QUIC Pre-Warm (Ослепление DPI)</option>
+                      <option value="awg_vless">Спецпротокол: Гибрид AWG + VLESS Reality (Капсула TCP 443)</option>
                       <option value="awg2">AmneziaWG 2.0 (AWG 2.0 • Чистый конфиг)</option>
                       <option value="hysteria2">Hysteria 2 (QUIC + Salamander)</option>
                       <option value="tuic">TUIC v5 (QUIC BBR)</option>
@@ -4478,7 +4741,7 @@ export default function App() {
                       onChange={(e) =>
                         setNewProfile({
                           ...newProfile,
-                          port: Number(e.target.value) || (newProfile.protocol === "ssh" ? 22 : newProfile.protocol === "shadowsocks" ? 8388 : (newProfile.protocol === "awg2" || newProfile.protocol === "amneziawg") ? getRandomInt(21000, 55000) : 8443),
+                          port: Number(e.target.value) || (newProfile.protocol === "ssh" ? 22 : newProfile.protocol === "shadowsocks" ? 8388 : (newProfile.protocol === "awg2" || newProfile.protocol === "amneziawg" || newProfile.protocol === "awg_quic" || newProfile.protocol === "awg_vless") ? getRandomInt(21000, 55000) : 8443),
                         })
                       }
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
@@ -4501,15 +4764,84 @@ export default function App() {
                   </div>
                 </div>
 
-                {newProfile.protocol === "amneziawg" ? (
+                {(newProfile.protocol === "amneziawg" || newProfile.protocol === "awg_quic" || newProfile.protocol === "awg_vless") ? (
                   <div className="space-y-3 pt-1">
+                    {newProfile.protocol === "awg_quic" && (
+                      <div className="p-3 rounded-xl bg-sky-950/30 border border-sky-500/35 text-xs text-sky-200 flex items-start gap-2">
+                        <span className="text-base">⚡</span>
+                        <div>
+                          <span className="font-bold">Спецпротокол AWG + QUIC Pre-Warm:</span> за 15 мс до запуска рукопожатия с того же <code>ListenPort</code> отправляет пакеты RFC 9000 QUIC v1 Initial (1200B) и WebRTC STUN Binding Request. Таблица ТСПУ (conntrack) помечает UDP-поток как медиа/QUIC и пропускает рукопожатие AmneziaWG без инспекции.
+                        </div>
+                      </div>
+                    )}
+                    {newProfile.protocol === "awg_vless" && (
+                      <div className="p-3.5 rounded-xl bg-fuchsia-950/25 border border-fuchsia-500/35 space-y-3">
+                        <div className="text-xs text-fuchsia-200 flex items-start gap-2">
+                          <span className="text-base">🛡️</span>
+                          <div>
+                            <span className="font-bold">Спецпротокол Гибрид AWG + VLESS Reality:</span> рукопожатие и пакеты AmneziaWG упаковываются в TLS 1.3 поток VLESS Reality (TCP порт 443, <code>detour</code>). Позволяет установить соединение даже при 100% блокировке UDP у провайдера.
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-5 gap-2.5 text-xs">
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">Порт Reality (TCP)</label>
+                            <input
+                              type="number"
+                              value={newProfile.vless_port ?? 443}
+                              onChange={(e) => setNewProfile({ ...newProfile, vless_port: Number(e.target.value) || 443 })}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-white font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">UUID VLESS</label>
+                            <input
+                              type="text"
+                              placeholder="Авто из VLESS профиля"
+                              value={newProfile.uuid || ""}
+                              onChange={(e) => setNewProfile({ ...newProfile, uuid: e.target.value })}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-white font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">Reality Public Key</label>
+                            <input
+                              type="text"
+                              placeholder="PublicKey Reality"
+                              value={newProfile.reality_public_key || ""}
+                              onChange={(e) => setNewProfile({ ...newProfile, reality_public_key: e.target.value })}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-white font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">Short ID (sid)</label>
+                            <input
+                              type="text"
+                              placeholder="0123456789abcdef"
+                              value={newProfile.reality_short_id || ""}
+                              onChange={(e) => setNewProfile({ ...newProfile, reality_short_id: e.target.value })}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-white font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">SNI Reality</label>
+                            <input
+                              type="text"
+                              placeholder="www.microsoft.com"
+                              value={newProfile.sni || "www.microsoft.com"}
+                              onChange={(e) => setNewProfile({ ...newProfile, sni: e.target.value })}
+                              className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-white font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className="flex items-center justify-between p-3 rounded-xl bg-emerald-950/25 border border-emerald-500/30">
                       <div>
                         <div className="text-xs font-bold text-emerald-300">
                           Параметры протокола Amnezia 3.1
                         </div>
                         <div className="text-[11px] text-slate-400">
-                          Защита заголовков HeaderProtectionKey, сдвиги S1-S4 ≥ 12 и таймеры как в официальном клиенте
+                          Защита заголовков HeaderProtectionKey, 32-битные H1-H4, сдвиги S1-S4 ≥ 12 и таймеры
                         </div>
                       </div>
                       <button
@@ -4517,7 +4849,7 @@ export default function App() {
                         onClick={() => {
                           const r = generateRandomAwg31Params();
                           setNewProfile({ ...newProfile, ...r });
-                          showNotice("success", "Параметры Amnezia 3.1 рандомизированы!");
+                          showNotice("success", "Параметры Amnezia 3.1 (включая 32-битные H1-H4) рандомизированы!");
                         }}
                         className="px-3 py-1.5 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition"
                       >
@@ -4964,8 +5296,8 @@ export default function App() {
                         <label className="block text-xs text-slate-400 mb-1">WebSocket Path</label>
                         <input
                           type="text"
-                          placeholder="/ws-tunnel"
-                          value={newProfile.ws_path || "/ws-tunnel"}
+                          placeholder="/neuroveil-ws"
+                          value={newProfile.ws_path || "/neuroveil-ws"}
                           onChange={(e) => setNewProfile({ ...newProfile, ws_path: e.target.value })}
                           className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                         />
@@ -5005,8 +5337,8 @@ export default function App() {
                         <label className="block text-xs text-slate-400 mb-1">Медиа-поток (Service Name)</label>
                         <input
                           type="text"
-                          placeholder="webrtc-media"
-                          value={newProfile.ws_path || "webrtc-media"}
+                          placeholder="neuroveil-webrtc"
+                          value={newProfile.ws_path || "neuroveil-webrtc"}
                           onChange={(e) => setNewProfile({ ...newProfile, ws_path: e.target.value })}
                           className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                         />
@@ -5154,7 +5486,7 @@ export default function App() {
                         <div className="min-w-0">
                           <div className="text-sm font-bold text-white flex items-center gap-2 truncate">
                             <span>{prof.name}</span>
-                            {(prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
+                            {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
                               <span
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -5180,6 +5512,10 @@ export default function App() {
                                 ? ` • SSH порт ${prof.port} • 100% обход DPI`
                                 : prof.protocol === "awg2"
                                 ? ` • AmneziaWG 2.0${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
+                                : prof.protocol === "awg_quic"
+                                ? ` • AWG + QUIC Pre-Warm (Jc: ${prof.awg_jc ?? 5})${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
+                                : prof.protocol === "awg_vless"
+                                ? ` • Гибрид AWG + Reality (TCP ${prof.vless_port ?? 443} • SNI: ${prof.sni || "www.microsoft.com"})`
                                 : prof.protocol === "amneziawg"
                                 ? ` • Amnezia 3.1 (Jc: ${prof.awg_jc ?? 5})${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""} ${prof.awg_hop_ports ? `• Hunting (${prof.awg_hop_ports})` : ""}`
                                 : prof.protocol === "wireguard"
@@ -5212,7 +5548,7 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
+                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
                           <>
                             <button
                               onClick={() => handleDownloadAwgConf(prof)}
@@ -5222,7 +5558,7 @@ export default function App() {
                               <FileDown className="w-3.5 h-3.5" />
                               .conf
                             </button>
-                            {prof.protocol === "amneziawg" && (
+                            {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic") && (
                               <button
                                 onClick={() => handleProbeAwgPorts(prof.id)}
                                 disabled={probingAwgId === prof.id}
@@ -5254,7 +5590,7 @@ export default function App() {
                           onClick={async () => {
                             await handlePinProfileOnPc(prof.id);
                             handleQuickSwitchProfile(prof.id);
-                            if ((prof.protocol === "amneziawg" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim()) {
+                            if ((prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim()) {
                               showNotice("info", "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл.");
                             }
                             setActiveTab("dashboard");
@@ -5567,11 +5903,11 @@ export default function App() {
                           .json
                         </button>
 
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg2") && (
+                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
                           <button
                             onClick={() => handleDownloadAwgConf(prof)}
                             className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5"
-                            title="Скачать .conf для AmneziaVPN"
+                            title="Скачать .conf для AmneziaVPN / WireGuard"
                           >
                             <FileDown className="w-3.5 h-3.5" />
                             .conf Amnezia
@@ -5633,14 +5969,26 @@ export default function App() {
                           ? "SSH Tunnel"
                           : qrModalProfile.protocol === "vless"
                           ? "VLESS Reality"
+                          : qrModalProfile.protocol === "vless_ws"
+                          ? "VLESS CDN Shield"
+                          : qrModalProfile.protocol === "webrtc"
+                          ? "WebRTC Media"
+                          : qrModalProfile.protocol === "shadowtls"
+                          ? "ShadowTLS v3"
                           : qrModalProfile.protocol === "tuic"
                           ? "TUIC v5"
                           : qrModalProfile.protocol === "shadowsocks"
                           ? "Shadowsocks"
                           : qrModalProfile.protocol === "awg2"
                           ? "AmneziaWG 2.0"
+                          : qrModalProfile.protocol === "awg_quic"
+                          ? "AWG + QUIC Pre-Warm"
+                          : qrModalProfile.protocol === "awg_vless"
+                          ? "Hybrid AWG + Reality"
                           : qrModalProfile.protocol === "amneziawg"
                           ? "Amnezia 3.1"
+                          : qrModalProfile.protocol === "wireguard"
+                          ? "WireGuard"
                           : "Hysteria 2"}
                         )
                       </p>
@@ -5682,6 +6030,12 @@ export default function App() {
                                 ? "SSH Tunnel"
                                 : alt.protocol === "vless"
                                 ? "VLESS Reality"
+                                : alt.protocol === "vless_ws"
+                                ? "VLESS CDN"
+                                : alt.protocol === "webrtc"
+                                ? "WebRTC"
+                                : alt.protocol === "shadowtls"
+                                ? "ShadowTLS v3"
                                 : alt.protocol === "hysteria2"
                                 ? "Hysteria 2"
                                 : alt.protocol === "tuic"
@@ -5690,6 +6044,8 @@ export default function App() {
                                 ? "AWG 2.0"
                                 : alt.protocol === "amneziawg"
                                 ? "Amnezia 3.1"
+                                : alt.protocol === "wireguard"
+                                ? "WireGuard"
                                 : "Shadowsocks"}
                             </button>
                           ))}
@@ -5708,7 +6064,7 @@ export default function App() {
                   </div>
 
                   {/* Quick Actions */}
-                  <div className={`grid ${(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2") ? "grid-cols-3" : "grid-cols-2"} gap-2.5`}>
+                  <div className={`grid ${(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2" || qrModalProfile.protocol === "wireguard") ? "grid-cols-3" : "grid-cols-2"} gap-2.5`}>
                     <button
                       onClick={() => handleCopyUri(qrModalProfile)}
                       className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5"
@@ -5717,19 +6073,21 @@ export default function App() {
                       Ссылка{" "}
                       {qrModalProfile.protocol === "ssh"
                         ? "ssh://"
-                        : qrModalProfile.protocol === "vless"
+                        : qrModalProfile.protocol === "vless" || qrModalProfile.protocol === "vless_ws" || qrModalProfile.protocol === "webrtc"
                         ? "vless://"
+                        : qrModalProfile.protocol === "shadowtls"
+                        ? "shadowtls://"
                         : qrModalProfile.protocol === "tuic"
                         ? "tuic://"
                         : qrModalProfile.protocol === "shadowsocks"
                         ? "ss://"
                         : qrModalProfile.protocol === "awg2"
                         ? "awg2://"
-                        : qrModalProfile.protocol === "amneziawg"
+                        : qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "wireguard"
                         ? "awg://"
                         : "hysteria2://"}
                     </button>
-                    {(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2") && (
+                    {(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2" || qrModalProfile.protocol === "wireguard") && (
                       <button
                         onClick={() => handleDownloadAwgConf(qrModalProfile)}
                         className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white flex items-center justify-center gap-1.5"
@@ -7436,7 +7794,7 @@ export default function App() {
             {/* Bottom Footer Bar */}
             <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800/60 text-[11px] text-slate-400 flex items-center justify-between">
               <div>
-                <span className="font-semibold text-slate-300">NeuroVeil VPN v1.0.4 (Build 1052)</span> — Next-Gen High-Speed VPN Client
+                <span className="font-semibold text-slate-300">NeuroVeil VPN v{APP_VERSION} (Build {APP_BUILD})</span> — Next-Gen High-Speed VPN Client
               </div>
               <div className="text-slate-500 font-mono text-[10px]">
                 Port: 8443 (Hy2) • 9443 (TUIC) • Динамический UDP (Amnezia 3.1) • Tray & Autostart Active
@@ -7461,7 +7819,7 @@ export default function App() {
                 </p>
               </div>
               <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                Версия: 1.0.4 build 1052
+                Версия: {APP_VERSION} build {APP_BUILD}
               </span>
             </div>
 
@@ -7705,7 +8063,7 @@ export default function App() {
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="text-xs font-bold text-white">
-                      NeuroVeil VPN v1.0.4 (Build 1052)
+                      NeuroVeil VPN v{updateInfo?.current_version || APP_VERSION} (Build {APP_BUILD})
                     </span>
                     <button
                       type="button"
@@ -7815,7 +8173,7 @@ export default function App() {
                       Редактирование профиля: {editingProfile.name}
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Протокол: {editingProfile.protocol === "awg2" ? "AMNEZIAWG 2.0" : editingProfile.protocol === "amneziawg" ? "AMNEZIA 3.1" : editingProfile.protocol.toUpperCase()} • ID: {editingProfile.id}
+                      Протокол: {editingProfile.protocol === "awg2" ? "AMNEZIAWG 2.0" : editingProfile.protocol === "awg_quic" ? "AWG + QUIC PRE-WARM" : editingProfile.protocol === "awg_vless" ? "ГИБРИД AWG + REALITY" : editingProfile.protocol === "amneziawg" ? "AMNEZIA 3.1" : editingProfile.protocol.toUpperCase()} • ID: {editingProfile.id}
                     </p>
                   </div>
                 </div>
@@ -7823,7 +8181,12 @@ export default function App() {
                   <button
                     onClick={async () => {
                       if (!editModeRaw) {
-                        const isAwgOrWg = editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard";
+                        const isAwgOrWg =
+                          editingProfile.protocol === "amneziawg" ||
+                          editingProfile.protocol === "awg_quic" ||
+                          editingProfile.protocol === "awg_vless" ||
+                          editingProfile.protocol === "awg2" ||
+                          editingProfile.protocol === "wireguard";
                         if (isAwgOrWg) {
                           try {
                             const conf = await invoke<string>("export_awg_conf", {
@@ -7856,7 +8219,7 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-slate-300 font-bold">Текстовый редактор конфигурации:</span>
-                      {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
+                      {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
                         <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-800 border border-slate-700">
                           <button
                             type="button"
@@ -7964,7 +8327,7 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
+                    {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
                       <div className="col-span-2">
                         <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-[#0b101d] border border-slate-800 hover:border-cyan-500/40 cursor-pointer transition">
                           <input
@@ -7989,7 +8352,7 @@ export default function App() {
                         </label>
                       </div>
                     )}
-                    <div className={editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" ? "col-span-1" : "col-span-2"}>
+                    <div className={editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg_quic" && editingProfile.protocol !== "awg_vless" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" ? "col-span-1" : "col-span-2"}>
                       <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
                       <input
                         type="text"
@@ -7998,32 +8361,107 @@ export default function App() {
                         className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                       />
                     </div>
-                    {editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" && (
-                      <div className="col-span-2">
-                        <label className="block text-xs text-slate-400 mb-1">Пароль / UUID / Секретный ключ</label>
+                    {editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg_quic" && editingProfile.protocol !== "awg_vless" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" && (
+                      <div className={editingProfile.protocol === "tuic" ? "col-span-1" : "col-span-2"}>
+                        <label className="block text-xs text-slate-400 mb-1">
+                          {editingProfile.protocol === "vless" || editingProfile.protocol === "vless_ws" || editingProfile.protocol === "webrtc"
+                            ? "UUID пользователя"
+                            : "Пароль / Секретный ключ"}
+                        </label>
                         <input
                           type="text"
                           value={editForm.password || editForm.uuid || ""}
-                          onChange={(e) => setEditForm({ ...editForm, password: e.target.value, uuid: e.target.value })}
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (
+                              editingProfile.protocol === "vless" ||
+                              editingProfile.protocol === "vless_ws" ||
+                              editingProfile.protocol === "webrtc"
+                            ) {
+                              setEditForm({ ...editForm, password: val, uuid: val });
+                            } else {
+                              setEditForm({ ...editForm, password: val });
+                            }
+                          }}
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                        />
+                      </div>
+                    )}
+                    {editingProfile.protocol === "tuic" && (
+                      <div className="col-span-2">
+                        <label className="block text-xs text-slate-400 mb-1">TUIC UUID</label>
+                        <input
+                          type="text"
+                          value={editForm.uuid || ""}
+                          onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
                           className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
                         />
                       </div>
                     )}
                   </div>
 
-                  {editingProfile.protocol === "amneziawg" && (
+                  {editingProfile.protocol === "awg_vless" && (
+                    <div className="p-3.5 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/35 space-y-2.5">
+                      <div className="text-xs font-bold text-fuchsia-300">
+                        Параметры капсулы VLESS Reality Detour (TCP 443):
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Порт VLESS Reality (TCP)</label>
+                          <input
+                            type="number"
+                            value={editForm.vless_port ?? 443}
+                            onChange={(e) => setEditForm({ ...editForm, vless_port: parseInt(e.target.value, 10) || 443 })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">UUID VLESS</label>
+                          <input
+                            type="text"
+                            value={editForm.uuid || ""}
+                            placeholder="UUID пользователя VLESS"
+                            onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Reality Public Key</label>
+                          <input
+                            type="text"
+                            value={editForm.reality_public_key || ""}
+                            placeholder="Public Key Reality"
+                            onChange={(e) => setEditForm({ ...editForm, reality_public_key: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-0.5">Reality Short ID (sid)</label>
+                          <input
+                            type="text"
+                            value={editForm.reality_short_id || ""}
+                            placeholder="0123456789abcdef"
+                            onChange={(e) => setEditForm({ ...editForm, reality_short_id: e.target.value })}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless") && (
                     <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
                       <div className="flex items-center justify-between">
                         <div>
-                          <div className="text-xs font-bold text-emerald-400">Параметры Amnezia 3.1 (Header Protection):</div>
-                          <span className="text-[10px] text-slate-400">Стек обфускации, динамические сдвиги S1-S4 ≥ 12 и Port Hunting</span>
+                          <div className="text-xs font-bold text-emerald-400">Параметры Amnezia 3.1 (Header Protection + 32-bit H1-H4):</div>
+                          <span className="text-[10px] text-slate-400">Стек обфускации, 32-битные заголовки H1-H4, динамические сдвиги S1-S4 ≥ 12 и Port Hunting</span>
                         </div>
                         <button
                           type="button"
                           onClick={() => {
                             const r = generateRandomAwg31Params();
                             setEditForm({ ...editForm, ...r });
-                            showNotice("success", "Параметры Amnezia 3.1 рандомизированы!");
+                            showNotice("success", "Параметры Amnezia 3.1 (включая 32-битные H1-H4) рандомизированы!");
                           }}
                           className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition"
                         >

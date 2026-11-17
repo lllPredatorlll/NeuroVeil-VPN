@@ -8,6 +8,8 @@ pub struct VpnProfile {
     pub server: String,
     pub port: u16,
     #[serde(default)]
+    pub vless_port: Option<u16>,            // VLESS Reality TCP port for Hybrid AWG over VLESS Reality (awg_vless)
+    #[serde(default)]
     pub listen_port: Option<u16>,           // Local listen port (e.g. WireGuard/AWG ListenPort)
     #[serde(default)]
     pub auto_rotate_listen_port: Option<bool>, // Rotate local ListenPort on every connect/reconnect (Amnezia behavior)
@@ -130,6 +132,7 @@ impl Default for VpnProfile {
             protocol: "amneziawg".to_string(),
             server: String::new(),
             port: 51820,
+            vless_port: None,
             listen_port: None,
             auto_rotate_listen_port: Some(true),
             original_port: None,
@@ -485,7 +488,16 @@ fn default_awg2_port() -> u16 {
 
 pub fn is_awg_protocol(proto: &str) -> bool {
     let p = proto.trim().to_lowercase();
-    p == "amneziawg" || p == "awg" || p == "awg2" || p == "amneziawg2" || p == "amnezia31" || p == "awg3" || p == "wireguard" || p == "wg"
+    p == "amneziawg"
+        || p == "awg"
+        || p == "awg2"
+        || p == "awg_quic"
+        || p == "awg_vless"
+        || p == "amneziawg2"
+        || p == "amnezia31"
+        || p == "awg3"
+        || p == "wireguard"
+        || p == "wg"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -611,6 +623,10 @@ pub struct VpsCredentials {
     pub deploy_webrtc: bool,
     #[serde(default = "default_webrtc_port")]
     pub webrtc_port: u16,
+    #[serde(default = "default_true")]
+    pub deploy_awg_quic: bool,
+    #[serde(default = "default_true")]
+    pub deploy_awg_vless: bool,
     pub enable_salamander: bool,
     #[serde(default)]
     pub enable_port_hopping: bool,

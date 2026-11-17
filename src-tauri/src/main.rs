@@ -450,26 +450,33 @@ fn spawn_and_monitor_singbox(
             thread::sleep(Duration::from_millis(40));
         }
         let delay_url = format!(
-            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=2000",
+            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=1800",
             warmup_clash_port
         );
-        if ureq::get(&delay_url)
-            .timeout(Duration::from_millis(2200))
-            .call()
-            .is_ok()
-        {
-            if let Ok(mut g) = state_for_warmup.lock() {
-                if g.is_handshaking {
-                    g.is_handshaking = false;
-                    g.handshake_status = None;
-                    if warmup_is_awg {
-                        push_log(
-                            &mut g.logs,
-                            "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
-                        );
+        for _ in 0..2 {
+            if let Ok(resp) = ureq::get(&delay_url)
+                .timeout(Duration::from_millis(2000))
+                .call()
+            {
+                if let Ok(val) = resp.into_json::<serde_json::Value>() {
+                    if val.get("delay").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+                        if let Ok(mut g) = state_for_warmup.lock() {
+                            if g.is_handshaking {
+                                g.is_handshaking = false;
+                                g.handshake_status = None;
+                                if warmup_is_awg {
+                                    push_log(
+                                        &mut g.logs,
+                                        "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                                    );
+                                }
+                            }
+                        }
+                        break;
                     }
                 }
             }
+            thread::sleep(Duration::from_millis(300));
         }
 
         #[cfg(target_os = "windows")]
@@ -916,7 +923,37 @@ async fn connect_vpn_internal(
 
         // 0. Pre-flight check: validate credentials before stopping current connection or attempting port hunting
         {
-            let rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            let sibling_vless = rt
+                .persistent
+                .profiles
+                .iter()
+                .find(|p| p.protocol == "vless" && p.reality_public_key.is_some())
+                .cloned();
+
+            if let Some(p_mut) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile_id) {
+                if p_mut.protocol == "awg_vless" {
+                    let same_srv_vless = sibling_vless.as_ref();
+                    if let Some(vl) = same_srv_vless {
+                        if p_mut.uuid.as_deref().unwrap_or("").trim().is_empty() {
+                            p_mut.uuid = vl.uuid.clone().or_else(|| Some(vl.password.clone()));
+                        }
+                        if p_mut.reality_public_key.as_deref().unwrap_or("").trim().is_empty() {
+                            p_mut.reality_public_key = vl.reality_public_key.clone();
+                        }
+                        if p_mut.reality_short_id.as_deref().unwrap_or("").trim().is_empty() {
+                            p_mut.reality_short_id = vl.reality_short_id.clone();
+                        }
+                        if p_mut.sni.trim().is_empty() {
+                            p_mut.sni = vl.sni.clone();
+                        }
+                        if p_mut.vless_port.unwrap_or(0) == 0 {
+                            p_mut.vless_port = Some(vl.port);
+                        }
+                    }
+                }
+            }
+
             let prof = rt
                 .persistent
                 .profiles
@@ -943,12 +980,22 @@ async fn connect_vpn_internal(
                             .to_string(),
                     );
                 }
-            } else if prof.protocol == "vless" {
+                if prof.protocol == "awg_vless" {
+                    let vless_uid = prof.uuid.as_deref().unwrap_or("").trim();
+                    let vless_pbk = prof.reality_public_key.as_deref().unwrap_or("").trim();
+                    if vless_uid.is_empty() || vless_pbk.is_empty() {
+                        return Err(
+                            "Для гибридного протокола «AWG + VLESS Reality» необходимы параметры VLESS Reality (UUID и Reality Public Key). Укажите их в настройках профиля (✏️) или разверните сервер с VLESS Reality + AmneziaWG."
+                                .to_string(),
+                        );
+                    }
+                }
+            } else if prof.protocol == "vless" || prof.protocol == "vless_ws" || prof.protocol == "webrtc" {
                 let uid = prof.uuid.as_deref().unwrap_or(&prof.password).trim();
                 if uid.is_empty() {
-                    return Err("В профиле VLESS не указан UUID (пароль). Проверьте настройки профиля.".to_string());
+                    return Err(format!("В профиле {} не указан UUID (пароль). Проверьте настройки профиля.", prof.protocol.to_uppercase()));
                 }
-            } else if prof.protocol == "hysteria2" || prof.protocol == "tuic" || prof.protocol == "shadowsocks" {
+            } else if prof.protocol == "hysteria2" || prof.protocol == "tuic" || prof.protocol == "shadowsocks" || prof.protocol == "shadowtls" {
                 if prof.password.trim().is_empty() {
                     return Err(format!("В профиле {} не указан пароль. Проверьте настройки профиля.", prof.protocol.to_uppercase()));
                 }
@@ -998,8 +1045,10 @@ async fn connect_vpn_internal(
 
         // 1.5. Amnezia-style automatic UDP listen_port rotation on connect/reconnect
         if is_awg_protocol(&profile.protocol)
-            && profile.auto_rotate_listen_port.unwrap_or(true)
-            && !preserve_listen_port
+            && profile.protocol != "awg_vless"
+            && (!preserve_listen_port
+                || (profile.auto_rotate_listen_port.unwrap_or(true)
+                    && profile.listen_port.unwrap_or(0) == 0))
         {
             let old_listen_port = profile.listen_port;
             let mut exclude = vec![
@@ -1026,6 +1075,8 @@ async fn connect_vpn_internal(
 
                 let proto_tag = if profile.protocol == "wireguard" || profile.protocol == "wg" {
                     "WireGuard"
+                } else if profile.protocol == "awg_quic" {
+                    "AWG + QUIC Pre-Warm"
                 } else {
                     "AmneziaWG"
                 };
@@ -1049,13 +1100,33 @@ async fn connect_vpn_internal(
             }
         }
 
+        // 1.8. QUIC v1 Initial + WebRTC STUN UDP Pre-Warming for awg_quic
+        if profile.protocol == "awg_quic" {
+            let lp = profile.listen_port.unwrap_or_else(|| {
+                let p = pick_random_free_udp_port(&[profile.port, 2080, 2081, 9090]);
+                profile.listen_port = Some(p);
+                p
+            });
+            if send_udp_quic_stun_prewarm(lp, &profile.server, profile.port) {
+                if let Ok(mut rt) = state_clone.lock() {
+                    push_log(
+                        &mut rt.logs,
+                        format!(
+                            "[QUIC Pre-Warm] Отправлены маскировочные пакеты QUIC v1 Initial (1200B) + STUN с ListenPort {} → {}:{} для ослепления ТСПУ перед рукопожатием",
+                            lp, profile.server, profile.port
+                        ),
+                    );
+                }
+            }
+        }
+
         // 2. Direct fast launch of sing-box without blocking loops (< 50ms)
         let active_port = profile.port;
         {
             if let Ok(mut g) = state_clone.lock() {
                 g.port_hunting_status = None;
                 g.active_port = Some(active_port);
-                g.active_listen_port = if is_awg_protocol(&profile.protocol) {
+                g.active_listen_port = if is_awg_protocol(&profile.protocol) && profile.protocol != "awg_vless" {
                     profile.listen_port
                 } else {
                     None
@@ -1067,6 +1138,70 @@ async fn connect_vpn_internal(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn send_udp_quic_stun_prewarm(local_port: u16, server_host: &str, server_port: u16) -> bool {
+    use std::net::{ToSocketAddrs, UdpSocket};
+    let target = match format!("{}:{}", server_host, server_port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.find(|a| a.is_ipv4()))
+    {
+        Some(addr) => addr,
+        None => return false,
+    };
+
+    let sock = match UdpSocket::bind(format!("0.0.0.0:{}", local_port)) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = sock.set_write_timeout(Some(Duration::from_millis(80)));
+
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9E3779B97F4A7C15);
+
+    // 1. RFC 5389 STUN Binding Request (20 bytes) - mimics WebRTC ICE probe
+    let mut stun_pkt = [0u8; 20];
+    stun_pkt[0] = 0x00;
+    stun_pkt[1] = 0x01; // Binding Request
+    stun_pkt[2] = 0x00;
+    stun_pkt[3] = 0x00; // Message Length = 0
+    stun_pkt[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]); // Magic Cookie
+    for i in 0..12 {
+        stun_pkt[8 + i] = ((seed.wrapping_mul((i as u64) + 31)) >> 16) as u8;
+    }
+    let _ = sock.send_to(&stun_pkt, target);
+
+    // 2. RFC 9000 QUIC v1 Initial Packet (1200 bytes) - mimics HTTP/3 browser handshake
+    let mut quic_pkt = vec![0u8; 1200];
+    quic_pkt[0] = 0xC3; // Long Header, Fixed Bit, Initial Packet (00), 4-byte PN
+    quic_pkt[1..5].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]); // QUIC v1
+    quic_pkt[5] = 0x08; // DCID len = 8
+    for i in 0..8 {
+        quic_pkt[6 + i] = ((seed.wrapping_mul((i as u64) + 7)) >> 24) as u8;
+    }
+    quic_pkt[14] = 0x08; // SCID len = 8
+    for i in 0..8 {
+        quic_pkt[15 + i] = ((seed.wrapping_mul((i as u64) + 19)) >> 24) as u8;
+    }
+    quic_pkt[23] = 0x00; // Token Length = 0
+    // Length varint (2-byte 0x4000 | 1174 = 0x4496)
+    quic_pkt[24] = 0x44;
+    quic_pkt[25] = 0x96;
+    // Packet Number = 1
+    quic_pkt[26..30].copy_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+    // Pseudo-encrypted CRYPTO payload
+    let mut state = seed ^ 0xA5A5_5A5A_F0F0_0F0F;
+    for b in quic_pkt[30..].iter_mut() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *b = (state >> 32) as u8;
+    }
+    let _ = sock.send_to(&quic_pkt, target);
+    drop(sock);
+    thread::sleep(Duration::from_millis(15));
+    true
 }
 
 #[tauri::command]
@@ -1544,7 +1679,12 @@ async fn probe_single_port(
         }
     };
 
-    let is_tcp = protocol == "vless" || protocol == "shadowsocks" || protocol == "ssh";
+    let is_tcp = protocol == "vless"
+        || protocol == "vless_ws"
+        || protocol == "webrtc"
+        || protocol == "shadowtls"
+        || protocol == "shadowsocks"
+        || protocol == "ssh";
     let is_quic = protocol == "hysteria2" || protocol == "tuic";
 
     if is_tcp {
@@ -2990,7 +3130,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 1050)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 1058)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -3002,16 +3142,22 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             }
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
-                    "Связь с GitHub установлена. У вас актуальная версия v1.0.3 (Build 1051).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта."
+                    format!(
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 1058).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        current_version
+                    )
                 } else {
-                    "Связь с GitHub установлена. У вас актуальная версия v1.0.3 (Build 1051)."
+                    format!(
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 1058).",
+                        current_version
+                    )
                 };
                 return Ok(AppUpdateInfo {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 1051)", current_version),
-                    release_notes: note.to_string(),
+                    release_name: format!("NeuroVeil VPN v{} (Build 1058)", current_version),
+                    release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
                     download_url: None,

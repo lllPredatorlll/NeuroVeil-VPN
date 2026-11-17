@@ -1,9 +1,10 @@
 export interface VpnProfile {
   id: string;
   name: string;
-  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "wireguard" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
+  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "awg_quic" | "awg_vless" | "wireguard" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
   server: string;
   port: number;
+  vless_port?: number | null;
   listen_port?: number | null;
   auto_rotate_listen_port?: boolean | null;
   original_port?: number | null;
@@ -169,6 +170,8 @@ export interface VpsCredentials {
   cdn_domain?: string;
   deploy_webrtc?: boolean;
   webrtc_port?: number;
+  deploy_awg_quic?: boolean;
+  deploy_awg_vless?: boolean;
   enable_salamander: boolean;
   enable_port_hopping?: boolean;
   ssh_proxy: string;

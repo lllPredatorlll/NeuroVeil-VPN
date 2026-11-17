@@ -69,13 +69,14 @@ pub fn check_singbox_version() -> (bool, String) {
 pub fn download_singbox_core() -> Result<String, String> {
     let bin_path = get_singbox_bin_path();
 
+    let user_agent = concat!("NeuroVeilVPN-Client/", env!("CARGO_PKG_VERSION"));
     // Query latest release from GitHub API (sing-box-lx with native AmneziaWG support)
     let release_resp: Value = ureq::get("https://api.github.com/repos/Leadaxe/sing-box-lx/releases/latest")
-        .set("User-Agent", "NeuroVeilVPN-Client/0.4.3")
+        .set("User-Agent", user_agent)
         .call()
         .or_else(|_| {
             ureq::get("https://api.github.com/repos/SagerNet/sing-box/releases/latest")
-                .set("User-Agent", "NeuroVeilVPN-Client/0.4.3")
+                .set("User-Agent", user_agent)
                 .call()
         })
         .map_err(|e| format!("Ошибка запроса к GitHub API: {}", e))?
@@ -99,7 +100,7 @@ pub fn download_singbox_core() -> Result<String, String> {
     let url = download_url.ok_or_else(|| "Не найден архив windows-amd64.zip в последнем релизе".to_string())?;
 
     let resp = ureq::get(&url)
-        .set("User-Agent", "NeuroVeilVPN-Client/0.4.3")
+        .set("User-Agent", user_agent)
         .call()
         .map_err(|e| format!("Ошибка скачивания архива sing-box: {}", e))?;
 
@@ -638,6 +639,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
             "enabled": true,
             "server_name": host_header,
             "insecure": profile.insecure,
+            "alpn": ["http/1.1"],
             "utls": {
                 "enabled": true,
                 "fingerprint": "chrome"
@@ -703,6 +705,7 @@ fn build_single_outbound(profile: &VpnProfile, tag: &str, bind_ipv4: Option<&str
                 "enabled": true,
                 "server_name": sni,
                 "insecure": profile.insecure,
+                "alpn": ["h2"],
                 "utls": {
                     "enabled": true,
                     "fingerprint": "chrome"
@@ -1084,9 +1087,11 @@ pub fn generate_singbox_config_internal(
             "peers": [peer_obj]
         });
 
-        if let Some(lp) = profile.listen_port {
-            if lp > 0 {
-                ep["listen_port"] = json!(lp);
+        if profile.protocol != "awg_vless" {
+            if let Some(lp) = profile.listen_port {
+                if lp > 0 {
+                    ep["listen_port"] = json!(lp);
+                }
             }
         }
 
@@ -1170,6 +1175,56 @@ pub fn generate_singbox_config_internal(
                 if !i4.trim().is_empty() { ep["i4"] = json!(i4.trim()); }
             }
         }
+
+        if profile.protocol == "awg_vless" {
+            ep["detour"] = json!("vless-reality-detour");
+            let flow = profile.reality_flow.as_deref().unwrap_or("xtls-rprx-vision");
+            let tls_frag = profile.tls_fragment.unwrap_or(true);
+            let vless_sni = if !profile.sni.trim().is_empty() {
+                profile.sni.trim()
+            } else {
+                "www.microsoft.com"
+            };
+            let mut tls_obj = json!({
+                "enabled": true,
+                "server_name": vless_sni,
+                "utls": {
+                    "enabled": true,
+                    "fingerprint": "chrome"
+                }
+            });
+            if tls_frag {
+                tls_obj["fragment"] = json!(true);
+                tls_obj["record_fragment"] = json!(true);
+                tls_obj["fragment_fallback_delay"] = json!("500ms");
+            }
+            if let Some(ref pbk) = profile.reality_public_key {
+                if !pbk.trim().is_empty() {
+                    let mut reality_obj = json!({
+                        "enabled": true,
+                        "public_key": pbk.trim()
+                    });
+                    if let Some(ref sid) = profile.reality_short_id {
+                        if !sid.trim().is_empty() {
+                            reality_obj["short_id"] = json!(sid.trim());
+                        }
+                    }
+                    tls_obj["reality"] = reality_obj;
+                }
+            }
+            let vless_detour = json!({
+                "type": "vless",
+                "tag": "vless-reality-detour",
+                "server": profile.server,
+                "server_port": profile.vless_port.unwrap_or(443),
+                "uuid": profile.uuid.clone().unwrap_or_else(|| profile.password.clone()),
+                "flow": flow,
+                "packet_encoding": "xudp",
+                "tls": tls_obj
+            });
+            outbounds.push(vless_detour);
+        }
+
         endpoints.push(ep);
     } else {
         outbounds.push(build_single_outbound(profile, "proxy", None, override_port));
@@ -1759,9 +1814,34 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
                 params.push_str(&format!("&listen_port={}", lp));
             }
         }
+        if profile.protocol == "awg_vless" {
+            params.push_str(&format!("&vless_port={}", profile.vless_port.unwrap_or(443)));
+            if let Some(ref uid) = profile.uuid {
+                if !uid.trim().is_empty() {
+                    params.push_str(&format!("&uuid={}", urlencoding::encode(uid.trim())));
+                }
+            }
+            if let Some(ref pbk) = profile.reality_public_key {
+                if !pbk.trim().is_empty() {
+                    params.push_str(&format!("&pbk={}", urlencoding::encode(pbk.trim())));
+                }
+            }
+            if let Some(ref sid) = profile.reality_short_id {
+                if !sid.trim().is_empty() {
+                    params.push_str(&format!("&sid={}", urlencoding::encode(sid.trim())));
+                }
+            }
+            if !profile.sni.trim().is_empty() {
+                params.push_str(&format!("&sni={}", urlencoding::encode(profile.sni.trim())));
+            }
+        }
 
         let scheme = if profile.protocol == "wireguard" || profile.protocol == "wg" {
             "wg"
+        } else if profile.protocol == "awg_quic" {
+            "awgquic"
+        } else if profile.protocol == "awg_vless" {
+            "awgvless"
         } else if profile.protocol == "awg2" || profile.awg_version.as_deref() == Some("2.0") {
             "awg2"
         } else {
@@ -1797,13 +1877,14 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
         let ws_path = profile.ws_path.as_deref().unwrap_or("/neuroveil-ws");
         let host = profile.cdn_host.as_deref().unwrap_or(&profile.sni);
         format!(
-            "vless://{}@{}:{}?type=ws&path={}&host={}&sni={}&security=tls&fp=chrome#{}",
+            "vless://{}@{}:{}?type=ws&path={}&host={}&sni={}&security=tls&insecure={}&fp=chrome#{}",
             urlencoding::encode(&uuid),
             profile.server,
             profile.port,
             urlencoding::encode(ws_path),
             urlencoding::encode(host),
             urlencoding::encode(host),
+            insecure_val,
             encoded_name
         )
     } else if profile.protocol == "webrtc" {
@@ -1811,12 +1892,13 @@ pub fn build_profile_uri(profile: &VpnProfile) -> String {
         let service = profile.ws_path.as_deref().unwrap_or("neuroveil-webrtc");
         let sni = if !profile.sni.is_empty() { &profile.sni } else { &profile.server };
         format!(
-            "vless://{}@{}:{}?type=grpc&serviceName={}&sni={}&security=tls&fp=chrome#{}",
+            "vless://{}@{}:{}?type=grpc&serviceName={}&sni={}&security=tls&insecure={}&fp=chrome#{}",
             urlencoding::encode(&uuid),
             profile.server,
             profile.port,
             urlencoding::encode(service),
             urlencoding::encode(sni),
+            insecure_val,
             encoded_name
         )
     } else if profile.protocol == "ssh" {
@@ -2041,24 +2123,67 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
             if let Some(outbounds) = val["outbounds"].as_array() {
                 for out in outbounds {
                     let out_type = out["type"].as_str().unwrap_or("");
+                    if out_type == "shadowsocks" {
+                        if let Some(detour_tag) = out["detour"].as_str() {
+                            if let Some(st_out) = outbounds.iter().find(|o| o["tag"].as_str() == Some(detour_tag) && o["type"].as_str() == Some("shadowtls")) {
+                                let server = st_out["server"].as_str().unwrap_or("").to_string();
+                                if !server.is_empty() {
+                                    let port = st_out["server_port"].as_u64().unwrap_or(8443) as u16;
+                                    let ss_password = out["password"].as_str().unwrap_or("").to_string();
+                                    let st_password = st_out["password"].as_str().map(|s| s.to_string());
+                                    let st_sni = st_out["tls"]["server_name"].as_str().unwrap_or("www.microsoft.com").to_string();
+                                    let ss_method = out["method"].as_str().map(|s| s.to_string());
+                                    let name = out["tag"].as_str().filter(|t| !t.is_empty() && *t != "proxy").unwrap_or("ShadowTLS-import").to_string();
+                                    let mut prof = VpnProfile {
+                                        id: Uuid::new_v4().to_string(),
+                                        name,
+                                        protocol: "shadowtls".to_string(),
+                                        server,
+                                        port,
+                                        sni: st_sni.clone(),
+                                        shadowtls_sni: Some(st_sni),
+                                        shadowtls_password: st_password,
+                                        password: ss_password,
+                                        ss_method,
+                                        up_mbps: 100,
+                                        down_mbps: 100,
+                                        tls_fragment: Some(false),
+                                        ..Default::default()
+                                    };
+                                    prof.uri = build_profile_uri(&prof);
+                                    return Ok(prof);
+                                }
+                            }
+                        }
+                    }
                     if out_type == "vless" || out_type == "hysteria2" || out_type == "tuic" || out_type == "shadowsocks" || out_type == "ssh" {
                         let server = out["server"].as_str().unwrap_or("").to_string();
                         if server.is_empty() {
                             continue;
                         }
-                        let default_port = match out_type {
+                        let transport_type = out["transport"]["type"].as_str().unwrap_or("");
+                        let actual_protocol = if out_type == "vless" && transport_type == "ws" {
+                            "vless_ws"
+                        } else if out_type == "vless" && transport_type == "grpc" {
+                            "webrtc"
+                        } else {
+                            out_type
+                        };
+                        let default_port = match actual_protocol {
                             "shadowsocks" => 8388,
                             "ssh" => 22,
+                            "vless_ws" => 8080,
+                            "webrtc" => 2053,
                             _ => 443,
                         };
                         let port = out["server_port"].as_u64().unwrap_or(default_port) as u16;
                         let password = out["password"].as_str().or_else(|| out["private_key"].as_str()).unwrap_or("").to_string();
-                        let sni = if out_type == "ssh" {
+                        let sni = if actual_protocol == "ssh" {
                             out["user"].as_str().unwrap_or("root").to_string()
                         } else {
                             out["tls"]["server_name"].as_str().unwrap_or("www.bing.com").to_string()
                         };
-                        let insecure = out["tls"]["insecure"].as_bool().unwrap_or(out_type != "vless" && out_type != "ssh");
+                        let insecure = out["tls"]["insecure"].as_bool().unwrap_or(actual_protocol != "vless" && actual_protocol != "ssh");
                         let uuid = out["uuid"].as_str().map(|s| s.to_string());
                         let obfs_password = out["obfs"]["password"].as_str().map(|s| s.to_string());
                         let reality_public_key = out["tls"]["reality"]["public_key"].as_str().map(|s| s.to_string());
@@ -2069,11 +2194,23 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
                         let ss_method = out["method"].as_str().map(|s| s.to_string());
                         let ss_plugin = out["plugin"].as_str().map(|s| s.to_string());
                         let ss_plugin_opts = out["plugin_opts"].as_str().map(|s| s.to_string());
-                        let name = out["tag"].as_str().filter(|t| !t.is_empty() && *t != "proxy").unwrap_or(&format!("{}-import", out_type)).to_string();
+                        let ws_path = if actual_protocol == "vless_ws" {
+                            out["transport"]["path"].as_str().map(|s| s.to_string())
+                        } else if actual_protocol == "webrtc" {
+                            out["transport"]["service_name"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        let cdn_host = if actual_protocol == "vless_ws" {
+                            out["transport"]["headers"]["Host"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        };
+                        let name = out["tag"].as_str().filter(|t| !t.is_empty() && *t != "proxy").unwrap_or(&format!("{}-import", actual_protocol)).to_string();
                         let mut prof = VpnProfile {
                             id: Uuid::new_v4().to_string(),
                             name,
-                            protocol: out_type.to_string(),
+                            protocol: actual_protocol.to_string(),
                             server,
                             port,
                             sni,
@@ -2094,6 +2231,8 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
                             ss_method,
                             ss_plugin,
                             ss_plugin_opts,
+                            ws_path,
+                            cdn_host,
                             ..Default::default()
                         };
                         prof.uri = build_profile_uri(&prof);
@@ -2170,7 +2309,14 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
         return parse_amnezia_conf(trimmed);
     }
 
-    if trimmed.to_lowercase().starts_with("awg://") || trimmed.to_lowercase().starts_with("amneziawg://") || trimmed.to_lowercase().starts_with("awg2://") || trimmed.to_lowercase().starts_with("wg://") || trimmed.to_lowercase().starts_with("wireguard://") {
+    if trimmed.to_lowercase().starts_with("awg://")
+        || trimmed.to_lowercase().starts_with("amneziawg://")
+        || trimmed.to_lowercase().starts_with("awg2://")
+        || trimmed.to_lowercase().starts_with("awgquic://")
+        || trimmed.to_lowercase().starts_with("awgvless://")
+        || trimmed.to_lowercase().starts_with("wg://")
+        || trimmed.to_lowercase().starts_with("wireguard://")
+    {
         return parse_awg_uri(trimmed);
     }
 
@@ -2194,6 +2340,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
 
     let mut sni = "www.bing.com".to_string();
     let mut insecure = true;
+    let mut insecure_explicit = false;
     let mut obfs_password = None;
     let mut hop_ports = None;
     let mut hop_interval = None;
@@ -2201,6 +2348,13 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let mut reality_short_id = None;
     let mut reality_flow = Some("xtls-rprx-vision".to_string());
     let mut listen_port = None;
+    let mut transport_type = String::new();
+    let mut ws_path = None;
+    let mut cdn_host = None;
+    let mut grpc_service = None;
+    let mut ss_method = None;
+    let mut st_password = None;
+    let mut query_password = None;
 
     for (k, v) in parsed.query_pairs() {
         match k.as_ref() {
@@ -2210,8 +2364,9 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
             "sni" | "peer" => sni = v.to_string(),
             "insecure" | "allow_insecure" | "allowInsecure" => {
                 insecure = v == "1" || v.eq_ignore_ascii_case("true");
+                insecure_explicit = true;
             }
-            "obfs-password" => {
+            "obfs-password" | "obfspassword" => {
                 if !v.is_empty() {
                     obfs_password = Some(v.to_string());
                 }
@@ -2241,6 +2396,39 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
                     reality_flow = Some(v.to_string());
                 }
             }
+            "type" => {
+                transport_type = v.to_lowercase();
+            }
+            "path" => {
+                if !v.is_empty() {
+                    ws_path = Some(v.to_string());
+                }
+            }
+            "host" => {
+                if !v.is_empty() {
+                    cdn_host = Some(v.to_string());
+                }
+            }
+            "serviceName" | "service_name" => {
+                if !v.is_empty() {
+                    grpc_service = Some(v.to_string());
+                }
+            }
+            "method" => {
+                if !v.is_empty() {
+                    ss_method = Some(v.to_string());
+                }
+            }
+            "st_password" => {
+                if !v.is_empty() {
+                    st_password = Some(v.to_string());
+                }
+            }
+            "password" => {
+                if !v.is_empty() {
+                    query_password = Some(v.to_string());
+                }
+            }
             _ => {}
         }
     }
@@ -2248,20 +2436,78 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
     if scheme == "vless" {
         let uuid = urlencoding::decode(parsed.username())
             .unwrap_or_else(|_| parsed.username().to_string());
+        if transport_type == "ws" {
+            let mut prof = VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name,
+                protocol: "vless_ws".to_string(),
+                server: server.clone(),
+                port,
+                listen_port,
+                sni: sni.clone(),
+                insecure: if insecure_explicit { insecure } else { true },
+                password: uuid.clone(),
+                uuid: Some(uuid),
+                ws_path: ws_path.or_else(|| Some("/neuroveil-ws".to_string())),
+                cdn_host: cdn_host.or_else(|| Some(sni)),
+                ..Default::default()
+            };
+            prof.uri = build_profile_uri(&prof);
+            Ok(prof)
+        } else if transport_type == "grpc" {
+            let mut prof = VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name,
+                protocol: "webrtc".to_string(),
+                server,
+                port,
+                listen_port,
+                sni,
+                insecure: if insecure_explicit { insecure } else { true },
+                password: uuid.clone(),
+                uuid: Some(uuid),
+                ws_path: grpc_service.or(ws_path).or_else(|| Some("neuroveil-webrtc".to_string())),
+                ..Default::default()
+            };
+            prof.uri = build_profile_uri(&prof);
+            Ok(prof)
+        } else {
+            let mut prof = VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name,
+                protocol: "vless".to_string(),
+                server,
+                port,
+                listen_port,
+                sni,
+                insecure: false,
+                password: uuid.clone(),
+                uuid: Some(uuid),
+                reality_public_key,
+                reality_short_id,
+                reality_flow,
+                ..Default::default()
+            };
+            prof.uri = build_profile_uri(&prof);
+            Ok(prof)
+        }
+    } else if scheme == "shadowtls" {
+        let user_pass = urlencoding::decode(parsed.username())
+            .unwrap_or_else(|_| parsed.username().to_string());
+        let ss_pass = query_password.unwrap_or(user_pass);
         let mut prof = VpnProfile {
             id: Uuid::new_v4().to_string(),
             name,
-            protocol: "vless".to_string(),
+            protocol: "shadowtls".to_string(),
             server,
             port,
             listen_port,
-            sni,
-            insecure: false,
-            password: uuid.clone(),
-            uuid: Some(uuid),
-            reality_public_key,
-            reality_short_id,
-            reality_flow,
+            sni: sni.clone(),
+            shadowtls_sni: Some(sni),
+            shadowtls_password: st_password.or_else(|| Some(ss_pass.clone())),
+            password: ss_pass,
+            ss_method: ss_method.or_else(|| Some("2022-blake3-aes-128-gcm".to_string())),
+            tls_fragment: Some(false),
             ..Default::default()
         };
         prof.uri = build_profile_uri(&prof);
@@ -2336,7 +2582,7 @@ pub fn parse_profile_uri(uri_str: &str) -> Result<VpnProfile, String> {
         Ok(prof)
     } else {
         Err(format!(
-            "Неподдерживаемый протокол '{}'. Поддерживаются ssh://, awg://, vless://, ss://, hy2://, hysteria2:// и tuic://",
+            "Неподдерживаемый протокол '{}'. Поддерживаются ssh://, awg://, wg://, vless://, shadowtls://, ss://, hy2://, hysteria2:// и tuic://",
             scheme
         ))
     }
@@ -2494,13 +2740,20 @@ fn parse_shadowsocks_uri(uri_str: &str) -> Result<VpnProfile, String> {
 
 pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let raw = uri_str.trim();
-    let is_explicit_wg = raw.to_lowercase().starts_with("wg://") || raw.to_lowercase().starts_with("wireguard://");
-    let is_explicit_awg2 = raw.to_lowercase().starts_with("awg2://");
+    let lower = raw.to_lowercase();
+    let is_explicit_wg = lower.starts_with("wg://") || lower.starts_with("wireguard://");
+    let is_explicit_awg2 = lower.starts_with("awg2://");
+    let is_explicit_awg_quic = lower.starts_with("awgquic://");
+    let is_explicit_awg_vless = lower.starts_with("awgvless://");
     let without_scheme = if let Some(s) = raw.strip_prefix("awg://") {
         s
     } else if let Some(s) = raw.strip_prefix("amneziawg://") {
         s
     } else if let Some(s) = raw.strip_prefix("awg2://") {
+        s
+    } else if let Some(s) = raw.strip_prefix("awgquic://") {
+        s
+    } else if let Some(s) = raw.strip_prefix("awgvless://") {
         s
     } else if let Some(s) = raw.strip_prefix("wg://") {
         s
@@ -2519,7 +2772,11 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
         .map(|f| urlencoding::decode(f).unwrap_or_else(|_| f.to_string()))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            if is_explicit_awg2 {
+            if is_explicit_awg_vless {
+                "Hybrid AWG + VLESS Reality".to_string()
+            } else if is_explicit_awg_quic {
+                "AmneziaWG + QUIC Pre-Warm".to_string()
+            } else if is_explicit_awg2 {
                 "AmneziaWG 2.0 Profile".to_string()
             } else {
                 "Amnezia 3.1 Profile".to_string()
@@ -2569,6 +2826,11 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let mut persistent_keepalive = None;
     let mut parsed_version = None;
     let mut listen_port = None;
+    let mut vless_port = None;
+    let mut vless_uuid = None;
+    let mut reality_public_key = None;
+    let mut reality_short_id = None;
+    let mut vless_sni = String::new();
 
     if let Some(q) = query {
         for pair in q.split('&') {
@@ -2576,6 +2838,11 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
                 let dec_v = urlencoding::decode(v).unwrap_or_else(|_| v.to_string());
                 match k.to_lowercase().as_str() {
                     "listen_port" | "listenport" | "lp" => listen_port = dec_v.parse().ok(),
+                    "vless_port" | "vlessport" => vless_port = dec_v.parse().ok(),
+                    "uuid" => vless_uuid = Some(dec_v),
+                    "pbk" | "reality_public_key" => reality_public_key = Some(dec_v),
+                    "sid" | "reality_short_id" => reality_short_id = Some(dec_v),
+                    "sni" => vless_sni = dec_v,
                     "public_key" | "pubkey" | "publickey" | "peer" => pub_key = Some(dec_v),
                     "psk" | "preshared_key" | "presharedkey" => psk = Some(dec_v),
                     "address" | "ip" => addr = Some(dec_v),
@@ -2614,6 +2881,10 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
     let is_v2 = is_explicit_awg2 || parsed_version.as_deref() == Some("2.0") || parsed_version.as_deref() == Some("2");
     let protocol = if is_explicit_wg {
         "wireguard".to_string()
+    } else if is_explicit_awg_vless {
+        "awg_vless".to_string()
+    } else if is_explicit_awg_quic {
+        "awg_quic".to_string()
     } else if is_v2 {
         "awg2".to_string()
     } else {
@@ -2654,17 +2925,18 @@ pub fn parse_awg_uri(uri_str: &str) -> Result<VpnProfile, String> {
         protocol,
         server,
         port,
+        vless_port,
         listen_port,
-        sni: String::new(),
+        sni: vless_sni,
         insecure: false,
         password: priv_key.clone(),
-        uuid: None,
+        uuid: vless_uuid,
         obfs_password: None,
         hop_ports: final_hop_ports.clone(),
         hop_interval: None,
-        reality_public_key: None,
-        reality_short_id: None,
-        reality_flow: None,
+        reality_public_key,
+        reality_short_id,
+        reality_flow: if is_explicit_awg_vless { Some("xtls-rprx-vision".to_string()) } else { None },
         ss_method: None,
         ss_plugin: None,
         ss_plugin_opts: None,
@@ -3221,8 +3493,8 @@ PersistentKeepalive = 25-35
         assert_eq!(exported, expected);
         assert!(!exported.contains("ListenPort"));
         assert!(!exported.contains("PersistentKeepalive"));
-        assert!(!exported.contains("Jc"));
-        assert!(!exported.contains("H1"));
+        assert!(!exported.contains("Jc ="));
+        assert!(!exported.contains("H1 ="));
 
         let routing = RoutingConfig::default();
         let cfg = generate_singbox_config(&profile, &routing);
@@ -3236,6 +3508,69 @@ PersistentKeepalive = 25-35
         assert!(profile.uri.starts_with("awg2://"));
         assert!(!profile.uri.contains("jc="));
         assert!(!profile.uri.contains("h1="));
+    }
+
+    #[test]
+    fn test_parse_next_gen_protocols_uri_and_json() {
+        let st_prof = VpnProfile {
+            id: "st-1".to_string(),
+            name: "ShadowTLS Test".to_string(),
+            protocol: "shadowtls".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 8443,
+            password: "ss-inner-password".to_string(),
+            ss_method: Some("2022-blake3-aes-128-gcm".to_string()),
+            shadowtls_password: Some("st-handshake-secret".to_string()),
+            shadowtls_sni: Some("gateway.icloud.com".to_string()),
+            sni: "gateway.icloud.com".to_string(),
+            ..Default::default()
+        };
+        let st_uri = build_profile_uri(&st_prof);
+        let st_parsed = parse_profile_uri(&st_uri).expect("Failed to parse shadowtls URI");
+        assert_eq!(st_parsed.protocol, "shadowtls");
+        assert_eq!(st_parsed.password, "ss-inner-password");
+        assert_eq!(st_parsed.shadowtls_password.as_deref(), Some("st-handshake-secret"));
+        assert_eq!(st_parsed.shadowtls_sni.as_deref(), Some("gateway.icloud.com"));
+
+        let ws_prof = VpnProfile {
+            id: "ws-1".to_string(),
+            name: "CDN WS Test".to_string(),
+            protocol: "vless_ws".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 8080,
+            password: "11111111-2222-3333-4444-555555555555".to_string(),
+            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            sni: "cdn.example.com".to_string(),
+            cdn_host: Some("cdn.example.com".to_string()),
+            ws_path: Some("/neuroveil-ws".to_string()),
+            insecure: true,
+            ..Default::default()
+        };
+        let ws_uri = build_profile_uri(&ws_prof);
+        let ws_parsed = parse_profile_uri(&ws_uri).expect("Failed to parse vless_ws URI");
+        assert_eq!(ws_parsed.protocol, "vless_ws");
+        assert_eq!(ws_parsed.ws_path.as_deref(), Some("/neuroveil-ws"));
+        assert_eq!(ws_parsed.cdn_host.as_deref(), Some("cdn.example.com"));
+        assert!(ws_parsed.insecure);
+
+        let rtc_prof = VpnProfile {
+            id: "rtc-1".to_string(),
+            name: "WebRTC Test".to_string(),
+            protocol: "webrtc".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 2053,
+            password: "11111111-2222-3333-4444-555555555555".to_string(),
+            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            sni: "zoom.us".to_string(),
+            ws_path: Some("neuroveil-webrtc".to_string()),
+            insecure: true,
+            ..Default::default()
+        };
+        let rtc_uri = build_profile_uri(&rtc_prof);
+        let rtc_parsed = parse_profile_uri(&rtc_uri).expect("Failed to parse webrtc URI");
+        assert_eq!(rtc_parsed.protocol, "webrtc");
+        assert_eq!(rtc_parsed.ws_path.as_deref(), Some("neuroveil-webrtc"));
+        assert!(rtc_parsed.insecure);
     }
 
     #[test]
@@ -3354,8 +3689,70 @@ PersistentKeepalive = 25
             String::from_utf8_lossy(&out_20.stderr)
         );
 
+        // Test AWG + QUIC Pre-Warm (awg_quic) with 32-bit random H1-H4
+        let mut prof_quic = prof_31.clone();
+        prof_quic.protocol = "awg_quic".to_string();
+        prof_quic.listen_port = Some(48123);
+        prof_quic.awg_h1 = Some("284910293".to_string());
+        prof_quic.awg_h2 = Some("748291044".to_string());
+        prof_quic.awg_h3 = Some("1294810293".to_string());
+        prof_quic.awg_h4 = Some("1984716255".to_string());
+        let quic_uri = build_profile_uri(&prof_quic);
+        assert!(quic_uri.starts_with("awgquic://"));
+        let quic_parsed = parse_profile_uri(&quic_uri).expect("Must parse awgquic URI");
+        assert_eq!(quic_parsed.protocol, "awg_quic");
+        assert_eq!(quic_parsed.awg_h1.as_deref(), Some("284910293"));
+
+        let cfg_quic = generate_singbox_config(&prof_quic, &routing);
+        let temp_quic = temp_dir.join("test_singbox_awg_quic.json");
+        std::fs::write(&temp_quic, serde_json::to_string_pretty(&cfg_quic).unwrap()).unwrap();
+        let out_quic = std::process::Command::new(&singbox_bin)
+            .args(["check", "-c", temp_quic.to_str().unwrap()])
+            .output()
+            .expect("Failed to run sing-box check on awg_quic");
+        assert!(
+            out_quic.status.success(),
+            "sing-box check failed for awg_quic:\nSTDOUT: {}\nSTDERR: {}",
+            String::from_utf8_lossy(&out_quic.stdout),
+            String::from_utf8_lossy(&out_quic.stderr)
+        );
+
+        // Test Hybrid AWG + VLESS Reality (awg_vless)
+        let mut prof_hybrid = prof_quic.clone();
+        prof_hybrid.protocol = "awg_vless".to_string();
+        prof_hybrid.vless_port = Some(443);
+        prof_hybrid.uuid = Some("11111111-2222-3333-4444-555555555555".to_string());
+        prof_hybrid.reality_public_key = Some("fN7baW-3-uBNuwSQsO-lwD6GkP3oNucDfn5UW1EWphQ".to_string());
+        prof_hybrid.reality_short_id = Some("0123456789abcdef".to_string());
+        prof_hybrid.sni = "www.microsoft.com".to_string();
+        let hybrid_uri = build_profile_uri(&prof_hybrid);
+        assert!(hybrid_uri.starts_with("awgvless://"));
+        let hybrid_parsed = parse_profile_uri(&hybrid_uri).expect("Must parse awgvless URI");
+        assert_eq!(hybrid_parsed.protocol, "awg_vless");
+        assert_eq!(hybrid_parsed.vless_port, Some(443));
+        assert_eq!(hybrid_parsed.uuid.as_deref(), Some("11111111-2222-3333-4444-555555555555"));
+        assert_eq!(hybrid_parsed.reality_public_key.as_deref(), Some("fN7baW-3-uBNuwSQsO-lwD6GkP3oNucDfn5UW1EWphQ"));
+
+        let cfg_hybrid = generate_singbox_config(&prof_hybrid, &routing);
+        assert_eq!(cfg_hybrid["endpoints"][0]["detour"], "vless-reality-detour");
+        assert!(cfg_hybrid["endpoints"][0].get("listen_port").is_none());
+        let temp_hybrid = temp_dir.join("test_singbox_awg_vless.json");
+        std::fs::write(&temp_hybrid, serde_json::to_string_pretty(&cfg_hybrid).unwrap()).unwrap();
+        let out_hybrid = std::process::Command::new(&singbox_bin)
+            .args(["check", "-c", temp_hybrid.to_str().unwrap()])
+            .output()
+            .expect("Failed to run sing-box check on awg_vless");
+        assert!(
+            out_hybrid.status.success(),
+            "sing-box check failed for awg_vless:\nSTDOUT: {}\nSTDERR: {}",
+            String::from_utf8_lossy(&out_hybrid.stdout),
+            String::from_utf8_lossy(&out_hybrid.stderr)
+        );
+
         let _ = std::fs::remove_file(temp_31);
         let _ = std::fs::remove_file(temp_20);
+        let _ = std::fs::remove_file(temp_quic);
+        let _ = std::fs::remove_file(temp_hybrid);
     }
 }
 
