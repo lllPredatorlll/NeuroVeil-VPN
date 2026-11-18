@@ -78,7 +78,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "1058";
+const APP_BUILD = "1059";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -1432,6 +1432,8 @@ export default function App() {
       vpsCreds.deploy_tuic ||
       vpsCreds.deploy_ss ||
       vpsCreds.deploy_awg ||
+      vpsCreds.deploy_awg_quic ||
+      vpsCreds.deploy_awg_vless ||
       vpsCreds.deploy_awg2 ||
       vpsCreds.deploy_ssh ||
       vpsCreds.deploy_shadowtls ||
@@ -1441,7 +1443,7 @@ export default function App() {
     if (!hasAnyProtocol) {
       showNotice(
         "error",
-        "Выберите хотя бы один протокол для развертывания (VLESS, Hysteria 2, TUIC, Shadowsocks, Amnezia 3.1, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH)"
+        "Выберите хотя бы один протокол для развертывания (VLESS, Hysteria 2, TUIC, Shadowsocks, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH)"
       );
       return;
     }
@@ -2762,7 +2764,7 @@ export default function App() {
                   <button
                     onClick={handleToggleConnect}
                     disabled={(connecting && !autoPortHunting) || reconnectCooldown}
-                    className={`w-full flex-1 min-h-[76px] py-3 rounded-xl px-4 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
+                    className={`w-full flex-1 min-h-[132px] py-3.5 rounded-xl px-4 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
                       status.connected
                         ? status.is_handshaking
                           ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-1 ring-amber-500/30"
@@ -2778,10 +2780,10 @@ export default function App() {
                       />
                     )}
 
-                    <div className="flex items-center gap-3 relative z-10 w-full justify-between">
-                      <div className="flex items-center gap-3 min-w-0">
+                    <div className="flex items-center gap-3.5 relative z-10 w-full justify-between">
+                      <div className="flex items-center gap-3.5 min-w-0">
                         <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
+                          className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
                             status.connected
                               ? status.is_handshaking
                                 ? "bg-amber-500 text-white shadow-amber-700/50"
@@ -2790,19 +2792,19 @@ export default function App() {
                           }`}
                         >
                           {connecting || autoPortHunting ? (
-                            <RefreshCw className="w-5 h-5 animate-spin text-cyan-300" />
+                            <RefreshCw className="w-6 h-6 animate-spin text-cyan-300" />
                           ) : status.connected ? (
                             status.is_handshaking ? (
-                              <Activity className="w-5 h-5 animate-pulse text-amber-100" />
+                              <Activity className="w-6 h-6 animate-pulse text-amber-100" />
                             ) : (
-                              <ShieldCheck className="w-5 h-5" />
+                              <ShieldCheck className="w-6 h-6" />
                             )
                           ) : (
-                            <Shield className="w-5 h-5" />
+                            <Shield className="w-6 h-6" />
                           )}
                         </div>
                         <div className="text-left min-w-0">
-                          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
+                          <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
                             {autoPortHunting
                               ? `Автоподбор порта (#${autoPortAttempt})`
                               : connecting
@@ -2815,7 +2817,7 @@ export default function App() {
                                 : status.active_profile_name || "VPN Подключен"
                               : "VPN Выключен"}
                           </div>
-                          <div className="text-sm font-bold text-white leading-tight truncate mt-0.5">
+                          <div className="text-lg sm:text-xl font-extrabold tracking-wide text-white leading-tight truncate mt-1">
                             {connecting && !autoPortHunting
                               ? "ИНИЦИАЛИЗАЦИЯ..."
                               : reconnectCooldown
@@ -2831,7 +2833,7 @@ export default function App() {
 
                       <div className="shrink-0 flex items-center gap-1.5 pl-2">
                         <span
-                          className={`w-2.5 h-2.5 rounded-full ${
+                          className={`w-3 h-3 rounded-full ${
                             status.connected
                               ? status.is_handshaking
                                 ? "bg-amber-300 animate-ping"
@@ -2917,7 +2919,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Right Column: Server & Protocol Selector (fits 3 rows comfortably) */}
+                {/* Right Column: Server & Protocol Selector (fits 4 tunnels comfortably) */}
                 <div className="col-span-1 lg:col-span-7 flex flex-col justify-between space-y-2.5 min-w-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-800/80">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 shrink-0">
@@ -2941,7 +2943,7 @@ export default function App() {
                   </div>
 
                   {!selectedProfile ? (
-                    <div className="flex-1 flex flex-col justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2">
+                    <div className="flex-1 min-h-[228px] flex flex-col justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2">
                       <p className="text-xs text-slate-400">
                         Нет сохраненных профилей.
                       </p>
@@ -2961,7 +2963,7 @@ export default function App() {
                       </div>
                     </div>
                   ) : (
-                    <div className="max-h-[174px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar flex-1">
+                    <div className="min-h-[228px] max-h-[234px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar flex-1">
                       {effectiveDashboardProfiles.map((p) => {
                         const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
                         const isLiveConnected = status.connected && status.active_profile_id === p.id;
@@ -2996,7 +2998,7 @@ export default function App() {
                                   <span>
                                     {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
                                   </span>
-                                  {(p.protocol === "amneziawg" || p.protocol === "awg2" || p.protocol === "wireguard") && shownListenPort && (
+                                  {(p.protocol === "amneziawg" || p.protocol === "awg_quic" || p.protocol === "awg2" || p.protocol === "wireguard") && shownListenPort && (
                                     <span
                                       className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-mono shrink-0"
                                       title="Локальный порт прослушивания (ListenPort)"
@@ -3407,61 +3409,6 @@ export default function App() {
                         : "Очистить сервер (удалить VPN и конфиги с VPS)"}
                     </button>
                   </div>
-
-                  {/* Card 3: What Happens during Deploy & Clean */}
-                  <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 text-xs text-slate-300 space-y-3">
-                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                      <span className="font-bold text-white flex items-center gap-2">
-                        <ShieldCheck className="w-4 h-4 text-cyan-400" />
-                        Что происходит при развертывании и очистке?
-                      </span>
-                      <span className="text-[10px] px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-mono">
-                        Автоматизация в 1 клик
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 text-[11px] leading-relaxed text-slate-300">
-                      <div className="space-y-1 p-2.5 rounded-lg bg-[#0a0f1d] border border-slate-800/60">
-                        <div className="font-semibold text-cyan-300 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                          1. Ядро sing-box
-                        </div>
-                        <p className="text-slate-400 text-[10px]">
-                          Установка последнего ядра с поддержкой Amnezia 3.1 и Reality.
-                        </p>
-                      </div>
-
-                      <div className="space-y-1 p-2.5 rounded-lg bg-[#0a0f1d] border border-slate-800/60">
-                        <div className="font-semibold text-emerald-300 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-                          2. BBR + QUIC
-                        </div>
-                        <p className="text-slate-400 text-[10px]">
-                          Включение Google BBR, ip_forward=1 и сокетных буферов 2.5 МБ.
-                        </p>
-                      </div>
-
-                      <div className="space-y-1 p-2.5 rounded-lg bg-[#0a0f1d] border border-slate-800/60">
-                        <div className="font-semibold text-purple-300 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-purple-400" />
-                          3. Ключи и обфускация
-                        </div>
-                        <p className="text-slate-400 text-[10px]">
-                          Генерация ключей Reality, параметров AWG (Jc, S1-S4, H1-H4).
-                        </p>
-                      </div>
-
-                      <div className="space-y-1 p-2.5 rounded-lg bg-[#0a0f1d] border border-slate-800/60">
-                        <div className="font-semibold text-rose-300 flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
-                          4. Очистка сервера
-                        </div>
-                        <p className="text-slate-400 text-[10px]">
-                          Кнопка «Очистить сервер» удаляет службы, ключи и конфиги.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
                 </div>
 
                 {/* Right Column: Protocol Selection & Detailed Parameters (7 cols) */}
@@ -3473,7 +3420,7 @@ export default function App() {
                         2. Выбор протоколов для развертывания (Обход блокировок)
                       </h3>
                       <p className="text-[11px] text-slate-400 mt-0.5">
-                        Отметьте нужные протоколы. Для 100% стабильной работы на кабельном интернете рекомендуются <b>SSH Tunnel</b>, <b>VLESS Reality</b> и <b>Amnezia 3.1</b>.
+                        Отметьте нужные протоколы. Для 100% стабильной работы рекомендуются <b>SSH Tunnel</b>, <b>VLESS Reality</b>, <b>Amnezia 3.1</b> и спецпротоколы <b>AWG + QUIC Pre-Warm / Гибрид AWG + Reality</b>.
                       </p>
                     </div>
                   </div>
@@ -3853,11 +3800,11 @@ export default function App() {
                           <div className="text-xs font-bold text-white flex items-center gap-2">
                             <span>Amnezia 3.1 (AWG 3.1)</span>
                             <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
-                              Header Protection + Jitter + Port Hunting
+                              Header Protection + 32-bit H1-H4 + Port Hunting
                             </span>
                           </div>
                           <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Новейшая спецификация Amnezia 3.1: шифрование заголовков ChaCha20 (HeaderProtectionKey), мусорные пакеты (Jc), случайные сдвиги (S1-S4 ≥ 12), случайные интервалы Rekey и обход DPI по белому списку WireGuard.
+                            Новейшая спецификация Amnezia 3.1: шифрование заголовков ChaCha20 (HeaderProtectionKey), мусорные пакеты (Jc), неколлидирующие сдвиги (S1-S4 ≥ 12), 32-битные заголовки H1-H4 и обход DPI.
                           </p>
                         </div>
                       </label>
@@ -3882,10 +3829,10 @@ export default function App() {
                                 ...r,
                                 awg_port: newPort,
                               });
-                              showNotice("success", `Сгенерированы параметры и порт UDP ${newPort}!`);
+                              showNotice("success", `Сгенерированы параметры AWG 3.1 и порт UDP ${newPort}!`);
                             }}
                             className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
-                            title="Сгенерировать случайные значения прямо сейчас"
+                            title="Сгенерировать случайные параметры обфускации и порт"
                           >
                             🎲 Сгенерировать параметры и порт
                           </button>
@@ -3963,55 +3910,6 @@ export default function App() {
                               </div>
                               <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
                                 Клиент автоматически зондирует и переключает порты из пула Port Hunting при глушении трафика.
-                              </p>
-                            </div>
-                          </label>
-                        </div>
-
-                        {/* Special Handshake Protection Protocols (Option 1 & Option 2) */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 pt-1">
-                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-sky-950/20 border border-sky-500/35 hover:border-sky-400/60 cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={vpsCreds.deploy_awg_quic ?? true}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  deploy_awg_quic: e.target.checked,
-                                })
-                              }
-                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
-                            />
-                            <div className="text-left min-w-0">
-                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
-                                <span>Спецпротокол: AWG + QUIC Pre-Warm</span>
-                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-300 font-mono">UDP Pre-Warm</span>
-                              </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                                Отправляет QUIC v1 Initial (1200B) и WebRTC STUN Binding Request с рабочего ListenPort за 15 мс до рукопожатия AWG, ослепляя ТСПУ.
-                              </p>
-                            </div>
-                          </label>
-
-                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/35 hover:border-fuchsia-400/60 cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={vpsCreds.deploy_awg_vless ?? true}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  deploy_awg_vless: e.target.checked,
-                                })
-                              }
-                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-fuchsia-500 focus:ring-fuchsia-500"
-                            />
-                            <div className="text-left min-w-0">
-                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
-                                <span>Спецпротокол: Гибрид AWG + Reality</span>
-                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-fuchsia-500/20 text-fuchsia-300 font-mono">TCP 443 Detour</span>
-                              </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                                Упаковывает рукопожатие и поток AmneziaWG внутрь VLESS Reality (TCP 443). Обходит 100% UDP-блокировок провайдера.
                               </p>
                             </div>
                           </label>
@@ -4232,6 +4130,219 @@ export default function App() {
                               </div>
                             </div>
                           )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Special Protocol 5A: AWG + QUIC Pre-Warm (Option 1) */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_awg_quic ?? true
+                        ? "bg-sky-950/20 border-sky-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_awg_quic ?? true}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_awg_quic: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
+                            <span>Спецпротокол: AWG + QUIC Pre-Warm (Мимикрия STUN / QUIC v1)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-300 font-semibold border border-sky-500/30">
+                              ⚡ Ослепление ТСПУ на старте сессии
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Отправляет WebRTC STUN Binding Request (RFC 5389) и QUIC v1 Initial (RFC 9000, 1200 байт) с рабочего <code>ListenPort</code> за 15 мс до рукопожатия AmneziaWG. Автоматически разворачивает серверный стек AWG 3.1.
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {(vpsCreds.deploy_awg_quic ?? true) && (
+                      <div className="mt-3 pt-3 border-t border-sky-500/20 space-y-3">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-bold text-sky-300">Стек протоколов внутри развертывания:</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">
+                              ✓ Сервер Amnezia 3.1 (HPK + 32-bit H1-H4)
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30 font-mono">
+                              ✓ Клиент STUN + QUIC v1 Pre-Warm
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const r = generateRandomAwg31Params();
+                              const newPort = getRandomInt(21000, 55000);
+                              setVpsCreds({
+                                ...vpsCreds,
+                                ...r,
+                                awg_port: newPort,
+                              });
+                              showNotice("success", `Сгенерированы параметры AWG + QUIC Pre-Warm (UDP ${newPort})!`);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-sky-600/30 hover:bg-sky-600/50 border border-sky-500/40 text-[11px] font-semibold text-sky-200 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            🎲 Рандомизировать стек AWG
+                          </button>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              Порт сервера AWG 3.1 (UDP)
+                            </label>
+                            <input
+                              type="number"
+                              value={vpsCreds.awg_port}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  awg_port: Number(e.target.value) || 0,
+                                })
+                              }
+                              placeholder="Случайный порт UDP (20000-55000)"
+                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-sky-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              Пул портов Port Hunting (UDP)
+                            </label>
+                            <input
+                              type="text"
+                              value={vpsCreds.awg_hop_ports}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  awg_hop_ports: e.target.value,
+                                })
+                              }
+                              placeholder="20000:65000"
+                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-sky-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Special Protocol 5B: Hybrid AWG + VLESS Reality (Option 2) */}
+                  <div
+                    className={`p-3.5 rounded-xl border transition ${
+                      vpsCreds.deploy_awg_vless ?? true
+                        ? "bg-fuchsia-950/20 border-fuchsia-500/40"
+                        : "bg-[#0b101d] border-slate-800 opacity-60"
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex items-center gap-2.5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={vpsCreds.deploy_awg_vless ?? true}
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              deploy_awg_vless: e.target.checked,
+                            })
+                          }
+                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-fuchsia-500 focus:ring-fuchsia-500"
+                        />
+                        <div>
+                          <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
+                            <span>Спецпротокол: Гибрид AWG + VLESS Reality (TCP 443 Detour)</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-fuchsia-500/20 text-fuchsia-300 font-semibold border border-fuchsia-500/30">
+                              🛡️ 100% защита рукопожатия AWG внутри TLS 1.3
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                            Инкапсулирует рукопожатие и поток AmneziaWG / WireGuard внутрь TLS 1.3 туннеля VLESS Reality (TCP 443, <code>xtls-rprx-vision</code> + <code>xudp</code>). Автоматически разворачивает на сервере оба протокола (VLESS Reality + Amnezia 3.1).
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {(vpsCreds.deploy_awg_vless ?? true) && (
+                      <div className="mt-3 pt-3 border-t border-fuchsia-500/20 space-y-3">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-xs font-bold text-fuchsia-300">Стек протоколов внутри развертывания:</span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">
+                              ✓ VLESS Reality (TCP {vpsCreds.vless_port || 443})
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 font-mono">
+                              ✓ Amnezia 3.1 (UDP {vpsCreds.awg_port || "Auto"})
+                            </span>
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
+                              ✓ Detour: AWG over Reality
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              Порт VLESS Reality (TCP)
+                            </label>
+                            <input
+                              type="number"
+                              value={vpsCreds.vless_port || 443}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  vless_port: Number(e.target.value) || 443,
+                                })
+                              }
+                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              SNI маскировки Reality
+                            </label>
+                            <input
+                              type="text"
+                              value={vpsCreds.reality_sni || "www.microsoft.com"}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  reality_sni: e.target.value,
+                                })
+                              }
+                              placeholder="www.microsoft.com"
+                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-slate-400 mb-1">
+                              Внутренний порт AWG 3.1 (UDP)
+                            </label>
+                            <input
+                              type="number"
+                              value={vpsCreds.awg_port}
+                              onChange={(e) =>
+                                setVpsCreds({
+                                  ...vpsCreds,
+                                  awg_port: Number(e.target.value) || 0,
+                                })
+                              }
+                              placeholder="Случайный UDP"
+                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
+                            />
+                          </div>
                         </div>
                       </div>
                     )}
@@ -5475,107 +5586,74 @@ export default function App() {
                   effectiveClientProfiles.map((prof) => (
                     <div
                       key={prof.id}
-                      className={`p-4 rounded-xl border transition flex items-center justify-between gap-3 ${
+                      className={`p-3.5 rounded-xl border transition flex items-center justify-between gap-3 ${
                         selectedProfileId === prof.id
                           ? "bg-[#131d33] border-cyan-500/50"
                           : "bg-[#070b14] border-slate-800/90 hover:border-slate-700"
                       }`}
                     >
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        {renderProtocolBadge(prof.protocol, prof.awg_version)}
-                        <div className="min-w-0">
-                          <div className="text-sm font-bold text-white flex items-center gap-2 truncate">
-                            <span>{prof.name}</span>
-                            {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
-                              <span
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleOpenEditModal(prof);
-                                }}
-                                className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium flex items-center gap-1 cursor-pointer hover:bg-amber-500/30 shrink-0"
-                                title="Нажмите для ввода ключа"
-                              >
-                                <AlertTriangle className="w-3 h-3 text-amber-400" />
-                                Нет Private Key
-                              </span>
-                            )}
-                            {selectedProfileId === prof.id && (
-                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono font-medium">
-                                Активен на ПК
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-slate-400 mt-0.5 font-mono truncate flex items-center gap-2 flex-wrap">
-                            <span>
-                              {prof.server}:{prof.port}
-                              {prof.protocol === "ssh"
-                                ? ` • SSH порт ${prof.port} • 100% обход DPI`
-                                : prof.protocol === "awg2"
-                                ? ` • AmneziaWG 2.0${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
-                                : prof.protocol === "awg_quic"
-                                ? ` • AWG + QUIC Pre-Warm (Jc: ${prof.awg_jc ?? 5})${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
-                                : prof.protocol === "awg_vless"
-                                ? ` • Гибрид AWG + Reality (TCP ${prof.vless_port ?? 443} • SNI: ${prof.sni || "www.microsoft.com"})`
-                                : prof.protocol === "amneziawg"
-                                ? ` • Amnezia 3.1 (Jc: ${prof.awg_jc ?? 5})${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""} ${prof.awg_hop_ports ? `• Hunting (${prof.awg_hop_ports})` : ""}`
-                                : prof.protocol === "wireguard"
-                                ? ` • Чистый WireGuard (Standard UDP)${prof.listen_port ? ` • ListenPort: ${prof.listen_port}` : ""}`
-                                : prof.protocol === "shadowtls"
-                                ? ` • ShadowTLS v3 • Decoy: ${prof.shadowtls_sni || "www.microsoft.com"}`
-                                : prof.protocol === "vless_ws"
-                                ? ` • Cloudflare WS • Path: ${prof.ws_path || "/neuroveil-ws"}`
-                                : prof.protocol === "webrtc"
-                                ? ` • WebRTC Steganography • gRPC`
-                                : prof.protocol === "shadowsocks"
-                                ? ` • ${prof.ss_method || "2022-blake3-aes-128-gcm"}`
-                                : ` • SNI: ${prof.sni}`}
-                              {prof.hop_ports ? ` • Port Hopping (${prof.hop_ports})` : ""}
-                            </span>
+                      {/* Left Column: Protocol Top-Left + Compact Info Stack */}
+                      <div className="flex flex-col items-start gap-1.5 min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0 max-w-full">
+                          {renderProtocolBadge(prof.protocol, prof.awg_version)}
+                          <span className="text-sm font-bold text-white truncate" title={prof.name}>
+                            {prof.name}
+                          </span>
+                          {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
                             <span
-                              className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-cyan-300 border border-cyan-500/30 font-mono inline-flex items-center gap-1.5"
-                              title="Суммарный трафик, прошедший через данную конфигурацию"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenEditModal(prof);
+                              }}
+                              className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium flex items-center gap-1 cursor-pointer hover:bg-amber-500/30 shrink-0"
+                              title="Нажмите для ввода ключа"
                             >
-                              <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
-                              <span className="text-slate-600">•</span>
-                              <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
-                              <span className="text-slate-600">•</span>
-                              <span className="text-emerald-300 font-semibold">
-                                Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
-                              </span>
+                              <AlertTriangle className="w-3 h-3 text-amber-400" />
+                              Нет Private Key
                             </span>
-                          </div>
+                          )}
+                          {selectedProfileId === prof.id && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono font-medium shrink-0">
+                              Активен на ПК
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 font-mono min-w-0 max-w-full">
+                          <span className="text-slate-300 font-semibold shrink-0">
+                            {prof.server}:{prof.port}
+                          </span>
+                          {prof.listen_port && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700/80 shrink-0">
+                              Listen :{prof.listen_port}
+                            </span>
+                          )}
+                          {(prof.awg_hop_ports || prof.hop_ports) && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/90 text-cyan-300/90 border border-cyan-500/25 shrink-0">
+                              Hop: {prof.awg_hop_ports || prof.hop_ports}
+                            </span>
+                          )}
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-cyan-300 border border-cyan-500/30 font-mono inline-flex items-center gap-1.5 shrink-0"
+                            title="Суммарный трафик, прошедший через данную конфигурацию"
+                          >
+                            <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
+                            <span className="text-slate-600">•</span>
+                            <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
+                            <span className="text-slate-600">•</span>
+                            <span className="text-emerald-300 font-semibold">
+                              Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
+                            </span>
+                          </span>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-1.5 flex-wrap justify-end shrink-0">
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
-                          <>
-                            <button
-                              onClick={() => handleDownloadAwgConf(prof)}
-                              className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5"
-                              title="Скачать .conf для WireGuard / AmneziaVPN"
-                            >
-                              <FileDown className="w-3.5 h-3.5" />
-                              .conf
-                            </button>
-                            {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic") && (
-                              <button
-                                onClick={() => handleProbeAwgPorts(prof.id)}
-                                disabled={probingAwgId === prof.id}
-                                className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1"
-                                title="Тест портов AWG"
-                              >
-                                <Zap className="w-3.5 h-3.5 text-cyan-400" />
-                                {probingAwgId === prof.id ? "Тест..." : "Тест портов"}
-                              </button>
-                            )}
-                          </>
-                        )}
-
+                      {/* Right Column: Action Buttons Pinned to Right Edge */}
+                      <div className="flex items-center gap-1.5 justify-end shrink-0 ml-auto self-center">
                         <button
                           onClick={() => handlePingProfile(prof.id)}
                           disabled={pingingId === prof.id}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1"
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1 shrink-0 cursor-pointer"
                           title="Проверить пинг"
                         >
                           <Activity className="w-3.5 h-3.5 text-emerald-400" />
@@ -5595,7 +5673,7 @@ export default function App() {
                             }
                             setActiveTab("dashboard");
                           }}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition shrink-0 cursor-pointer ${
                             selectedProfileId === prof.id
                               ? "bg-cyan-600 text-white"
                               : "bg-slate-800 hover:bg-slate-700 text-slate-200"
@@ -5605,38 +5683,83 @@ export default function App() {
                         </button>
 
                         <button
+                          onClick={() => handleOpenQrModal(prof)}
+                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Показать QR-код для телефона"
+                        >
+                          <QrCode className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            if (
+                              prof.protocol === "amneziawg" ||
+                              prof.protocol === "awg_quic" ||
+                              prof.protocol === "awg_vless" ||
+                              prof.protocol === "awg2" ||
+                              prof.protocol === "wireguard"
+                            ) {
+                              handleDownloadAwgConf(prof);
+                            } else {
+                              handleExportJson(prof);
+                            }
+                          }}
+                          className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title={
+                            prof.protocol === "amneziawg" ||
+                            prof.protocol === "awg_quic" ||
+                            prof.protocol === "awg_vless" ||
+                            prof.protocol === "awg2" ||
+                            prof.protocol === "wireguard"
+                              ? "Скачать .conf для WireGuard / AmneziaVPN"
+                              : "Скачать .json конфиг sing-box"
+                          }
+                        >
+                          <Download className="w-4 h-4" />
+                        </button>
+
+                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic") && (
+                          <button
+                            onClick={() => handleProbeAwgPorts(prof.id)}
+                            disabled={probingAwgId === prof.id}
+                            className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Тест портов AWG"
+                          >
+                            <Zap className={`w-4 h-4 text-cyan-400 ${probingAwgId === prof.id ? "animate-pulse" : ""}`} />
+                          </button>
+                        )}
+
+                        <button
                           onClick={() => handleCopyUri(prof)}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1"
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition shrink-0 cursor-pointer"
                           title="Скопировать ссылку"
                         >
                           {copiedId === prof.id ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <Check className="w-4 h-4 text-emerald-400" />
                           ) : (
-                            <Copy className="w-3.5 h-3.5 text-cyan-400" />
+                            <Copy className="w-4 h-4 text-cyan-400" />
                           )}
                         </button>
 
                         <button
                           onClick={() => handleOpenEditModal(prof)}
-                          className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1.5 transition"
-                          title="Редактировать конфигурацию в приложении"
+                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Изменить конфигурацию в приложении"
                         >
-                          <Edit3 className="w-3.5 h-3.5" />
-                          Изменить
+                          <Edit3 className="w-4 h-4" />
                         </button>
 
                         <button
                           onClick={() => handleOpenEditModal(prof, "text")}
-                          className="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 transition"
-                          title="Редактировать текст конфигурации (.conf / JSON)"
+                          className="p-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Текст конфига (.conf / JSON)"
                         >
-                          <FileText className="w-3.5 h-3.5" />
-                          Текст конфига
+                          <FileText className="w-4 h-4" />
                         </button>
 
                         <button
                           onClick={() => handleDeleteProfile(prof.id)}
-                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400"
+                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 flex items-center justify-center transition shrink-0 cursor-pointer"
                           title="Удалить профиль"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -5854,77 +5977,51 @@ export default function App() {
                       key={prof.id}
                       className="p-3.5 rounded-xl border border-indigo-500/20 bg-[#0c1222] hover:border-indigo-500/40 transition flex items-center justify-between gap-3"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-300 shrink-0">
-                          <Smartphone className="w-4 h-4" />
+                      {/* Left Column: Protocol Top-Left + Compact Info Stack */}
+                      <div className="flex flex-col items-start gap-1.5 min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0 max-w-full">
+                          {renderProtocolBadge(prof.protocol, prof.awg_version)}
+                          <span className="text-sm font-bold text-white truncate" title={prof.name}>
+                            {prof.name}
+                          </span>
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium shrink-0">
+                            Устройство на сервере
+                          </span>
                         </div>
-                        {renderProtocolBadge(prof.protocol, prof.awg_version)}
-                        <div className="min-w-0">
-                          <div className="text-sm font-bold text-white flex items-center gap-2 truncate">
-                            <span>{prof.name}</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">
-                              Устройство на сервере
+
+                        <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 font-mono min-w-0 max-w-full">
+                          <span className="text-slate-300 font-semibold shrink-0">
+                            {prof.server}:{prof.port}
+                          </span>
+                          <span
+                            className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-indigo-200 border border-indigo-500/30 font-mono inline-flex items-center gap-1.5 shrink-0"
+                            title="Трафик по данной конфигурации (по данным сервера VPS и локальной статистики)"
+                          >
+                            <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
+                            <span className="text-slate-600">•</span>
+                            <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
+                            <span className="text-slate-600">•</span>
+                            <span className="text-emerald-300 font-semibold">
+                              Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
                             </span>
-                          </div>
-                          <div className="text-xs text-slate-400 mt-0.5 font-mono truncate flex items-center gap-2 flex-wrap">
-                            <span>{prof.server}:{prof.port}</span>
-                            <span
-                              className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-indigo-200 border border-indigo-500/30 font-mono inline-flex items-center gap-1.5"
-                              title="Трафик по данной конфигурации (по данным сервера VPS и локальной статистики)"
-                            >
-                              <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
-                              <span className="text-slate-600">•</span>
-                              <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
-                              <span className="text-slate-600">•</span>
-                              <span className="text-emerald-300 font-semibold">
-                                Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
-                              </span>
-                            </span>
-                          </div>
+                          </span>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
+                      {/* Right Column: Action Buttons Pinned to Right Edge */}
+                      <div className="flex items-center gap-1.5 justify-end shrink-0 ml-auto self-center">
                         <button
-                          onClick={() => handleOpenQrModal(prof)}
-                          className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-bold text-white flex items-center gap-1.5 shadow-md shadow-cyan-600/20 transition"
-                          title="Показать QR-код для телефона"
+                          onClick={() => handlePingProfile(prof.id)}
+                          disabled={pingingId === prof.id}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1 shrink-0 cursor-pointer"
+                          title="Проверить пинг"
                         >
-                          <QrCode className="w-3.5 h-3.5" />
-                          QR-код для телефона
-                        </button>
-
-                        <button
-                          onClick={() => handleExportJson(prof)}
-                          className="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1.5"
-                          title="Скачать готовый .json конфиг sing-box"
-                        >
-                          <FileDown className="w-3.5 h-3.5" />
-                          .json
-                        </button>
-
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && (
-                          <button
-                            onClick={() => handleDownloadAwgConf(prof)}
-                            className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5"
-                            title="Скачать .conf для AmneziaVPN / WireGuard"
-                          >
-                            <FileDown className="w-3.5 h-3.5" />
-                            .conf Amnezia
-                          </button>
-                        )}
-
-                        <button
-                          onClick={() => handleCopyUri(prof)}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5"
-                          title="Скопировать ссылку"
-                        >
-                          {copiedId === prof.id ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3.5 h-3.5 text-cyan-400" />
-                          )}
-                          Ссылка
+                          <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                          {pingingId === prof.id
+                            ? "..."
+                            : prof.ping_ms != null
+                            ? `${prof.ping_ms} мс`
+                            : "Пинг"}
                         </button>
 
                         <button
@@ -5933,15 +6030,79 @@ export default function App() {
                             handleQuickSwitchProfile(prof.id);
                             setActiveTab("dashboard");
                           }}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200"
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 shrink-0 cursor-pointer"
                           title="Использовать на этом ПК"
                         >
                           На ПК
                         </button>
 
                         <button
+                          onClick={() => handleOpenQrModal(prof)}
+                          className="p-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center shadow-md shadow-cyan-600/20 transition shrink-0 cursor-pointer"
+                          title="Показать QR-код для телефона"
+                        >
+                          <QrCode className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            if (
+                              prof.protocol === "amneziawg" ||
+                              prof.protocol === "awg_quic" ||
+                              prof.protocol === "awg_vless" ||
+                              prof.protocol === "awg2" ||
+                              prof.protocol === "wireguard"
+                            ) {
+                              handleDownloadAwgConf(prof);
+                            } else {
+                              handleExportJson(prof);
+                            }
+                          }}
+                          className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title={
+                            prof.protocol === "amneziawg" ||
+                            prof.protocol === "awg_quic" ||
+                            prof.protocol === "awg_vless" ||
+                            prof.protocol === "awg2" ||
+                            prof.protocol === "wireguard"
+                              ? "Скачать .conf для AmneziaVPN / WireGuard"
+                              : "Скачать готовый .json конфиг sing-box"
+                          }
+                        >
+                          <Download className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => handleCopyUri(prof)}
+                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Скопировать ссылку"
+                        >
+                          {copiedId === prof.id ? (
+                            <Check className="w-4 h-4 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-4 h-4 text-cyan-400" />
+                          )}
+                        </button>
+
+                        <button
+                          onClick={() => handleOpenEditModal(prof)}
+                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Изменить конфигурацию в приложении"
+                        >
+                          <Edit3 className="w-4 h-4" />
+                        </button>
+
+                        <button
+                          onClick={() => handleOpenEditModal(prof, "text")}
+                          className="p-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                          title="Текст конфига (.conf / JSON)"
+                        >
+                          <FileText className="w-4 h-4" />
+                        </button>
+
+                        <button
                           onClick={() => handleDeleteProfile(prof.id, true)}
-                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 cursor-pointer"
+                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 flex items-center justify-center transition shrink-0 cursor-pointer"
                           title="Удалить ключ с сервера VPS и из приложения"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -6153,17 +6314,17 @@ export default function App() {
 
             {/* Profile Selector for Routing */}
             {effectiveDashboardProfiles.length > 0 && (
-              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-2.5">
-                <div className="flex items-center justify-between">
+              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                     <Smartphone className="w-4 h-4 text-cyan-400" />
-                    {t.selectProfileForRouting}
+                    {t.selectProfileForRouting} ({effectiveDashboardProfiles.length})
                   </span>
                   <span className="text-[11px] text-slate-400">
                     Правила маршрутизации сохраняются отдельно для выбранного профиля
                   </span>
                 </div>
-                <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 max-h-[168px] overflow-y-auto pr-1 custom-scrollbar">
                   {effectiveDashboardProfiles.map((p) => {
                     const isTarget = p.id === (routingProfileId || selectedProfileId);
                     const isSplitActive = p.routing ? p.routing.split_tunneling : routing.split_tunneling;
@@ -6172,26 +6333,37 @@ export default function App() {
                         key={p.id}
                         type="button"
                         onClick={() => switchRoutingProfile(p.id)}
-                        className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition shrink-0 border cursor-pointer ${
+                        className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 transition border cursor-pointer min-w-0 text-left ${
                           isTarget
                             ? "bg-cyan-500/20 border-cyan-400 text-white shadow-md shadow-cyan-500/20"
                             : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
                         }`}
                       >
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            isSplitActive ? "bg-cyan-400 shadow-[0_0_6px_#22d3ee]" : "bg-slate-600"
-                          }`}
-                        />
-                        <span>{p.name}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 border border-slate-700/60 uppercase">
-                          {p.protocol}
-                        </span>
-                        {p.id === selectedProfileId && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-medium">
-                            Активен на ПК
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <span
+                            className={`w-2 h-2 rounded-full shrink-0 ${
+                              isSplitActive ? "bg-cyan-400 shadow-[0_0_6px_#22d3ee]" : "bg-slate-600"
+                            }`}
+                          />
+                          <span className="truncate font-bold">{p.name}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700/60 uppercase font-mono">
+                            {p.protocol === "awg_quic"
+                              ? "AWG+QUIC"
+                              : p.protocol === "awg_vless"
+                              ? "AWG+REALITY"
+                              : p.protocol === "amneziawg"
+                              ? "AWG 3.1"
+                              : p.protocol}
                           </span>
-                        )}
+                          {p.id === selectedProfileId && (
+                            <span
+                              className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                              title="Активен на ПК"
+                            />
+                          )}
+                        </div>
                       </button>
                     );
                   })}
@@ -7815,7 +7987,7 @@ export default function App() {
                   О программе NeuroVeil VPN
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  Архитектура безопасности, технологии обхода ТСПУ, информация о разработчике и центр обновлений
+                  Архитектура безопасности, специальные протоколы обхода ТСПУ, функционал клиента и центр обновлений
                 </p>
               </div>
               <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
@@ -7843,11 +8015,87 @@ export default function App() {
                       Официальная сборка
                     </span>
                     <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
-                      sing-box 1.11+ Core
+                      sing-box-lx 1.14+ Core
+                    </span>
+                    <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 font-mono">
+                      Anti-DPI Handshake Shield
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения, разработанный специально для беспрепятственного доступа к сети в условиях жестких блокировок, фильтрации трафика и анализа пакетов ТСПУ провайдеров. Включает нативную интеграцию современных криптографических протоколов, раздельное туннелирование на уровне приложений и нулевое логирование данных.
+                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения, разработанный специально для беспрепятственного доступа к сети в условиях жестких блокировок, фильтрации трафика и глубокого анализа пакетов (DPI / ТСПУ). Объединяет 12 современных криптографических и стеганографических протоколов, специальные гибридные схемы защиты рукопожатия WireGuard / Amnezia, интеллектуальный автоподбор портов, развертывание собственного VPS-сервера в 1 клик и раздельное туннелирование на лету.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Key Client Capabilities & Functional Modules */}
+            <div
+              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              style={{ backgroundColor: currentTheme.styles.cardBg }}
+            >
+              <div className="flex items-center gap-2">
+                <Zap className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+                <h3 className="text-sm font-bold text-white">Актуальный функционал и возможности клиента</h3>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 pt-1">
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    Автоподбор порта (Auto Port Hunt)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Автоматический циклический перебор локальных UDP-портов (<code>ListenPort</code>) и пула <code>20000:65000</code> с контролем рукопожатия в реальном времени до полного установления канала связи.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
+                    <Server className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    Автодеплой на VPS по SSH в 1 клик
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Полностью автоматическая настройка чистого Linux-сервера: установка ядра <code>sing-box-lx</code>, включение Google BBR, генерация ключей X25519 / WireGuard, правил NAT / iptables и создание готовых профилей.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-indigo-400 font-bold text-xs">
+                    <Bookmark className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    Маршрутизация «На лету» и Пресеты
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Мгновенное переключение списков программ (<code>.exe</code>), папок с играми, доменов и IP-подсетей (Белый или Черный список) прямо во время работы VPN без разрыва соединения.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-purple-400 font-bold text-xs">
+                    <Smartphone className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                    Менеджер устройств, QR и экспорт
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Выпуск персональных ключей для смартфонов, ноутбуков и друзей прямо с VPS, генерация QR-кодов и выгрузка готовых файлов <code>.conf</code> (Amnezia / WireGuard) и <code>.json</code>.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-amber-400 font-bold text-xs">
+                    <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    TLS ClientHello Фрагментация
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Нарезка TCP-пакетов и TLS-записей рукопожатия (RFC 5246/8446) для обхода сигнатурного анализа SNI на кабельных и мобильных сетях.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-rose-400 font-bold text-xs">
+                    <ShieldAlert className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    Kill Switch, DNS DoH & IPv6 Shield
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Аварийная блокировка трафика при обрыве туннеля, перехват DNS через зашифрованный Cloudflare DoH (1.1.1.1), защита от утечек IPv6 и атомарное сохранение состояния.
                   </p>
                 </div>
               </div>
@@ -7860,97 +8108,97 @@ export default function App() {
             >
               <div className="flex items-center gap-2">
                 <Cpu className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
-                <h3 className="text-sm font-bold text-white">Технологический стек и протоколы обхода</h3>
+                <h3 className="text-sm font-bold text-white">Технологический стек и поддерживаемые протоколы (12 режимов)</h3>
               </div>
 
-              <div className="grid grid-cols-3 gap-3.5 pt-1">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 pt-1">
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-sky-400 font-bold text-xs">
+                    <span className="w-2 h-2 rounded-full bg-sky-400" />
+                    AWG + QUIC Pre-Warm (Спецпротокол)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Отправляет 20-байтный пакет WebRTC STUN Binding Request (RFC 5389) и 1200-байтный QUIC v1 Initial (RFC 9000) с рабочего UDP-порта за 15 мс до старта AmneziaWG, переводя классификатор ТСПУ в режим белого трафика.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-fuchsia-400 font-bold text-xs">
+                    <span className="w-2 h-2 rounded-full bg-fuchsia-400" />
+                    Гибрид AWG + Reality (Спецпротокол)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Двухслойная инкапсуляция (<code>detour</code>): рукопожатие и датаграммы AmneziaWG / WireGuard упаковываются внутрь TLS 1.3 соединения VLESS Reality (TCP 443, <code>xtls-rprx-vision</code> + <code>xudp</code>).
+                  </p>
+                </div>
+
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                    AmneziaWG (AWG 3.1)
+                    AmneziaWG 3.1 & 2.0
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Модифицированный WireGuard со случайными мусорными пакетами (Junk packets Jc/Jmin/Jmax), динамическими сдвигами S1-S4, рандомизацией заголовков H1-H4 и Port Hunting против блокировок протокола UDP.
+                    Шифрование заголовков ChaCha20 (HPK), настоящая 32-битная рандомизация <code>H1–H4</code>, неколлидирующие сдвиги <code>S1–S4</code>, мусорные пакеты <code>Jc</code>, случайный паддинг и совместимость с чистым AWG 2.0.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-cyan-400" />
-                    VLESS Reality
+                    VLESS Reality (Vision)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Маскировка входящего TLS-рукопожатия под легитимный трафик зарубежных серверов (Bing, Microsoft, Apple, Yahoo) без необходимости арендовать личные домены и сертификаты.
+                    Маскировка TLS 1.3 рукопожатия под легитимный трафик зарубежных гигантов (Microsoft, Apple, Bing) с отпечатком браузера Chrome uTLS без необходимости покупать домен.
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-pink-400 font-bold text-xs">
+                    <span className="w-2 h-2 rounded-full bg-pink-400" />
+                    ShadowTLS v3 & CDN Shield (WS)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Паразитическая мимикрия L7 с защитой от активного зондирования (ShadowTLS v3) и проксирование через белые узлы Cloudflare Edge / Workers (VLESS WebSocket).
+                  </p>
+                </div>
+
+                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center gap-2 text-lime-400 font-bold text-xs">
+                    <span className="w-2 h-2 rounded-full bg-lime-400" />
+                    WebRTC Steganography (gRPC)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Маскировка мультиплексированных потоков данных под аудио/видеозвонки мессенджеров поверх HTTP/2 gRPC с минимальной задержкой.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-purple-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-purple-400" />
-                    Hysteria 2
+                    Hysteria 2 & TUIC v5
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Ультраскоростной протокол на базе UDP QUIC с кастомным алгоритмом контроля перегрузок BBRv3, маскировкой Salamander и гарантированной скоростью даже при 20-30% потере пакетов.
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center gap-2 text-indigo-400 font-bold text-xs">
-                    <span className="w-2 h-2 rounded-full bg-indigo-400" />
-                    TUIC v5
-                  </div>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Протокол поверх чистого IETF QUIC с нулевой задержкой рукопожатия (0-RTT), мультиплексированием множества потоков в единый канал и адаптивным обходом блокировок провайдеров.
+                    Ультраскоростные UDP QUIC-протоколы с контролем перегрузок BBR, обфускацией Salamander, Port Hopping (20000–65000 + порт 53) и 0-RTT рукопожатием.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-amber-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-amber-400" />
-                    Shadowsocks 2022 (AEAD)
+                    Shadowsocks 2022 & SSH Tunnel
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Новейший криптографический стандарт AEAD с шифрованием Blake3 AES-128/256-GCM, защитой от активного зондирования ТСПУ и минимальным оверхедом по сетевым ресурсам.
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center gap-2 text-violet-400 font-bold text-xs">
-                    <span className="w-2 h-2 rounded-full bg-violet-400" />
-                    SSH Dynamic Tunnel (SOCKS5)
-                  </div>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Прямой шифрованный туннель через стандартный защищенный порт SSH с аппаратной аутентификацией. Подключается к любому чистому VPS без предварительной установки стороннего ПО.
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center gap-2 text-sky-400 font-bold text-xs">
-                    <span className="w-2 h-2 rounded-full bg-sky-400" />
-                    Драйвер ядра WinTun L3
-                  </div>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Высокопроизводительный виртуальный сетевой драйвер уровня Ring 0, обеспечивающий пропускную способность до 10 Гбит/с с нулевыми задержками и минимальной нагрузкой на CPU.
+                    Криптографический стандарт AEAD <code>2022-blake3-aes-gcm</code> с мультиплексированием и прямой зашифрованный SSH-туннель (порт 22) с поддержкой каскадного проксирования.
                   </p>
                 </div>
 
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-teal-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-teal-400" />
-                    Smart Split Tunneling
+                    Драйвер WinTun L3 & System Proxy
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Интеллектуальная маршрутизация по процессам (.exe), папкам, доменам и IP-диапазонам. Банки, Госуслуги, VK, Яндекс и Steam работают напрямую на полной скорости провайдера.
-                  </p>
-                </div>
-
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center gap-2 text-rose-400 font-bold text-xs">
-                    <span className="w-2 h-2 rounded-full bg-rose-400" />
-                    Kill Switch & Zero-Logs
-                  </div>
-                  <p className="text-[11px] text-slate-300 leading-relaxed">
-                    100% клиентская архитектура: клиент и сервер не сохраняют логи подключений. Kill Switch блокирует аварийные утечки IP и DNS при разрыве соединения.
+                    Два режима перехвата трафика: виртуальный сетевой адаптер уровня ядра <code>wintun.dll</code> (для всех игр и UDP-приложений) и легкий системный прокси Windows.
                   </p>
                 </div>
               </div>
@@ -8027,7 +8275,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Updates Section (GitHub Repository: lllPredatorlll/NeuroVeil-VPN) */}
+            {/* Updates Section */}
             <div
               className={`p-5 rounded-2xl border transition-all duration-300 space-y-3.5 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
@@ -8042,7 +8290,7 @@ export default function App() {
                   <div>
                     <h3 className="text-sm font-bold text-white">Центр обновлений приложения</h3>
                     <p className="text-[11px] text-slate-400">
-                      Автоматическая проверка и установка релизов из официального репозитория GitHub
+                      Автоматическая проверка и установка новых официальных релизов клиента
                     </p>
                   </div>
                 </div>
@@ -8065,20 +8313,9 @@ export default function App() {
                     <span className="text-xs font-bold text-white">
                       NeuroVeil VPN v{updateInfo?.current_version || APP_VERSION} (Build {APP_BUILD})
                     </span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleOpenExternalUrl("https://github.com/lllPredatorlll/NeuroVeil-VPN")
-                      }
-                      className="text-[10px] px-2 py-0.5 rounded-md bg-slate-800/90 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition flex items-center gap-1 cursor-pointer"
-                      title="Открыть официальный репозиторий на GitHub"
-                    >
-                      <ExternalLink className="w-3 h-3" />
-                      github.com/lllPredatorlll/NeuroVeil-VPN
-                    </button>
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Канал обновлений: GitHub Release / Main Branch
+                    Канал обновлений: Официальный релизный канал (Stable)
                     {lastUpdateCheck ? ` • Проверено в ${lastUpdateCheck}` : ""}
                   </div>
                 </div>
@@ -8091,7 +8328,7 @@ export default function App() {
                     className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-semibold text-white transition flex items-center gap-1.5 cursor-pointer shadow-md shadow-cyan-600/20"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin" : ""}`} />
-                    {checkingUpdate ? "Проверка GitHub..." : "Проверить обновления"}
+                    {checkingUpdate ? "Проверка обновлений..." : "Проверить обновления"}
                   </button>
 
                   {updateInfo?.has_update && (
@@ -8133,20 +8370,12 @@ export default function App() {
                           disabled={installingUpdate}
                           onClick={handleInstallUpdate}
                           className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition flex items-center gap-1 cursor-pointer"
-                          title="Скачать заново и переустановить сборку из репозитория GitHub"
+                          title="Скачать заново и переустановить актуальную сборку"
                         >
                           <Download className="w-3 h-3 text-cyan-400" />
-                          {installingUpdate ? "Установка..." : "Переустановить с GitHub"}
+                          {installingUpdate ? "Установка..." : "Переустановить сборку"}
                         </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => handleOpenExternalUrl(updateInfo.html_url)}
-                        className="text-[11px] px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 transition flex items-center gap-1 cursor-pointer"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Открыть на GitHub
-                      </button>
                     </div>
                   </div>
                   <div className="text-[11px] text-slate-300 whitespace-pre-wrap leading-relaxed max-h-40 overflow-y-auto pr-1">

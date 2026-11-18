@@ -530,6 +530,8 @@ pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<Deplo
         || creds.deploy_tuic
         || creds.deploy_ss
         || creds.deploy_awg
+        || creds.deploy_awg_quic
+        || creds.deploy_awg_vless
         || creds.deploy_awg2
         || creds.deploy_ssh
         || creds.deploy_shadowtls
@@ -537,17 +539,23 @@ pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<Deplo
         || creds.deploy_webrtc;
 
     if !any_proto {
-        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Amnezia 3.1, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH Tunnel)".to_string());
+        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH Tunnel)".to_string());
     }
 
+    let need_vless_server = creds.deploy_vless || creds.deploy_awg_vless;
+    let need_awg_server = creds.deploy_awg || creds.deploy_awg_quic || creds.deploy_awg_vless;
+
     let mut creds = creds.clone();
-    if creds.deploy_awg && (creds.awg_port == 0 || creds.awg_port == 51820) {
+    if need_awg_server && (creds.awg_port == 0 || creds.awg_port == 51820) {
         creds.awg_port = random_u32_in_range(20000, 55000) as u16;
         emit_log(app, &format!("Авто-рандомизация: выбран порт Amnezia 3.1 UDP {}", creds.awg_port));
     }
     if creds.deploy_awg2 && (creds.awg2_port == 0 || creds.awg2_port == 51821 || creds.awg2_port == 51820) {
         creds.awg2_port = random_u32_in_range(20000, 55000) as u16;
         emit_log(app, &format!("Авто-рандомизация: выбран порт AmneziaWG 2.0 UDP {}", creds.awg2_port));
+    }
+    if need_vless_server && creds.vless_port == 0 {
+        creds.vless_port = 443;
     }
 
     let ssh_port = if creds.ssh_port == 0 { 22 } else { creds.ssh_port };
@@ -661,7 +669,7 @@ rm -rf /tmp/sb-install
         creds.sni.trim().to_string()
     };
 
-    let (vless_uuid, vless_priv, vless_pub, vless_sid) = if creds.deploy_vless {
+    let (vless_uuid, vless_priv, vless_pub, vless_sid) = if need_vless_server {
         emit_log(app, "Шаг 3/6: Генерация ключей X25519 для VLESS Reality...");
         let (k_code, k_out) = run_remote_cmd(&sess, "/usr/local/bin/sing-box generate reality-keypair").await?;
         if k_code != 0 {
@@ -729,7 +737,7 @@ chmod 600 /etc/sing-box/reality.json
         awg_persistent_keepalive,
         awg_random_trailers,
         awg_disable_cookies,
-    ) = if creds.deploy_awg {
+    ) = if need_awg_server {
         emit_log(app, "Шаг 3/6: Генерация ключей и параметров для Amnezia 3.1...");
         let (k1_code, k1_out) = run_remote_cmd(&sess, "/usr/local/bin/sing-box generate wg-keypair").await?;
         if k1_code != 0 {
@@ -1085,7 +1093,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
     let mut inbounds = Vec::new();
     let mut fw_rules = String::new();
 
-    if creds.deploy_vless {
+    if need_vless_server {
         let reality_sni = if creds.reality_sni.trim().is_empty() {
             "www.microsoft.com".to_string()
         } else {
@@ -1349,7 +1357,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
     let mut endpoints = Vec::new();
     let mut route_rules = Vec::new();
 
-    if creds.deploy_awg {
+    if need_awg_server {
         let mut awg_ep = json!({
             "type": "wireguard",
             "tag": "awg-in",
@@ -1456,7 +1464,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
     if creds.deploy_hy2 && creds.hy2_port > 0 { active_udp_ports.push(creds.hy2_port); }
     if creds.deploy_tuic && creds.tuic_port > 0 { active_udp_ports.push(creds.tuic_port); }
     if creds.deploy_ss && creds.ss_port > 0 { active_udp_ports.push(creds.ss_port); }
-    if creds.deploy_awg && creds.awg_port > 0 { active_udp_ports.push(creds.awg_port); }
+    if need_awg_server && creds.awg_port > 0 { active_udp_ports.push(creds.awg_port); }
     if creds.deploy_awg2 && creds.awg2_port > 0 { active_udp_ports.push(creds.awg2_port); }
     for udp_p in active_udp_ports {
         fw_rules.push_str(&format!(
@@ -1675,9 +1683,9 @@ systemctl is-active sing-box
         created_profiles.push(ss_profile);
     }
 
-    if creds.deploy_awg {
+    if need_awg_server {
         let awg_name = format!("Amnezia 3.1 ({})", creds.host.trim());
-        let mut awg_profile = VpnProfile {
+        let mut base_awg_profile = VpnProfile {
             id: Uuid::new_v4().to_string(),
             name: awg_name,
             protocol: "amneziawg".to_string(),
@@ -1716,11 +1724,14 @@ systemctl is-active sing-box
             pinned_on_pc: Some(true),
             ..Default::default()
         };
-        awg_profile.uri = build_profile_uri(&awg_profile);
-        created_profiles.push(awg_profile.clone());
+        base_awg_profile.uri = build_profile_uri(&base_awg_profile);
+
+        if creds.deploy_awg {
+            created_profiles.push(base_awg_profile.clone());
+        }
 
         if creds.deploy_awg_quic {
-            let mut quic_profile = awg_profile.clone();
+            let mut quic_profile = base_awg_profile.clone();
             quic_profile.id = Uuid::new_v4().to_string();
             quic_profile.name = format!("AWG + QUIC Pre-Warm ({})", creds.host.trim());
             quic_profile.protocol = "awg_quic".to_string();
@@ -1728,13 +1739,13 @@ systemctl is-active sing-box
             created_profiles.push(quic_profile);
         }
 
-        if creds.deploy_awg_vless && creds.deploy_vless {
+        if creds.deploy_awg_vless {
             let reality_sni = if creds.reality_sni.trim().is_empty() {
                 "www.microsoft.com".to_string()
             } else {
                 creds.reality_sni.trim().to_string()
             };
-            let mut hybrid_profile = awg_profile.clone();
+            let mut hybrid_profile = base_awg_profile.clone();
             hybrid_profile.id = Uuid::new_v4().to_string();
             hybrid_profile.name = format!("Hybrid AWG + Reality ({})", creds.host.trim());
             hybrid_profile.protocol = "awg_vless".to_string();

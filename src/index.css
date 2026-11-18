@@ -166,21 +166,47 @@
   background-color: var(--color-accent-bg) !important;
 }
 
-/* Pure AMOLED Black: neutralize blue-tinted slate buttons & badges to true OLED zinc */
+/* Pure AMOLED Black, Monochrome B&W, Titanium Grey: neutralize blue-tinted slate buttons & badges */
 [data-theme="amoled_black"] .bg-slate-800,
 [data-theme="amoled_black"] .bg-slate-800\/80,
 [data-theme="amoled_black"] .bg-slate-800\/60,
 [data-theme="amoled_black"] .bg-slate-800\/50,
 [data-theme="amoled_black"] .bg-slate-800\/40,
-[data-theme="amoled_black"] .bg-slate-800\/30 {
-  background-color: #18181b !important;
+[data-theme="amoled_black"] .bg-slate-800\/30,
+[data-theme="monochrome_bw"] .bg-slate-800,
+[data-theme="monochrome_bw"] .bg-slate-800\/80,
+[data-theme="monochrome_bw"] .bg-slate-800\/60,
+[data-theme="monochrome_bw"] .bg-slate-800\/50,
+[data-theme="monochrome_bw"] .bg-slate-800\/40,
+[data-theme="monochrome_bw"] .bg-slate-800\/30 {
+  background-color: #1c1c1f !important;
+}
+
+[data-theme="titanium_grey"] .bg-slate-800,
+[data-theme="titanium_grey"] .bg-slate-800\/80,
+[data-theme="titanium_grey"] .bg-slate-800\/60,
+[data-theme="titanium_grey"] .bg-slate-800\/50,
+[data-theme="titanium_grey"] .bg-slate-800\/40,
+[data-theme="titanium_grey"] .bg-slate-800\/30 {
+  background-color: #2d3036 !important;
 }
 
 [data-theme="amoled_black"] .hover\:bg-slate-700:hover,
 [data-theme="amoled_black"] .bg-slate-700,
 [data-theme="amoled_black"] .bg-slate-700\/80,
-[data-theme="amoled_black"] .bg-slate-700\/60 {
-  background-color: #27272a !important;
+[data-theme="amoled_black"] .bg-slate-700\/60,
+[data-theme="monochrome_bw"] .hover\:bg-slate-700:hover,
+[data-theme="monochrome_bw"] .bg-slate-700,
+[data-theme="monochrome_bw"] .bg-slate-700\/80,
+[data-theme="monochrome_bw"] .bg-slate-700\/60 {
+  background-color: #2e2e33 !important;
+}
+
+[data-theme="titanium_grey"] .hover\:bg-slate-700:hover,
+[data-theme="titanium_grey"] .bg-slate-700,
+[data-theme="titanium_grey"] .bg-slate-700\/80,
+[data-theme="titanium_grey"] .bg-slate-700\/60 {
+  background-color: #3d4149 !important;
 }
 
 [data-theme] .bg-cyan-600 {

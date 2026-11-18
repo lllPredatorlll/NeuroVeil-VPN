@@ -160,6 +160,34 @@ function getThemeStyles(id: string, vars: ThemeVars): ThemeStyles {
         activeNavGradient: "bg-gradient-to-r from-sky-500/20 to-blue-500/15 text-sky-800 font-semibold border border-sky-500/40 shadow-sm",
         brandGlow: "shadow-sky-500/20 border-sky-500/40",
       };
+    case "monochrome_bw":
+      return {
+        appBg: vars.bgApp,
+        sidebarBg: vars.bgSidebar,
+        topbarBg: vars.bgSidebar,
+        cardBg: vars.bgCard,
+        cardBorder: vars.borderCard,
+        cardAltBg: vars.bgCardAlt,
+        accentText: "text-white",
+        accentGlow: "shadow-white/20",
+        buttonPrimary: "bg-gradient-to-r from-neutral-200 to-zinc-300 hover:from-white hover:to-neutral-200 !text-black font-bold border border-white shadow-md",
+        activeNavGradient: "bg-gradient-to-r from-white/20 to-white/5 text-white border border-white/40 shadow-sm",
+        brandGlow: "shadow-white/20 border-white/50",
+      };
+    case "titanium_grey":
+      return {
+        appBg: vars.bgApp,
+        sidebarBg: vars.bgSidebar,
+        topbarBg: vars.bgSidebar,
+        cardBg: vars.bgCard,
+        cardBorder: vars.borderCard,
+        cardAltBg: vars.bgCardAlt,
+        accentText: "text-zinc-200",
+        accentGlow: "shadow-zinc-400/20",
+        buttonPrimary: "bg-gradient-to-r from-zinc-600 to-neutral-700 hover:from-zinc-500 hover:to-neutral-600 text-white border border-zinc-500/60 shadow-md",
+        activeNavGradient: "bg-gradient-to-r from-zinc-500/25 to-zinc-600/10 text-zinc-100 border border-zinc-400/40 shadow-sm",
+        brandGlow: "shadow-zinc-400/20 border-zinc-400/40",
+      };
     case "cyber_quartz":
       return {
         appBg: vars.bgApp,
@@ -509,6 +537,66 @@ export const THEMES: Theme[] = [
       btnGradToHover: "#4338ca",
       navGradFrom: "rgba(124, 58, 237, 0.15)",
       navGradTo: "rgba(99, 102, 241, 0.08)",
+    }
+  ),
+  createTheme(
+    "monochrome_bw",
+    "Monochrome B&W (Чёрно-белая)",
+    "Строгий контрастный чёрно-белый монохром без цветных оттенков",
+    "Чёрно-белая",
+    {
+      bg: "#050505",
+      card: "#121212",
+      accent: "#ffffff",
+      secondary: "#a3a3a3",
+    },
+    {
+      bgApp: "#050505",
+      bgSidebar: "#0a0a0a",
+      bgCard: "#121212",
+      bgCardAlt: "#080808",
+      bgInput: "#171717",
+      borderCard: "rgba(255, 255, 255, 0.22)",
+      colorAccent: "#ffffff",
+      colorAccentBorder: "rgba(255, 255, 255, 0.45)",
+      colorAccentBg: "rgba(255, 255, 255, 0.12)",
+      colorAccentGlow: "rgba(255, 255, 255, 0.28)",
+      btnGradFrom: "#333333",
+      btnGradTo: "#1f1f1f",
+      btnGradFromHover: "#4a4a4a",
+      btnGradToHover: "#2e2e2e",
+      navGradFrom: "rgba(255, 255, 255, 0.20)",
+      navGradTo: "rgba(255, 255, 255, 0.06)",
+    }
+  ),
+  createTheme(
+    "titanium_grey",
+    "Titanium Grey (Серая)",
+    "Сбалансированный графитово-серый индустриальный стиль со стальными акцентами",
+    "Серая Сталь",
+    {
+      bg: "#18191c",
+      card: "#232529",
+      accent: "#d4d4d8",
+      secondary: "#71717a",
+    },
+    {
+      bgApp: "#18191c",
+      bgSidebar: "#1e2024",
+      bgCard: "#232529",
+      bgCardAlt: "#141518",
+      bgInput: "#1b1d21",
+      borderCard: "rgba(161, 161, 170, 0.25)",
+      colorAccent: "#e4e4e7",
+      colorAccentBorder: "rgba(212, 212, 216, 0.38)",
+      colorAccentBg: "rgba(161, 161, 170, 0.15)",
+      colorAccentGlow: "rgba(212, 212, 216, 0.25)",
+      btnGradFrom: "#52525b",
+      btnGradTo: "#3f3f46",
+      btnGradFromHover: "#71717a",
+      btnGradToHover: "#52525b",
+      navGradFrom: "rgba(212, 212, 216, 0.20)",
+      navGradTo: "rgba(113, 113, 122, 0.08)",
     }
   ),
 ];
