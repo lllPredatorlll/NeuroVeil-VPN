@@ -67,6 +67,8 @@ export interface VpnProfile {
   total_up_bytes?: number;
   total_down_bytes?: number;
   container_id?: string | null;
+  multi_group_id?: string | null;
+  multi_group_name?: string | null;
 }
 
 export interface RoutingConfig {
@@ -244,9 +246,19 @@ export interface VpsContainerInfo {
   is_legacy?: boolean;
 }
 
+export interface VpsMultiProtocolGroup {
+  id: string;
+  name: string;
+  container_id: string;
+  created_at: string;
+  protocols: string[];
+  profile_ids: string[];
+}
+
 export interface VpsAdminState {
   containers: VpsContainerInfo[];
   profiles: VpnProfile[];
+  multi_groups?: VpsMultiProtocolGroup[];
 }
 
 export interface AppUpdateInfo {

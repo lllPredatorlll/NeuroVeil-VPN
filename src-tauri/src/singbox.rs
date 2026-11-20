@@ -1,7 +1,7 @@
 use crate::models::{is_awg_protocol, RoutingConfig, VpnProfile};
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 #[cfg(target_os = "windows")]
@@ -1635,6 +1635,703 @@ pub fn generate_mobile_singbox_config(profile: &VpnProfile, routing: &RoutingCon
     cfg
 }
 
+fn multi_protocol_short_label(protocol: &str) -> &'static str {
+    match protocol {
+        "vless" => "VLESS",
+        "vless_ws" => "CDN-WS",
+        "webrtc" => "WebRTC",
+        "hysteria2" => "Hysteria2",
+        "tuic" => "TUIC",
+        "shadowtls" => "ShadowTLS",
+        "shadowsocks" => "SS-2022",
+        "ssh" => "SSH",
+        "amneziawg" => "AWG 3.1",
+        "awg_quic" => "AWG+QUIC",
+        "awg_vless" => "AWG+Reality",
+        "awg2" => "AWG 2.0",
+        "wireguard" | "wg" => "WireGuard",
+        _ => "VPN",
+    }
+}
+
+fn sanitize_bundle_stem(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('_');
+    if trimmed.is_empty() {
+        "neuroveil_multi".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn build_wireguard_endpoint(
+    profile: &VpnProfile,
+    ep_tag: &str,
+    detour_tag: &str,
+    active_peer_port: u16,
+    include_listen_port: bool,
+) -> (Value, Option<Value>) {
+    let mut peer_obj = json!({
+        "address": profile.server,
+        "port": active_peer_port,
+        "public_key": profile.awg_public_key.as_deref().unwrap_or(&profile.password),
+        "allowed_ips": ["0.0.0.0/0", "::/0"]
+    });
+    if profile.protocol != "awg2" {
+        let pka_int: u32 = if let Some(ref pka) = profile.awg_persistent_keepalive {
+            let trimmed = pka.trim();
+            if let Ok(num) = trimmed.parse::<u32>() {
+                num
+            } else if let Some(first) = trimmed
+                .split('-')
+                .next()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+            {
+                first
+            } else {
+                25
+            }
+        } else {
+            25
+        };
+        peer_obj["persistent_keepalive_interval"] = json!(pka_int);
+    } else if let Some(ref pka) = profile.awg_persistent_keepalive {
+        let trimmed = pka.trim();
+        if let Ok(num) = trimmed.parse::<u32>() {
+            if num > 0 {
+                peer_obj["persistent_keepalive_interval"] = json!(num);
+            }
+        }
+    }
+
+    if let Some(ref psk) = profile.awg_preshared_key {
+        if !psk.trim().is_empty() {
+            peer_obj["pre_shared_key"] = json!(psk.trim());
+        }
+    }
+
+    let is_plain_wg = profile.protocol == "wireguard"
+        || profile.protocol == "wg"
+        || profile.protocol == "awg2"
+        || (profile.awg_jc.is_none()
+            && profile.awg_s1.is_none()
+            && profile.awg_header_protection_key.is_none());
+
+    let mut ep = json!({
+        "type": "wireguard",
+        "tag": ep_tag,
+        "address": [profile.awg_local_address.as_deref().unwrap_or(if profile.protocol == "awg2" { "10.8.1.2/24" } else { "10.8.0.2/32" })],
+        "private_key": profile.awg_private_key.as_deref().unwrap_or(&profile.password),
+        "mtu": 1420,
+        "peers": [peer_obj]
+    });
+
+    if include_listen_port && profile.protocol != "awg_vless" {
+        if let Some(lp) = profile.listen_port {
+            if lp > 0 {
+                ep["listen_port"] = json!(lp);
+            }
+        }
+    }
+
+    if !is_plain_wg {
+        ep["mtu"] = json!(1280);
+        ep["jc"] = json!(profile.awg_jc.unwrap_or(4));
+        ep["jmin"] = json!(profile.awg_jmin.unwrap_or(40));
+        ep["jmax"] = json!(profile.awg_jmax.unwrap_or(70));
+        ep["s1"] = json!(profile.awg_s1.unwrap_or(15));
+        ep["s2"] = json!(profile.awg_s2.unwrap_or(25));
+        let h1_val = profile
+            .awg_h1
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(1);
+        let h2_val = profile
+            .awg_h2
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(2);
+        let h3_val = profile
+            .awg_h3
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(3);
+        let h4_val = profile
+            .awg_h4
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(4);
+        ep["h1"] = json!(h1_val);
+        ep["h2"] = json!(h2_val);
+        ep["h3"] = json!(h3_val);
+        ep["h4"] = json!(h4_val);
+        if let Some(s3) = profile.awg_s3 {
+            ep["s3"] = json!(s3);
+        }
+        if let Some(s4) = profile.awg_s4 {
+            ep["s4"] = json!(s4);
+        }
+
+        if let Some(ref hpk) = profile.awg_header_protection_key {
+            let trimmed_hpk = hpk.trim();
+            if !trimmed_hpk.is_empty() {
+                ep["header_protection_key"] = json!(trimmed_hpk);
+                let s1 = profile.awg_s1.unwrap_or(12).max(12);
+                let s2 = profile.awg_s2.unwrap_or(12).max(12);
+                let s3 = profile.awg_s3.unwrap_or(12).max(12);
+                let s4 = profile.awg_s4.unwrap_or(12).max(12);
+                ep["s1"] = json!(s1);
+                ep["s2"] = json!(s2);
+                ep["s3"] = json!(s3);
+                ep["s4"] = json!(s4);
+
+                if let Some(ref r) = profile.awg_rekey_after_time {
+                    if !r.trim().is_empty() {
+                        ep["rekey_after_time"] = json!(r.trim());
+                    }
+                }
+                if let Some(ref r) = profile.awg_rekey_timeout {
+                    if !r.trim().is_empty() {
+                        ep["rekey_timeout"] = json!(r.trim());
+                    }
+                }
+                if let Some(ref r) = profile.awg_reject_after_time {
+                    if !r.trim().is_empty() {
+                        ep["reject_after_time"] = json!(r.trim());
+                    }
+                }
+                if let Some(ref r) = profile.awg_keepalive_timeout {
+                    if !r.trim().is_empty() {
+                        ep["keepalive_timeout"] = json!(r.trim());
+                    }
+                }
+            }
+        }
+
+        if let Some(rt) = profile.awg_random_trailers {
+            ep["random_trailers"] = json!(rt);
+        }
+        if let Some(dc) = profile.awg_disable_cookies {
+            ep["disable_cookies"] = json!(dc);
+        }
+        if let Some(ref mha) = profile.awg_max_handshake_attempts {
+            let trimmed = mha.trim();
+            if let Ok(num) = trimmed.parse::<u32>() {
+                ep["max_handshake_attempts"] = json!(num);
+            } else if !trimmed.is_empty() {
+                ep["max_handshake_attempts"] = json!(trimmed);
+            }
+        }
+
+        if let Some(ref i1) = profile.awg_i1 {
+            if !i1.trim().is_empty() {
+                ep["i1"] = json!(i1.trim());
+            }
+        }
+        if let Some(ref i2) = profile.awg_i2 {
+            if !i2.trim().is_empty() {
+                ep["i2"] = json!(i2.trim());
+            }
+        }
+        if let Some(ref i3) = profile.awg_i3 {
+            if !i3.trim().is_empty() {
+                ep["i3"] = json!(i3.trim());
+            }
+        }
+        if let Some(ref i4) = profile.awg_i4 {
+            if !i4.trim().is_empty() {
+                ep["i4"] = json!(i4.trim());
+            }
+        }
+    }
+
+    let mut vless_detour_opt = None;
+    if profile.protocol == "awg_vless" {
+        ep["detour"] = json!(detour_tag);
+        let flow = profile.reality_flow.as_deref().unwrap_or("xtls-rprx-vision");
+        let tls_frag = profile.tls_fragment.unwrap_or(true);
+        let vless_sni = if !profile.sni.trim().is_empty() {
+            profile.sni.trim()
+        } else {
+            "www.microsoft.com"
+        };
+        let mut tls_obj = json!({
+            "enabled": true,
+            "server_name": vless_sni,
+            "utls": {
+                "enabled": true,
+                "fingerprint": "chrome"
+            }
+        });
+        if tls_frag {
+            tls_obj["fragment"] = json!(true);
+            tls_obj["record_fragment"] = json!(true);
+            tls_obj["fragment_fallback_delay"] = json!("500ms");
+        }
+        if let Some(ref pbk) = profile.reality_public_key {
+            if !pbk.trim().is_empty() {
+                let mut reality_obj = json!({
+                    "enabled": true,
+                    "public_key": pbk.trim()
+                });
+                if let Some(ref sid) = profile.reality_short_id {
+                    if !sid.trim().is_empty() {
+                        reality_obj["short_id"] = json!(sid.trim());
+                    }
+                }
+                tls_obj["reality"] = reality_obj;
+            }
+        }
+        vless_detour_opt = Some(json!({
+            "type": "vless",
+            "tag": detour_tag,
+            "server": profile.server,
+            "server_port": profile.vless_port.unwrap_or(443),
+            "uuid": profile.uuid.clone().unwrap_or_else(|| profile.password.clone()),
+            "flow": flow,
+            "packet_encoding": "xudp",
+            "tls": tls_obj
+        }));
+    }
+
+    (ep, vless_detour_opt)
+}
+
+pub fn generate_multi_singbox_config(
+    profiles: &[VpnProfile],
+    group_name: &str,
+    routing: &RoutingConfig,
+) -> Value {
+    let mut endpoints = Vec::new();
+    let mut outbounds = Vec::new();
+    let mut proto_tags = Vec::new();
+    let mut used_tags = std::collections::HashSet::new();
+    let mut server_excludes: Vec<String> = Vec::new();
+
+    let base_title = group_name.trim();
+
+    for (idx, prof) in profiles.iter().enumerate() {
+        let short = multi_protocol_short_label(&prof.protocol);
+        let prefix = if !base_title.is_empty() {
+            base_title.to_string()
+        } else {
+            prof.name
+                .split(" (")
+                .next()
+                .unwrap_or(&prof.name)
+                .trim()
+                .to_string()
+        };
+        let mut tag = if prefix.is_empty() {
+            format!("{} #{}", short, idx + 1)
+        } else {
+            format!("{} [{}]", prefix, short)
+        };
+        if used_tags.contains(&tag)
+            || matches!(tag.as_str(), "proxy" | "auto" | "direct" | "block")
+        {
+            tag = format!("{} [{} #{}]", prefix, short, idx + 1);
+        }
+        used_tags.insert(tag.clone());
+
+        if prof.server.parse::<std::net::Ipv4Addr>().is_ok() {
+            let cidr = format!("{}/32", prof.server);
+            if !server_excludes.contains(&cidr) {
+                server_excludes.push(cidr);
+            }
+        }
+
+        if is_awg_protocol(&prof.protocol) {
+            let detour_tag = format!("vless-detour-{}", idx + 1);
+            let (ep, detour_opt) =
+                build_wireguard_endpoint(prof, &tag, &detour_tag, prof.port, false);
+            endpoints.push(ep);
+            proto_tags.push(tag.clone());
+            if let Some(d_ob) = detour_opt {
+                outbounds.push(d_ob);
+            }
+        } else {
+            let mut ob = build_single_outbound(prof, &tag, None, None);
+            if let Some(obj) = ob.as_object_mut() {
+                obj.remove("inet4_bind_address");
+            }
+            outbounds.push(ob);
+            proto_tags.push(tag.clone());
+
+            if prof.protocol == "shadowtls" {
+                let st_sni = prof.shadowtls_sni.as_deref().unwrap_or(if !prof.sni.is_empty() {
+                    &prof.sni
+                } else {
+                    "www.microsoft.com"
+                });
+                let st_pass = prof.shadowtls_password.as_deref().unwrap_or(&prof.password);
+                outbounds.push(json!({
+                    "type": "shadowtls",
+                    "tag": format!("{}-st-detour", tag),
+                    "server": prof.server,
+                    "server_port": prof.port,
+                    "version": 3,
+                    "password": st_pass,
+                    "tls": {
+                        "enabled": true,
+                        "server_name": st_sni,
+                        "utls": {
+                            "enabled": true,
+                            "fingerprint": "chrome"
+                        }
+                    }
+                }));
+            }
+        }
+    }
+
+    if proto_tags.is_empty() {
+        proto_tags.push("direct".to_string());
+    } else {
+        outbounds.push(json!({
+            "type": "urltest",
+            "tag": "auto",
+            "outbounds": proto_tags.clone(),
+            "url": "https://www.gstatic.com/generate_204",
+            "interval": "3m",
+            "tolerance": 50
+        }));
+
+        let mut selector_outbounds = vec!["auto".to_string()];
+        selector_outbounds.extend(proto_tags.clone());
+        outbounds.push(json!({
+            "type": "selector",
+            "tag": "proxy",
+            "outbounds": selector_outbounds,
+            "default": proto_tags[0]
+        }));
+    }
+
+    outbounds.push(json!({
+        "type": "direct",
+        "tag": "direct"
+    }));
+    outbounds.push(json!({
+        "type": "block",
+        "tag": "block"
+    }));
+
+    let mut tun_map = serde_json::Map::new();
+    tun_map.insert("type".to_string(), json!("tun"));
+    tun_map.insert("tag".to_string(), json!("tun-in"));
+    tun_map.insert(
+        "address".to_string(),
+        json!(["172.19.0.1/28", "fdfe:dcba:9876::1/126"]),
+    );
+    tun_map.insert("mtu".to_string(), json!(9000));
+    tun_map.insert("auto_route".to_string(), json!(true));
+    tun_map.insert("strict_route".to_string(), json!(false));
+    tun_map.insert("stack".to_string(), json!("mixed"));
+    tun_map.insert("endpoint_independent_nat".to_string(), json!(true));
+    tun_map.insert("udp_mapping".to_string(), json!("endpoint_independent"));
+    tun_map.insert("udp_filtering".to_string(), json!("endpoint_independent"));
+    if !server_excludes.is_empty() {
+        tun_map.insert("route_exclude_address".to_string(), json!(server_excludes));
+    }
+    let inbounds = vec![Value::Object(tun_map)];
+
+    let mut route_rules = vec![
+        json!({
+            "port": 53,
+            "action": "hijack-dns"
+        }),
+        json!({
+            "action": "sniff",
+            "timeout": "300ms"
+        }),
+        json!({
+            "protocol": "dns",
+            "action": "hijack-dns"
+        }),
+    ];
+    if routing.block_ipv6 {
+        route_rules.push(json!({
+            "ip_version": 6,
+            "outbound": "block"
+        }));
+    }
+    route_rules.push(json!({
+        "ip_is_private": true,
+        "outbound": "direct"
+    }));
+    route_rules.push(json!({
+        "domain_suffix": ["steamcontent.com", "steamserver.net"],
+        "outbound": "direct"
+    }));
+
+    let mut dns_rules = vec![json!({
+        "domain_suffix": ["steamcontent.com", "steamserver.net"],
+        "server": "dns-direct"
+    })];
+
+    let final_target = if routing.split_tunneling && routing.default_outbound == "direct" {
+        "direct"
+    } else {
+        "proxy"
+    };
+
+    if routing.split_tunneling {
+        let (proxy_proc_routes, proxy_proc_dns) =
+            build_process_rules(&routing.proxy_processes, "proxy");
+        route_rules.extend(proxy_proc_routes);
+        dns_rules.extend(proxy_proc_dns);
+
+        let (direct_proc_routes, direct_proc_dns) =
+            build_process_rules(&routing.direct_processes, "direct");
+        route_rules.extend(direct_proc_routes);
+        dns_rules.extend(direct_proc_dns);
+
+        let mut domain_suffixes = Vec::new();
+        let mut full_domains = Vec::new();
+        for d in &routing.direct_domains {
+            let trimmed = d.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with('.') {
+                domain_suffixes.push(trimmed.to_string());
+            } else {
+                domain_suffixes.push(format!(".{}", trimmed));
+                full_domains.push(trimmed.to_string());
+            }
+        }
+
+        if !routing.proxy_domains.is_empty() {
+            let mut proxy_suffixes = Vec::new();
+            for d in &routing.proxy_domains {
+                let t = d.trim().trim_start_matches('.');
+                if !t.is_empty() {
+                    proxy_suffixes.push(t.to_string());
+                }
+            }
+            if !proxy_suffixes.is_empty() {
+                dns_rules.push(json!({
+                    "domain_suffix": proxy_suffixes.clone(),
+                    "server": "dns-remote"
+                }));
+                route_rules.push(json!({
+                    "domain_suffix": proxy_suffixes,
+                    "outbound": "proxy"
+                }));
+            }
+        }
+
+        if !domain_suffixes.is_empty() || !full_domains.is_empty() {
+            dns_rules.push(json!({
+                "domain_suffix": domain_suffixes.clone(),
+                "domain": full_domains.clone(),
+                "server": "dns-direct"
+            }));
+            route_rules.push(json!({
+                "domain_suffix": domain_suffixes,
+                "domain": full_domains,
+                "outbound": "direct"
+            }));
+        }
+
+        if !routing.proxy_ips.is_empty() {
+            let proxy_cidrs: Vec<String> = routing
+                .proxy_ips
+                .iter()
+                .map(|ip| ip.trim())
+                .filter(|ip| !ip.is_empty())
+                .map(|ip| {
+                    if ip.contains('/') {
+                        ip.to_string()
+                    } else {
+                        format!("{}/32", ip)
+                    }
+                })
+                .collect();
+            if !proxy_cidrs.is_empty() {
+                route_rules.push(json!({
+                    "ip_cidr": proxy_cidrs,
+                    "outbound": "proxy"
+                }));
+            }
+        }
+
+        if !routing.direct_ips.is_empty() {
+            let direct_cidrs: Vec<String> = routing
+                .direct_ips
+                .iter()
+                .map(|ip| ip.trim())
+                .filter(|ip| !ip.is_empty())
+                .map(|ip| {
+                    if ip.contains('/') {
+                        ip.to_string()
+                    } else {
+                        format!("{}/32", ip)
+                    }
+                })
+                .collect();
+            if !direct_cidrs.is_empty() {
+                route_rules.push(json!({
+                    "ip_cidr": direct_cidrs,
+                    "outbound": "direct"
+                }));
+            }
+        }
+    }
+
+    let final_dns = if final_target == "direct" {
+        "dns-direct"
+    } else {
+        "dns-remote"
+    };
+
+    let remote_dns_host = routing
+        .remote_dns
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("udp://")
+        .split('/')
+        .next()
+        .unwrap_or("1.1.1.1")
+        .to_string();
+
+    let direct_dns_host = routing
+        .direct_dns
+        .trim()
+        .trim_start_matches("udp://")
+        .split('/')
+        .next()
+        .unwrap_or("77.88.8.8")
+        .to_string();
+
+    let all_tcp_only = !profiles.is_empty()
+        && profiles
+            .iter()
+            .all(|p| p.protocol == "ssh" || p.protocol == "shadowtls");
+    let remote_dns_type = if all_tcp_only { "tcp" } else { "udp" };
+
+    let mut cfg = json!({
+        "log": {
+            "level": "info",
+            "timestamp": true
+        },
+        "dns": {
+            "servers": [
+                {
+                    "type": remote_dns_type,
+                    "tag": "dns-remote",
+                    "server": remote_dns_host,
+                    "detour": "proxy"
+                },
+                {
+                    "type": "udp",
+                    "tag": "dns-direct",
+                    "server": direct_dns_host
+                }
+            ],
+            "rules": dns_rules,
+            "final": final_dns,
+            "strategy": "ipv4_only",
+            "reverse_mapping": true
+        },
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": {
+            "rules": route_rules,
+            "final": final_target,
+            "auto_detect_interface": true,
+            "override_android_vpn": true,
+            "default_domain_resolver": "dns-direct"
+        }
+    });
+
+    if !endpoints.is_empty() {
+        cfg["endpoints"] = json!(endpoints);
+    }
+    cfg
+}
+
+pub fn build_multi_zip_bytes(
+    profiles: &[VpnProfile],
+    group_name: &str,
+    routing: &RoutingConfig,
+) -> Result<Vec<u8>, String> {
+    if profiles.is_empty() {
+        return Err("Список профилей пуст".to_string());
+    }
+    let stem = sanitize_bundle_stem(group_name);
+    let cursor = Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let multi_json = generate_multi_singbox_config(profiles, group_name, routing);
+    let multi_json_str = serde_json::to_string_pretty(&multi_json)
+        .map_err(|e| format!("Ошибка сериализации JSON: {}", e))?;
+    writer
+        .start_file(format!("{}_multi.json", stem), opts)
+        .map_err(|e| format!("Ошибка создания файла в архиве: {}", e))?;
+    writer
+        .write_all(multi_json_str.as_bytes())
+        .map_err(|e| format!("Ошибка записи JSON в архив: {}", e))?;
+
+    let mut keys_txt = format!(
+        "# NeuroVeil VPN Multi-Protocol Bundle: {}\n# Protocols: {}\n\n",
+        group_name.trim(),
+        profiles.len()
+    );
+    for p in profiles {
+        let uri = if p.uri.trim().is_empty() {
+            build_profile_uri(p)
+        } else {
+            p.uri.clone()
+        };
+        keys_txt.push_str(&format!("# {}\n{}\n\n", p.name, uri));
+    }
+    writer
+        .start_file(format!("{}_keys.txt", stem), opts)
+        .map_err(|e| format!("Ошибка создания _keys.txt в архиве: {}", e))?;
+    writer
+        .write_all(keys_txt.as_bytes())
+        .map_err(|e| format!("Ошибка записи _keys.txt в архив: {}", e))?;
+
+    for (idx, p) in profiles.iter().enumerate() {
+        if is_awg_protocol(&p.protocol) {
+            let proto_slug = match p.protocol.as_str() {
+                "awg_quic" => "awg_quic",
+                "awg_vless" => "awg_reality",
+                "awg2" => "awg2",
+                "wireguard" | "wg" => "wireguard",
+                _ => "awg31",
+            };
+            let conf_name = format!("{}_{}_{}.conf", stem, proto_slug, idx + 1);
+            let conf_body = format!("# Name: {}\n{}", p.name, build_awg_conf(p));
+            writer
+                .start_file(conf_name, opts)
+                .map_err(|e| format!("Ошибка создания .conf в архиве: {}", e))?;
+            writer
+                .write_all(conf_body.as_bytes())
+                .map_err(|e| format!("Ошибка записи .conf в архив: {}", e))?;
+        }
+    }
+
+    let finished = writer
+        .finish()
+        .map_err(|e| format!("Ошибка финализации ZIP-архива: {}", e))?;
+    Ok(finished.into_inner())
+}
+
 pub fn build_profile_uri(profile: &VpnProfile) -> String {
     let encoded_name = urlencoding::encode(&profile.name).replace('+', "%20");
     let insecure_val = if profile.insecure { "1" } else { "0" };
@@ -3199,6 +3896,681 @@ pub fn parse_amnezia_conf(text: &str) -> Result<VpnProfile, String> {
     Ok(prof)
 }
 
+fn infer_multi_group_name(profiles: &[VpnProfile]) -> String {
+    let extract_prefix = |name: &str| -> String {
+        let s = name.trim();
+        let before_bracket = s.split(" [").next().unwrap_or(s).trim();
+        let before_paren = before_bracket.split(" (").next().unwrap_or(before_bracket).trim();
+        before_paren.to_string()
+    };
+    let prefixes: Vec<String> = profiles
+        .iter()
+        .map(|p| extract_prefix(&p.name))
+        .filter(|s| !s.is_empty())
+        .collect();
+    if let Some(first) = prefixes.first() {
+        if prefixes.iter().filter(|p| *p == first).count() >= 2 {
+            return first.clone();
+        }
+    }
+    "Мульти-протокол".to_string()
+}
+
+fn finalize_multi_group(profiles: &mut [VpnProfile], override_group_name: Option<&str>) {
+    if profiles.len() < 2 {
+        return;
+    }
+    let existing_gid = profiles.iter().find_map(|p| p.multi_group_id.clone());
+    let existing_gname = profiles.iter().find_map(|p| p.multi_group_name.clone());
+    let gid = existing_gid.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let gname = override_group_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or(existing_gname)
+        .unwrap_or_else(|| infer_multi_group_name(profiles));
+
+    for p in profiles.iter_mut() {
+        if p.multi_group_id.is_none() {
+            p.multi_group_id = Some(gid.clone());
+        }
+        if p.multi_group_name.is_none() {
+            p.multi_group_name = Some(gname.clone());
+        }
+    }
+}
+
+fn parse_singbox_wireguard_endpoint(ep: &Value, outbounds: &[Value]) -> Option<VpnProfile> {
+    if ep["type"].as_str() != Some("wireguard") {
+        return None;
+    }
+    let peer = ep["peers"].as_array().and_then(|a| a.first())?;
+    let server = peer["address"].as_str().unwrap_or("").trim().to_string();
+    if server.is_empty() {
+        return None;
+    }
+    let port = peer["port"].as_u64().unwrap_or(51820) as u16;
+    let pub_key = peer["public_key"].as_str().map(|s| s.to_string());
+    let psk = peer["pre_shared_key"].as_str().map(|s| s.to_string());
+    let priv_key = ep["private_key"].as_str().unwrap_or("").to_string();
+    let local_addr = ep["address"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let listen_port = ep["listen_port"].as_u64().map(|n| n as u16);
+
+    let jc = ep["jc"].as_u64().map(|n| n as u16);
+    let jmin = ep["jmin"].as_u64().map(|n| n as u16);
+    let jmax = ep["jmax"].as_u64().map(|n| n as u16);
+    let s1 = ep["s1"].as_u64().map(|n| n as u16);
+    let s2 = ep["s2"].as_u64().map(|n| n as u16);
+    let s3 = ep["s3"].as_u64().map(|n| n as u16);
+    let s4 = ep["s4"].as_u64().map(|n| n as u16);
+    let h1 = ep["h1"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| ep["h1"].as_u64().map(|n| n.to_string()));
+    let h2 = ep["h2"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| ep["h2"].as_u64().map(|n| n.to_string()));
+    let h3 = ep["h3"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| ep["h3"].as_u64().map(|n| n.to_string()));
+    let h4 = ep["h4"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| ep["h4"].as_u64().map(|n| n.to_string()));
+    let hpk = ep["header_protection_key"].as_str().map(|s| s.to_string());
+    let rekey_after_time = ep["rekey_after_time"].as_str().map(|s| s.to_string());
+    let rekey_timeout = ep["rekey_timeout"].as_str().map(|s| s.to_string());
+    let reject_after_time = ep["reject_after_time"].as_str().map(|s| s.to_string());
+    let keepalive_timeout = ep["keepalive_timeout"].as_str().map(|s| s.to_string());
+    let max_handshake_attempts = ep["max_handshake_attempts"]
+        .as_u64()
+        .map(|n| n.to_string())
+        .or_else(|| ep["max_handshake_attempts"].as_str().map(|s| s.to_string()));
+    let random_trailers = ep["random_trailers"].as_bool();
+    let disable_cookies = ep["disable_cookies"].as_bool();
+    let persistent_keepalive = peer["persistent_keepalive_interval"]
+        .as_u64()
+        .map(|n| n.to_string());
+    let i1 = ep["i1"].as_str().map(|s| s.to_string());
+    let i2 = ep["i2"].as_str().map(|s| s.to_string());
+    let i3 = ep["i3"].as_str().map(|s| s.to_string());
+    let i4 = ep["i4"].as_str().map(|s| s.to_string());
+
+    let raw_tag = ep["tag"].as_str().unwrap_or("");
+    let name = if !raw_tag.trim().is_empty() && raw_tag != "proxy" {
+        raw_tag.trim().to_string()
+    } else {
+        format!("AmneziaWG ({})", server)
+    };
+
+    let detour_vless = ep["detour"].as_str().and_then(|d_tag| {
+        outbounds
+            .iter()
+            .find(|o| o["tag"].as_str() == Some(d_tag) && o["type"].as_str() == Some("vless"))
+    });
+
+    let (protocol, awg_version, vless_port, uuid, reality_public_key, reality_short_id, reality_flow, sni) =
+        if let Some(vo) = detour_vless {
+            let vp = vo["server_port"].as_u64().map(|p| p as u16);
+            let uid = vo["uuid"].as_str().map(|s| s.to_string());
+            let pbk = vo["tls"]["reality"]["public_key"]
+                .as_str()
+                .map(|s| s.to_string());
+            let sid = vo["tls"]["reality"]["short_id"]
+                .as_str()
+                .or_else(|| {
+                    vo["tls"]["reality"]["short_id"]
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|v| v.as_str())
+                })
+                .map(|s| s.to_string());
+            let flow = vo["flow"].as_str().map(|s| s.to_string());
+            let vsni = vo["tls"]["server_name"].as_str().unwrap_or("").to_string();
+            (
+                "awg_vless".to_string(),
+                Some("3.1".to_string()),
+                vp,
+                uid,
+                pbk,
+                sid,
+                flow,
+                vsni,
+            )
+        } else if raw_tag.contains("[AWG+QUIC]") {
+            (
+                "awg_quic".to_string(),
+                Some("3.1".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+            )
+        } else if raw_tag.contains("[AWG 2.0]") {
+            (
+                "awg2".to_string(),
+                Some("2.0".to_string()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+            )
+        } else if raw_tag.contains("[WireGuard]") {
+            (
+                "wireguard".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+            )
+        } else if hpk.is_some() || s3.is_some() || jc.is_some() || s1.is_some() {
+            let ver = if hpk.is_some() || s3.is_some() {
+                Some("3.1".to_string())
+            } else {
+                Some("2.0".to_string())
+            };
+            (
+                "amneziawg".to_string(),
+                ver,
+                None,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+            )
+        } else {
+            (
+                "wireguard".to_string(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                String::new(),
+            )
+        };
+
+    let is_clean = protocol == "wireguard" || protocol == "awg2";
+    let mut prof = VpnProfile {
+        id: Uuid::new_v4().to_string(),
+        name,
+        protocol: protocol.clone(),
+        server,
+        port,
+        vless_port,
+        listen_port,
+        sni,
+        insecure: false,
+        password: priv_key.clone(),
+        uuid,
+        obfs_password: None,
+        hop_ports: if is_clean {
+            None
+        } else {
+            Some("20000:65000".to_string())
+        },
+        reality_public_key,
+        reality_short_id,
+        reality_flow,
+        awg_private_key: Some(priv_key),
+        awg_public_key: pub_key,
+        awg_preshared_key: psk,
+        awg_local_address: local_addr.or_else(|| {
+            Some(if protocol == "awg2" {
+                "10.8.1.2/24".to_string()
+            } else {
+                "10.8.0.2/32".to_string()
+            })
+        }),
+        awg_jc: if is_clean { jc } else { jc.or(Some(4)) },
+        awg_jmin: if is_clean { jmin } else { jmin.or(Some(40)) },
+        awg_jmax: if is_clean { jmax } else { jmax.or(Some(70)) },
+        awg_s1: if is_clean { s1 } else { s1.or(Some(15)) },
+        awg_s2: if is_clean { s2 } else { s2.or(Some(25)) },
+        awg_s3: s3,
+        awg_s4: s4,
+        awg_h1: if is_clean { h1 } else { h1.or_else(|| Some("1".to_string())) },
+        awg_h2: if is_clean { h2 } else { h2.or_else(|| Some("2".to_string())) },
+        awg_h3: if is_clean { h3 } else { h3.or_else(|| Some("3".to_string())) },
+        awg_h4: if is_clean { h4 } else { h4.or_else(|| Some("4".to_string())) },
+        awg_header_protection_key: hpk,
+        awg_rekey_after_time: rekey_after_time,
+        awg_rekey_timeout: rekey_timeout,
+        awg_reject_after_time: reject_after_time,
+        awg_keepalive_timeout: keepalive_timeout,
+        awg_max_handshake_attempts: max_handshake_attempts,
+        awg_random_trailers: random_trailers,
+        awg_disable_cookies: disable_cookies,
+        awg_persistent_keepalive: persistent_keepalive,
+        awg_version,
+        awg_i1: i1,
+        awg_i2: i2,
+        awg_i3: i3,
+        awg_i4: i4,
+        awg_hop_ports: if is_clean {
+            None
+        } else {
+            Some("20000:65000".to_string())
+        },
+        awg_port_probing: Some(!is_clean),
+        up_mbps: 100,
+        down_mbps: 100,
+        ..Default::default()
+    };
+    prof.uri = build_profile_uri(&prof);
+    Some(prof)
+}
+
+fn parse_singbox_outbound(
+    out: &Value,
+    outbounds: &[Value],
+    referenced_detours: &std::collections::HashSet<String>,
+) -> Option<VpnProfile> {
+    let out_type = out["type"].as_str().unwrap_or("");
+    let tag = out["tag"].as_str().unwrap_or("");
+    if !tag.is_empty() && referenced_detours.contains(tag) {
+        return None;
+    }
+
+    if out_type == "shadowsocks" {
+        if let Some(detour_tag) = out["detour"].as_str() {
+            if let Some(st_out) = outbounds.iter().find(|o| {
+                o["tag"].as_str() == Some(detour_tag) && o["type"].as_str() == Some("shadowtls")
+            }) {
+                let server = st_out["server"].as_str().unwrap_or("").to_string();
+                if !server.is_empty() {
+                    let port = st_out["server_port"].as_u64().unwrap_or(8443) as u16;
+                    let ss_password = out["password"].as_str().unwrap_or("").to_string();
+                    let st_password = st_out["password"].as_str().map(|s| s.to_string());
+                    let st_sni = st_out["tls"]["server_name"]
+                        .as_str()
+                        .unwrap_or("www.microsoft.com")
+                        .to_string();
+                    let ss_method = out["method"].as_str().map(|s| s.to_string());
+                    let name = if !tag.is_empty() && tag != "proxy" {
+                        tag.to_string()
+                    } else {
+                        "ShadowTLS-import".to_string()
+                    };
+                    let mut prof = VpnProfile {
+                        id: Uuid::new_v4().to_string(),
+                        name,
+                        protocol: "shadowtls".to_string(),
+                        server,
+                        port,
+                        sni: st_sni.clone(),
+                        shadowtls_sni: Some(st_sni),
+                        shadowtls_password: st_password,
+                        password: ss_password,
+                        ss_method,
+                        up_mbps: 100,
+                        down_mbps: 100,
+                        tls_fragment: Some(false),
+                        ..Default::default()
+                    };
+                    prof.uri = build_profile_uri(&prof);
+                    return Some(prof);
+                }
+            }
+        }
+    }
+
+    if !matches!(
+        out_type,
+        "vless" | "hysteria2" | "tuic" | "shadowsocks" | "ssh"
+    ) {
+        return None;
+    }
+
+    let server = out["server"].as_str().unwrap_or("").trim().to_string();
+    if server.is_empty() {
+        return None;
+    }
+    let transport_type = out["transport"]["type"].as_str().unwrap_or("");
+    let actual_protocol = if out_type == "vless" && transport_type == "ws" {
+        "vless_ws"
+    } else if out_type == "vless" && transport_type == "grpc" {
+        "webrtc"
+    } else {
+        out_type
+    };
+    let default_port = match actual_protocol {
+        "shadowsocks" => 8388,
+        "ssh" => 22,
+        "vless_ws" => 8080,
+        "webrtc" => 2053,
+        _ => 443,
+    };
+    let port = out["server_port"]
+        .as_u64()
+        .or_else(|| {
+            out["server_ports"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.split(|c: char| c == ':' || c == '-').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(default_port) as u16;
+    let password = out["password"]
+        .as_str()
+        .or_else(|| out["private_key"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let sni = if actual_protocol == "ssh" {
+        out["user"].as_str().unwrap_or("root").to_string()
+    } else {
+        out["tls"]["server_name"]
+            .as_str()
+            .unwrap_or("www.bing.com")
+            .to_string()
+    };
+    let insecure = out["tls"]["insecure"]
+        .as_bool()
+        .unwrap_or(actual_protocol != "vless" && actual_protocol != "ssh");
+    let uuid = out["uuid"].as_str().map(|s| s.to_string());
+    let obfs_password = out["obfs"]["password"].as_str().map(|s| s.to_string());
+    let reality_public_key = out["tls"]["reality"]["public_key"]
+        .as_str()
+        .map(|s| s.to_string());
+    let reality_short_id = out["tls"]["reality"]["short_id"]
+        .as_str()
+        .or_else(|| {
+            out["tls"]["reality"]["short_id"]
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+        })
+        .map(|s| s.to_string());
+    let reality_flow = out["flow"].as_str().map(|s| s.to_string());
+    let ss_method = out["method"].as_str().map(|s| s.to_string());
+    let ss_plugin = out["plugin"].as_str().map(|s| s.to_string());
+    let ss_plugin_opts = out["plugin_opts"].as_str().map(|s| s.to_string());
+    let ws_path = if actual_protocol == "vless_ws" {
+        out["transport"]["path"].as_str().map(|s| s.to_string())
+    } else if actual_protocol == "webrtc" {
+        out["transport"]["service_name"]
+            .as_str()
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    let cdn_host = if actual_protocol == "vless_ws" {
+        out["transport"]["headers"]["Host"]
+            .as_str()
+            .map(|s| s.to_string())
+    } else {
+        None
+    };
+    let name = if !tag.is_empty() && tag != "proxy" {
+        tag.to_string()
+    } else {
+        format!("{}-import", actual_protocol)
+    };
+    let mut prof = VpnProfile {
+        id: Uuid::new_v4().to_string(),
+        name,
+        protocol: actual_protocol.to_string(),
+        server,
+        port,
+        sni,
+        insecure,
+        password: if out_type == "vless" {
+            uuid.clone().unwrap_or_default()
+        } else {
+            password
+        },
+        uuid,
+        obfs_password,
+        up_mbps: 100,
+        down_mbps: 100,
+        uri: String::new(),
+        ping_ms: None,
+        routing: None,
+        hop_ports: out["server_ports"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        hop_interval: out["hop_interval"].as_str().map(|s| s.to_string()),
+        reality_public_key,
+        reality_short_id,
+        reality_flow,
+        ss_method,
+        ss_plugin,
+        ss_plugin_opts,
+        ws_path,
+        cdn_host,
+        ..Default::default()
+    };
+    prof.uri = build_profile_uri(&prof);
+    Some(prof)
+}
+
+pub fn parse_multi_profiles_input(content: &str) -> Result<Vec<VpnProfile>, String> {
+    let trimmed = content.trim_start_matches('\u{feff}').trim();
+    if trimmed.is_empty() {
+        return Err("Пустой ввод конфигурации".to_string());
+    }
+
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(mut list) = serde_json::from_str::<Vec<VpnProfile>>(trimmed) {
+            if !list.is_empty() {
+                for p in list.iter_mut() {
+                    p.id = Uuid::new_v4().to_string();
+                    if p.uri.trim().is_empty() {
+                        p.uri = build_profile_uri(p);
+                    }
+                }
+                finalize_multi_group(&mut list, None);
+                return Ok(list);
+            }
+        }
+    }
+
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(mut prof) = serde_json::from_str::<VpnProfile>(trimmed) {
+            if !prof.server.trim().is_empty() {
+                prof.id = Uuid::new_v4().to_string();
+                prof.uri = build_profile_uri(&prof);
+                return Ok(vec![prof]);
+            }
+        }
+        if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+            let endpoints_arr = val["endpoints"].as_array().cloned().unwrap_or_default();
+            let outbounds_arr = val["outbounds"].as_array().cloned().unwrap_or_default();
+            let mut referenced_detours = std::collections::HashSet::new();
+            for ep in &endpoints_arr {
+                if ep["type"].as_str() == Some("wireguard") {
+                    if let Some(d) = ep["detour"].as_str() {
+                        referenced_detours.insert(d.to_string());
+                    }
+                }
+            }
+            for ob in &outbounds_arr {
+                if ob["type"].as_str() == Some("shadowsocks") {
+                    if let Some(d) = ob["detour"].as_str() {
+                        referenced_detours.insert(d.to_string());
+                    }
+                }
+            }
+
+            let mut collected: Vec<VpnProfile> = Vec::new();
+            for ep in &endpoints_arr {
+                if let Some(p) = parse_singbox_wireguard_endpoint(ep, &outbounds_arr) {
+                    collected.push(p);
+                }
+            }
+            for ob in &outbounds_arr {
+                if let Some(p) = parse_singbox_outbound(ob, &outbounds_arr, &referenced_detours) {
+                    collected.push(p);
+                }
+            }
+            if !collected.is_empty() {
+                finalize_multi_group(&mut collected, None);
+                return Ok(collected);
+            }
+        }
+    }
+
+    if trimmed.contains("[Interface]") && trimmed.contains("[Peer]") {
+        return parse_amnezia_conf(trimmed).map(|p| vec![p]);
+    }
+
+    const SCHEMES: &[&str] = &[
+        "shadowsocks://",
+        "amneziawg://",
+        "hysteria2://",
+        "shadowtls://",
+        "wireguard://",
+        "awgvless://",
+        "awgquic://",
+        "vless://",
+        "awg2://",
+        "tuic://",
+        "ssh://",
+        "hy2://",
+        "awg://",
+        "ss://",
+        "wg://",
+    ];
+
+    let mut line_profiles: Vec<VpnProfile> = Vec::new();
+    let mut header_group_name: Option<String> = None;
+    for raw_line in trimmed.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(comment) = line.strip_prefix('#') {
+            let c_trim = comment.trim();
+            if let Some(rest) = c_trim.strip_prefix("NeuroVeil VPN Multi-Protocol Bundle:") {
+                let g = rest.trim();
+                if !g.is_empty() {
+                    header_group_name = Some(g.to_string());
+                }
+            }
+            continue;
+        }
+
+        let lower = line.to_lowercase();
+        let mut earliest: Option<(usize, &str)> = None;
+        for &sch in SCHEMES {
+            if let Some(pos) = lower.find(sch) {
+                match earliest {
+                    None => earliest = Some((pos, sch)),
+                    Some((best_pos, best_sch)) => {
+                        if pos < best_pos || (pos == best_pos && sch.len() > best_sch.len()) {
+                            earliest = Some((pos, sch));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((pos, _)) = earliest {
+            let prefix_ok = pos == 0 || line[..pos].trim_end().ends_with(':');
+            if prefix_ok {
+                let candidate = line[pos..].trim();
+                if let Ok(p) = parse_profile_uri(candidate) {
+                    line_profiles.push(p);
+                }
+            }
+        }
+    }
+
+    if !line_profiles.is_empty() {
+        finalize_multi_group(&mut line_profiles, header_group_name.as_deref());
+        return Ok(line_profiles);
+    }
+
+    parse_profile_uri(trimmed).map(|p| vec![p])
+}
+
+pub fn parse_multi_zip_bytes(bytes: &[u8]) -> Result<Vec<VpnProfile>, String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Не удалось открыть ZIP-архив: {}", e))?;
+
+    let mut json_entries: Vec<(String, String)> = Vec::new();
+    let mut txt_entries: Vec<(String, String)> = Vec::new();
+    let mut conf_entries: Vec<(String, String)> = Vec::new();
+
+    for i in 0..archive.len() {
+        let mut file = archive
+            .by_index(i)
+            .map_err(|e| format!("Ошибка чтения элемента архива: {}", e))?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file.name().to_string();
+        let lower = name.to_lowercase();
+        let mut content = String::new();
+        if file.read_to_string(&mut content).is_err() {
+            continue;
+        }
+        if lower.ends_with(".json") {
+            json_entries.push((name, content));
+        } else if lower.ends_with(".txt") {
+            txt_entries.push((name, content));
+        } else if lower.ends_with(".conf") {
+            conf_entries.push((name, content));
+        }
+    }
+
+    for (_, body) in &json_entries {
+        if let Ok(list) = parse_multi_profiles_input(body) {
+            if !list.is_empty() {
+                return Ok(list);
+            }
+        }
+    }
+
+    for (_, body) in &txt_entries {
+        if let Ok(list) = parse_multi_profiles_input(body) {
+            if !list.is_empty() {
+                return Ok(list);
+            }
+        }
+    }
+
+    let mut conf_profiles = Vec::new();
+    for (entry_name, body) in &conf_entries {
+        if let Ok(mut p) = parse_amnezia_conf(body) {
+            if let Some(stem) = std::path::Path::new(entry_name)
+                .file_stem()
+                .and_then(|s| s.to_str())
+            {
+                if !stem.trim().is_empty() && p.name.contains(&p.server) {
+                    p.name = stem.to_string();
+                    p.uri = build_profile_uri(&p);
+                }
+            }
+            conf_profiles.push(p);
+        }
+    }
+    if !conf_profiles.is_empty() {
+        finalize_multi_group(&mut conf_profiles, None);
+        return Ok(conf_profiles);
+    }
+
+    Err("В ZIP-архиве не найдены поддерживаемые конфиги (.json, .txt или .conf)".to_string())
+}
+
 mod urlencoding {
     pub fn encode(input: &str) -> String {
         url::form_urlencoded::byte_serialize(input.as_bytes()).collect()
@@ -3753,6 +5125,128 @@ PersistentKeepalive = 25
         let _ = std::fs::remove_file(temp_20);
         let _ = std::fs::remove_file(temp_quic);
         let _ = std::fs::remove_file(temp_hybrid);
+    }
+
+    #[test]
+    fn test_multi_protocol_bundle_roundtrip_and_singbox_check() {
+        let mut p_vless = VpnProfile {
+            id: "m-1".to_string(),
+            name: "iPhone (VLESS)".to_string(),
+            protocol: "vless".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 443,
+            password: "11111111-2222-3333-4444-555555555555".to_string(),
+            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            sni: "www.microsoft.com".to_string(),
+            reality_public_key: Some("fN7baW-3-uBNuwSQsO-lwD6GkP3oNucDfn5UW1EWphQ".to_string()),
+            reality_short_id: Some("01234567".to_string()),
+            ..Default::default()
+        };
+        p_vless.uri = build_profile_uri(&p_vless);
+
+        let mut p_awg = VpnProfile {
+            id: "m-2".to_string(),
+            name: "iPhone (AWG 3.1)".to_string(),
+            protocol: "amneziawg".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 31555,
+            password: "vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=".to_string(),
+            awg_private_key: Some("vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=".to_string()),
+            awg_public_key: Some("fN7baW+3+uBNuwSQsO+lwD6GkP3oNucDfn5UW1EWphQ=".to_string()),
+            awg_preshared_key: Some("7sQK621vrXJAMe+w0006jc+2MOd12jY2Sb4PcRD57FE=".to_string()),
+            awg_local_address: Some("10.8.0.5/32".to_string()),
+            awg_header_protection_key: Some("zUPEP7/ufINes+LSSJd1AqLLmgSxUzeSQwBgIbdPavY=".to_string()),
+            awg_version: Some("3.1".to_string()),
+            awg_jc: Some(4),
+            awg_jmin: Some(40),
+            awg_jmax: Some(70),
+            awg_s1: Some(12),
+            awg_s2: Some(12),
+            awg_s3: Some(12),
+            awg_s4: Some(12),
+            awg_h1: Some("1".to_string()),
+            awg_h2: Some("2".to_string()),
+            awg_h3: Some("3".to_string()),
+            awg_h4: Some("4".to_string()),
+            ..Default::default()
+        };
+        p_awg.uri = build_profile_uri(&p_awg);
+
+        let mut p_st = VpnProfile {
+            id: "m-3".to_string(),
+            name: "iPhone (ShadowTLS)".to_string(),
+            protocol: "shadowtls".to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 8443,
+            password: "ss-pass-secret".to_string(),
+            ss_method: Some("2022-blake3-aes-128-gcm".to_string()),
+            shadowtls_password: Some("st-pass-secret".to_string()),
+            shadowtls_sni: Some("gateway.icloud.com".to_string()),
+            sni: "gateway.icloud.com".to_string(),
+            ..Default::default()
+        };
+        p_st.uri = build_profile_uri(&p_st);
+
+        let mut p_hybrid = p_awg.clone();
+        p_hybrid.id = "m-4".to_string();
+        p_hybrid.name = "iPhone (AWG+Reality)".to_string();
+        p_hybrid.protocol = "awg_vless".to_string();
+        p_hybrid.vless_port = Some(443);
+        p_hybrid.uuid = p_vless.uuid.clone();
+        p_hybrid.reality_public_key = p_vless.reality_public_key.clone();
+        p_hybrid.reality_short_id = p_vless.reality_short_id.clone();
+        p_hybrid.sni = "www.microsoft.com".to_string();
+        p_hybrid.uri = build_profile_uri(&p_hybrid);
+
+        let profiles = vec![p_vless.clone(), p_awg.clone(), p_st.clone(), p_hybrid.clone()];
+        let routing = RoutingConfig::default();
+        let multi_cfg = generate_multi_singbox_config(&profiles, "iPhone", &routing);
+        assert!(multi_cfg.get("neuroveil_profiles").is_none());
+        assert_eq!(multi_cfg["endpoints"].as_array().unwrap().len(), 2);
+
+        let multi_json = serde_json::to_string_pretty(&multi_cfg).unwrap();
+        let parsed_from_json = parse_multi_profiles_input(&multi_json).expect("Must parse multi JSON");
+        assert_eq!(parsed_from_json.len(), 4);
+        assert!(parsed_from_json.iter().all(|p| p.multi_group_id.is_some()));
+        assert_eq!(parsed_from_json[0].multi_group_name.as_deref(), Some("iPhone"));
+        assert!(parsed_from_json.iter().any(|p| p.protocol == "awg_vless"));
+        assert!(parsed_from_json.iter().any(|p| p.protocol == "shadowtls"));
+        assert!(parsed_from_json.iter().any(|p| p.protocol == "vless"));
+
+        let zip_bytes = build_multi_zip_bytes(&profiles, "iPhone", &routing).expect("Must build ZIP");
+        let parsed_from_zip = parse_multi_zip_bytes(&zip_bytes).expect("Must parse ZIP");
+        assert_eq!(parsed_from_zip.len(), 4);
+
+        let multi_uri_text = format!(
+            "{}: {}\n{}: {}\n",
+            p_vless.name, p_vless.uri, p_awg.name, p_awg.uri
+        );
+        let parsed_uris = parse_multi_profiles_input(&multi_uri_text).expect("Must parse multi-line URIs");
+        assert_eq!(parsed_uris.len(), 2);
+        assert_eq!(parsed_uris[0].multi_group_id, parsed_uris[1].multi_group_id);
+        assert_eq!(parsed_uris[0].multi_group_name.as_deref(), Some("iPhone"));
+
+        let singbox_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("data")
+            .join("bin")
+            .join("sing-box.exe");
+        if singbox_bin.exists() {
+            let temp_multi = std::env::temp_dir().join("test_singbox_multi_bundle.json");
+            std::fs::write(&temp_multi, &multi_json).unwrap();
+            let out_multi = std::process::Command::new(&singbox_bin)
+                .args(["check", "-c", temp_multi.to_str().unwrap()])
+                .output()
+                .expect("Failed to run sing-box check on multi config");
+            let _ = std::fs::remove_file(&temp_multi);
+            assert!(
+                out_multi.status.success(),
+                "sing-box check failed for multi bundle:\nSTDOUT: {}\nSTDERR: {}",
+                String::from_utf8_lossy(&out_multi.stdout),
+                String::from_utf8_lossy(&out_multi.stderr)
+            );
+        }
     }
 }
 

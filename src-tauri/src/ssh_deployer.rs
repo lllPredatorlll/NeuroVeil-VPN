@@ -1,4 +1,6 @@
-use crate::models::{DeployResult, VpnProfile, VpsAdminState, VpsContainerInfo, VpsCredentials};
+use crate::models::{
+    DeployResult, VpnProfile, VpsAdminState, VpsContainerInfo, VpsCredentials, VpsMultiProtocolGroup,
+};
 use crate::singbox::build_profile_uri;
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::{ChannelMsg, Preferred};
@@ -2485,9 +2487,1064 @@ echo "CLEAN_OK"
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredMultiItem {
+    protocol: String,
+    port: u16,
+    credential: String,
+    #[serde(default)]
+    ip: Option<String>,
+    #[serde(default)]
+    label: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredMultiGroup {
+    id: String,
+    name: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    items: Vec<StoredMultiItem>,
+}
+
+fn profile_credential(p: &VpnProfile) -> String {
+    match p.protocol.as_str() {
+        "vless" | "vless_ws" | "webrtc" => p
+            .uuid
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&p.password)
+            .trim()
+            .to_string(),
+        "shadowtls" => p
+            .shadowtls_password
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&p.password)
+            .trim()
+            .to_string(),
+        "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "wireguard" => p
+            .awg_private_key
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(&p.password)
+            .trim()
+            .to_string(),
+        _ => p.password.trim().to_string(),
+    }
+}
+
+fn apply_multi_groups(
+    profiles: &mut [VpnProfile],
+    cid: &str,
+    multi_raw: &str,
+) -> Vec<VpsMultiProtocolGroup> {
+    let trimmed = multi_raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let Ok(stored_groups) = serde_json::from_str::<Vec<StoredMultiGroup>>(trimmed) else {
+        return Vec::new();
+    };
+
+    let mut assigned: HashSet<usize> = HashSet::new();
+    let mut out_groups: Vec<VpsMultiProtocolGroup> = Vec::new();
+
+    for grp in stored_groups {
+        let mut matched_indices: Vec<usize> = Vec::new();
+        for item in &grp.items {
+            let item_cred = item.credential.trim();
+            // 1. Exact credential match (protocol + port + credential)
+            let mut found_idx = profiles.iter().enumerate().find_map(|(idx, p)| {
+                if assigned.contains(&idx) || matched_indices.contains(&idx) {
+                    return None;
+                }
+                if p.protocol == item.protocol
+                    && (item.port == 0 || p.port == item.port)
+                    && !item_cred.is_empty()
+                    && profile_credential(p) == item_cred
+                {
+                    Some(idx)
+                } else {
+                    None
+                }
+            });
+
+            // 2. Fallback match by IP or label (e.g. Shadowsocks sharing inbound password)
+            if found_idx.is_none() {
+                found_idx = profiles.iter().enumerate().find_map(|(idx, p)| {
+                    if assigned.contains(&idx) || matched_indices.contains(&idx) {
+                        return None;
+                    }
+                    let ip_match = item
+                        .ip
+                        .as_deref()
+                        .map(|ip| !ip.trim().is_empty() && p.awg_local_address.as_deref() == Some(ip))
+                        .unwrap_or(false);
+                    let label_match = !item.label.trim().is_empty() && p.name.trim() == item.label.trim();
+                    if p.protocol == item.protocol
+                        && (item.port == 0 || p.port == item.port)
+                        && (ip_match || label_match)
+                    {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                });
+            }
+
+            if let Some(idx) = found_idx {
+                matched_indices.push(idx);
+            }
+        }
+
+        if matched_indices.len() >= 2 {
+            let mut proto_list = Vec::new();
+            let mut id_list = Vec::new();
+            for &idx in &matched_indices {
+                assigned.insert(idx);
+                profiles[idx].multi_group_id = Some(grp.id.clone());
+                profiles[idx].multi_group_name = Some(grp.name.clone());
+                proto_list.push(profiles[idx].protocol.clone());
+                id_list.push(profiles[idx].id.clone());
+            }
+            out_groups.push(VpsMultiProtocolGroup {
+                id: grp.id,
+                name: grp.name,
+                container_id: cid.to_string(),
+                created_at: grp.created_at,
+                protocols: proto_list,
+                profile_ids: id_list,
+            });
+        }
+    }
+
+    out_groups
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CreateDeviceKeysResult {
     pub created: Vec<VpnProfile>,
     pub skipped: Vec<String>,
+}
+
+async fn generate_wg_keypair_remote(sess: &Handle<SshClientHandler>) -> Result<(String, String), String> {
+    let (code, out) = run_remote_cmd(sess, "/usr/local/bin/sing-box generate wg-keypair").await?;
+    if code != 0 {
+        return Err(format!("Ошибка генерации ключей WireGuard: {}", out));
+    }
+    let mut priv_key = String::new();
+    let mut pub_key = String::new();
+    for line in out.lines() {
+        let l = line.trim();
+        if l.starts_with("PrivateKey:") {
+            priv_key = l.trim_start_matches("PrivateKey:").trim().to_string();
+        } else if l.starts_with("PublicKey:") {
+            pub_key = l.trim_start_matches("PublicKey:").trim().to_string();
+        }
+    }
+    if priv_key.is_empty() || pub_key.is_empty() {
+        return Err(format!("Не удалось разобрать ключи WireGuard:\n{}", out));
+    }
+    Ok((priv_key, pub_key))
+}
+
+async fn generate_reality_keypair_remote(
+    sess: &Handle<SshClientHandler>,
+) -> Result<(String, String, String), String> {
+    let (code, out) = run_remote_cmd(sess, "/usr/local/bin/sing-box generate reality-keypair").await?;
+    if code != 0 {
+        return Err(format!("Ошибка генерации ключей Reality: {}", out));
+    }
+    let mut priv_key = String::new();
+    let mut pub_key = String::new();
+    for line in out.lines() {
+        let l = line.trim();
+        if l.starts_with("PrivateKey:") {
+            priv_key = l.trim_start_matches("PrivateKey:").trim().to_string();
+        } else if l.starts_with("PublicKey:") {
+            pub_key = l.trim_start_matches("PublicKey:").trim().to_string();
+        }
+    }
+    if priv_key.is_empty() || pub_key.is_empty() {
+        return Err(format!("Не удалось получить ключи Reality:\n{}", out));
+    }
+    let (_, sid_out) = run_remote_cmd(sess, "openssl rand -hex 8").await?;
+    let sid = sid_out
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or("0123456789abcdef")
+        .trim()
+        .to_string();
+    Ok((priv_key, pub_key, sid))
+}
+
+async fn probe_vps_used_ports_and_octets(
+    sess: &Handle<SshClientHandler>,
+    cfg: &serde_json::Value,
+) -> (HashSet<u16>, HashSet<u8>) {
+    let (_, probe_out) = run_remote_cmd(
+        sess,
+        r#"
+echo "===PORTS==="
+ss -tulnH 2>/dev/null | awk '{print $5}' | rev | cut -d: -f1 | rev | sort -un || true
+grep -hoE '"listen_port"\s*:\s*[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | grep -oE '[0-9]+' || true
+echo "===SUBNETS==="
+grep -hoE '10\.8\.[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | sort -u || true
+"#,
+    )
+    .await
+    .unwrap_or((0, String::new()));
+
+    let mut used_ports: HashSet<u16> = HashSet::new();
+    let mut used_octets: HashSet<u8> = HashSet::new();
+    let mut section = "";
+    for line in probe_out.lines() {
+        let t = line.trim();
+        if t == "===PORTS===" {
+            section = "ports";
+            continue;
+        } else if t == "===SUBNETS===" {
+            section = "subnets";
+            continue;
+        }
+        match section {
+            "ports" => {
+                if let Ok(p) = t.parse::<u16>() {
+                    if p > 0 {
+                        used_ports.insert(p);
+                    }
+                }
+            }
+            "subnets" => {
+                if let Some(oct_str) = t.strip_prefix("10.8.") {
+                    if let Ok(o) = oct_str.parse::<u8>() {
+                        used_octets.insert(o);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(inbounds) = cfg["inbounds"].as_array() {
+        for ib in inbounds {
+            if let Some(p) = ib["listen_port"].as_u64() {
+                if p > 0 {
+                    used_ports.insert(p as u16);
+                }
+            }
+        }
+    }
+    if let Some(endpoints) = cfg["endpoints"].as_array() {
+        for ep in endpoints {
+            if let Some(p) = ep["listen_port"].as_u64() {
+                if p > 0 {
+                    used_ports.insert(p as u16);
+                }
+            }
+            if let Some(addrs) = ep["address"].as_array() {
+                for a in addrs {
+                    if let Some(s) = a.as_str() {
+                        if let Some(rest) = s.strip_prefix("10.8.") {
+                            if let Some(oct_str) = rest.split('.').next() {
+                                if let Ok(oct) = oct_str.parse::<u8>() {
+                                    used_octets.insert(oct);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    (used_ports, used_octets)
+}
+
+async fn ensure_container_tls_certs_remote(
+    sess: &Handle<SshClientHandler>,
+    target: &ResolvedContainer,
+    sni: &str,
+    certs_ready: &mut bool,
+) -> Result<(String, String), String> {
+    if !*certs_ready {
+        let cert_cmd = format!(
+            r#"
+if [ ! -s "{cdir}/cert.pem" ] || [ ! -s "{cdir}/key.pem" ]; then
+    openssl ecparam -genkey -name prime256v1 -out "{cdir}/key.pem" && \
+    openssl req -new -x509 -key "{cdir}/key.pem" -out "{cdir}/cert.pem" -subj "/CN={sni}" -days 3650 && \
+    chmod 600 "{cdir}/key.pem" "{cdir}/cert.pem"
+fi
+"#,
+            cdir = target.cdir,
+            sni = sni
+        );
+        let (code, out) = run_remote_cmd(sess, &cert_cmd).await?;
+        if code != 0 {
+            return Err(format!("Ошибка генерации TLS-сертификатов контейнера: {}", out));
+        }
+        *certs_ready = true;
+    }
+
+    if target.runtime == "docker" {
+        Ok((
+            "/etc/sing-box/cert.pem".to_string(),
+            "/etc/sing-box/key.pem".to_string(),
+        ))
+    } else {
+        Ok((
+            format!("{}/cert.pem", target.cdir),
+            format!("{}/key.pem", target.cdir),
+        ))
+    }
+}
+
+fn ensure_route_direct_for_wg(cfg: &mut serde_json::Value, tag: &str, cidr: &str) {
+    if !cfg["outbounds"].is_array() {
+        cfg["outbounds"] = json!([{ "type": "direct", "tag": "direct" }]);
+    } else if let Some(obs) = cfg["outbounds"].as_array_mut() {
+        if !obs.iter().any(|o| o["tag"].as_str() == Some("direct")) {
+            obs.push(json!({ "type": "direct", "tag": "direct" }));
+        }
+    }
+
+    if !cfg["route"].is_object() {
+        cfg["route"] = json!({ "rules": [], "final": "direct" });
+    }
+    if cfg["route"]["final"].as_str().unwrap_or("").is_empty() {
+        cfg["route"]["final"] = json!("direct");
+    }
+    if !cfg["route"]["rules"].is_array() {
+        cfg["route"]["rules"] = json!([]);
+    }
+    if let Some(rules) = cfg["route"]["rules"].as_array_mut() {
+        let has_inbound_rule = rules.iter().any(|r| {
+            r["inbound"]
+                .as_array()
+                .map(|arr| arr.iter().any(|v| v.as_str() == Some(tag)))
+                .unwrap_or(false)
+        });
+        if !has_inbound_rule {
+            rules.push(json!({
+                "inbound": [tag],
+                "outbound": "direct"
+            }));
+        }
+        let has_cidr_rule = rules.iter().any(|r| {
+            r["source_ip_cidr"]
+                .as_array()
+                .map(|arr| arr.iter().any(|v| v.as_str() == Some(cidr)))
+                .unwrap_or(false)
+        });
+        if !has_cidr_rule {
+            rules.push(json!({
+                "source_ip_cidr": [cidr],
+                "outbound": "direct"
+            }));
+        }
+    }
+}
+
+fn append_tcp_fw_rule(fw: &mut String, port: u16) {
+    if port == 0 {
+        return;
+    }
+    fw.push_str(&format!(
+        "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; fi\n\
+         if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; fi\n\
+         iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+         iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+        p = port
+    ));
+}
+
+fn append_udp_fw_rule(fw: &mut String, port: u16, wg_cidr: Option<&str>) {
+    if port == 0 {
+        return;
+    }
+    fw.push_str(&format!(
+        "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+         if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+         iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+         iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+         iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n",
+        p = port
+    ));
+    if let Some(cidr) = wg_cidr {
+        fw.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw default allow routed >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
+             iptables -C FORWARD -s {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -s {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -d {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -d {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -C POSTROUTING -s {cidr} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {cidr} -j MASQUERADE >/dev/null 2>&1 || true\n",
+            cidr = cidr
+        ));
+    }
+}
+
+fn find_wg_endpoint_idx(cfg: &serde_json::Value, is_awg2: bool, target_tag: &str, default_port: u16) -> Option<usize> {
+    let endpoints = cfg["endpoints"].as_array()?;
+    for (idx, ep) in endpoints.iter().enumerate() {
+        if ep["type"].as_str() == Some("wireguard") && ep["tag"].as_str() == Some(target_tag) {
+            return Some(idx);
+        }
+    }
+    for (idx, ep) in endpoints.iter().enumerate() {
+        if ep["type"].as_str() == Some("wireguard") && ep["listen_port"].as_u64() == Some(default_port as u64) {
+            return Some(idx);
+        }
+    }
+    if !is_awg2 {
+        for (idx, ep) in endpoints.iter().enumerate() {
+            if ep["type"].as_str() == Some("wireguard") && ep["tag"].as_str() != Some("awg2-in") {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+async fn ensure_vless_reality_ready(
+    app: &AppHandle,
+    sess: &Handle<SshClientHandler>,
+    target: &ResolvedContainer,
+    creds: &VpsCredentials,
+    cfg: &mut serde_json::Value,
+    reality_json_opt: &mut Option<serde_json::Value>,
+    reality_loaded: &mut bool,
+    reality_dirty: &mut bool,
+    cfg_dirty: &mut bool,
+    host_probe: &mut Option<(HashSet<u16>, HashSet<u8>)>,
+    fw_rules: &mut String,
+) -> Result<(), String> {
+    if !*reality_loaded {
+        let (_, real_raw) = run_remote_cmd(sess, &format!("cat \"{}/reality.json\" 2>/dev/null", target.cdir)).await?;
+        *reality_json_opt = serde_json::from_str(&real_raw).ok();
+        *reality_loaded = true;
+    }
+
+    let plain_vless_idx = cfg["inbounds"].as_array().and_then(|arr| {
+        arr.iter().position(|ib| {
+            ib["type"].as_str() == Some("vless")
+                && ib["transport"]["type"].as_str().unwrap_or("").is_empty()
+        })
+    });
+
+    let reality_valid = reality_json_opt
+        .as_ref()
+        .map(|j| {
+            !j["private_key"].as_str().unwrap_or("").trim().is_empty()
+                && !j["public_key"].as_str().unwrap_or("").trim().is_empty()
+                && !j["short_id"].as_str().unwrap_or("").trim().is_empty()
+        })
+        .unwrap_or(false);
+
+    if !reality_valid {
+        let (priv_key, pub_key, sid) = generate_reality_keypair_remote(sess).await?;
+        *reality_json_opt = Some(json!({
+            "private_key": priv_key,
+            "public_key": pub_key,
+            "short_id": sid
+        }));
+        *reality_dirty = true;
+
+        if let Some(idx) = plain_vless_idx {
+            if let Some(ib) = cfg["inbounds"].as_array_mut().and_then(|a| a.get_mut(idx)) {
+                let empty_users = ib["users"].as_array().map(|u| u.is_empty()).unwrap_or(true);
+                let empty_priv = ib["tls"]["reality"]["private_key"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty();
+                if empty_users || empty_priv {
+                    ib["tls"]["reality"]["private_key"] = json!(priv_key);
+                    ib["tls"]["reality"]["short_id"] = json!([sid]);
+                    *cfg_dirty = true;
+                }
+            }
+        }
+        emit_log(
+            app,
+            &format!(
+                "В контейнере {} отсутствовал reality.json — ключи VLESS Reality сгенерированы автоматически.",
+                target.id
+            ),
+        );
+    }
+
+    if plain_vless_idx.is_none() {
+        if host_probe.is_none() {
+            *host_probe = Some(probe_vps_used_ports_and_octets(sess, cfg).await);
+        }
+        let (used_ports, _) = host_probe.as_mut().unwrap();
+        let pref_port = if creds.vless_port == 0 { 443 } else { creds.vless_port };
+        let v_port = allocate_free_port(pref_port, used_ports, false);
+
+        let reality_sni = if creds.reality_sni.trim().is_empty() {
+            "www.microsoft.com".to_string()
+        } else {
+            creds.reality_sni.trim().to_string()
+        };
+        let rj = reality_json_opt.as_ref().unwrap();
+        let v_priv = rj["private_key"].as_str().unwrap_or("").to_string();
+        let v_sid = rj["short_id"].as_str().unwrap_or("").to_string();
+
+        if !cfg["inbounds"].is_array() {
+            cfg["inbounds"] = json!([]);
+        }
+        if let Some(inbounds) = cfg["inbounds"].as_array_mut() {
+            inbounds.push(json!({
+                "type": "vless",
+                "tag": "vless-in",
+                "listen": "::",
+                "listen_port": v_port,
+                "users": [],
+                "tls": {
+                    "enabled": true,
+                    "server_name": reality_sni,
+                    "reality": {
+                        "enabled": true,
+                        "handshake": {
+                            "server": reality_sni,
+                            "server_port": 443
+                        },
+                        "private_key": v_priv,
+                        "short_id": [v_sid]
+                    }
+                }
+            }));
+        }
+        append_tcp_fw_rule(fw_rules, v_port);
+        *cfg_dirty = true;
+        emit_log(
+            app,
+            &format!(
+                "В контейнере {} автоматически создан инбаунд VLESS Reality (порт TCP {}).",
+                target.id, v_port
+            ),
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_awg_ready(
+    app: &AppHandle,
+    sess: &Handle<SshClientHandler>,
+    target: &ResolvedContainer,
+    creds: &VpsCredentials,
+    is_awg2: bool,
+    cfg: &mut serde_json::Value,
+    awg_json_opt: &mut Option<serde_json::Value>,
+    awg_loaded: &mut bool,
+    awg_dirty: &mut bool,
+    cfg_dirty: &mut bool,
+    host_probe: &mut Option<(HashSet<u16>, HashSet<u8>)>,
+    fw_rules: &mut String,
+) -> Result<(), String> {
+    let file_name = if is_awg2 { "awg2.json" } else { "awg.json" };
+    let file_path = format!("{}/{}", target.cdir, file_name);
+    let target_tag = if is_awg2 { "awg2-in" } else { "awg-in" };
+    let default_port = if is_awg2 { creds.awg2_port } else { creds.awg_port };
+
+    if !*awg_loaded {
+        let (_, raw) = run_remote_cmd(sess, &format!("cat \"{}\" 2>/dev/null", file_path)).await?;
+        *awg_json_opt = serde_json::from_str(&raw).ok();
+        *awg_loaded = true;
+    }
+
+    let ep_idx = find_wg_endpoint_idx(cfg, is_awg2, target_tag, default_port);
+    let json_valid = awg_json_opt
+        .as_ref()
+        .map(|j| !j["server_public_key"].as_str().unwrap_or("").trim().is_empty())
+        .unwrap_or(false);
+
+    if json_valid && ep_idx.is_some() {
+        return Ok(());
+    }
+
+    if host_probe.is_none() {
+        *host_probe = Some(probe_vps_used_ports_and_octets(sess, cfg).await);
+    }
+    let (used_ports, used_octets) = host_probe.as_mut().unwrap();
+
+    let (ep_existing_port, ep_existing_octet, ep_has_peers) = if let Some(idx) = ep_idx {
+        let ep = &cfg["endpoints"][idx];
+        let p = ep["listen_port"].as_u64().unwrap_or(0) as u16;
+        let oct = ep["address"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("10.8."))
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|o| o.parse::<u8>().ok());
+        let has_p = ep["peers"].as_array().map(|a| !a.is_empty()).unwrap_or(false);
+        (if p > 0 { Some(p) } else { None }, oct, has_p)
+    } else {
+        (None, None, false)
+    };
+
+    let subnet_octet = ep_existing_octet.unwrap_or_else(|| allocate_free_subnet_octet(used_octets));
+    let port = if let Some(ep_p) = ep_existing_port {
+        used_ports.insert(ep_p);
+        ep_p
+    } else if let Some(jp) = awg_json_opt
+        .as_ref()
+        .and_then(|j| j["port"].as_u64())
+        .map(|v| v as u16)
+        .filter(|&p| p >= 1024 && !used_ports.contains(&p))
+    {
+        used_ports.insert(jp);
+        jp
+    } else {
+        let preferred = if is_awg2 {
+            if creds.awg2_port == 0 || creds.awg2_port == 51821 || creds.awg2_port == 51820 {
+                random_u32_in_range(20000, 55000) as u16
+            } else {
+                creds.awg2_port
+            }
+        } else if creds.awg_port == 0 || creds.awg_port == 51820 {
+            random_u32_in_range(20000, 55000) as u16
+        } else {
+            creds.awg_port
+        };
+        allocate_free_port(preferred, used_ports, true)
+    };
+
+    if !json_valid {
+        let (s_priv, s_pub) = generate_wg_keypair_remote(sess).await?;
+        let psk = generate_random_base64_32();
+
+        if is_awg2 {
+            *awg_json_opt = Some(json!({
+                "server_private_key": s_priv,
+                "server_public_key": s_pub,
+                "client_private_key": "",
+                "client_public_key": "",
+                "preshared_key": psk,
+                "port": port,
+                "devices": []
+            }));
+        } else {
+            let hpk = generate_random_base64_32();
+            let jc = creds.awg_jc.unwrap_or_else(|| random_u32_in_range(4, 7) as u16);
+            let jmin = creds.awg_jmin.unwrap_or_else(|| random_u32_in_range(10, 25) as u16);
+            let jmax = creds.awg_jmax.unwrap_or_else(|| random_u32_in_range(45, 75) as u16);
+            let s1 = creds.awg_s1.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+            let mut s2 = creds.awg_s2.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+            if s1 + 56 == s2 {
+                s2 += 1;
+            }
+            let s3 = creds.awg_s3.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+            let s4 = creds.awg_s4.map(|v| v.max(12)).unwrap_or_else(|| random_u32_in_range(12, 28) as u16);
+            let h1 = creds.awg_h1.clone().filter(|s| !s.trim().is_empty() && s.trim() != "1").unwrap_or_else(|| random_u32_in_range(100_000_000, 499_999_999).to_string());
+            let h2 = creds.awg_h2.clone().filter(|s| !s.trim().is_empty() && s.trim() != "2").unwrap_or_else(|| random_u32_in_range(500_000_000, 999_999_999).to_string());
+            let h3 = creds.awg_h3.clone().filter(|s| !s.trim().is_empty() && s.trim() != "3").unwrap_or_else(|| random_u32_in_range(1_000_000_000, 1_499_999_999).to_string());
+            let h4 = creds.awg_h4.clone().filter(|s| !s.trim().is_empty() && s.trim() != "4").unwrap_or_else(|| random_u32_in_range(1_500_000_000, 2_140_000_000).to_string());
+            let rekey_after = creds.awg_rekey_after_time.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(90, 110), random_u32_in_range(115, 140)));
+            let rekey_to = creds.awg_rekey_timeout.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(2, 4), random_u32_in_range(5, 8)));
+            let reject_after = creds.awg_reject_after_time.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(140, 160), random_u32_in_range(170, 200)));
+            let keepalive_to = creds.awg_keepalive_timeout.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(4, 7), random_u32_in_range(12, 18)));
+            let max_handshake = creds.awg_max_handshake_attempts.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(12, 16), random_u32_in_range(18, 24)));
+            let persistent_ka = creds.awg_persistent_keepalive.clone().filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| format!("{}-{}", random_u32_in_range(20, 25), random_u32_in_range(30, 40)));
+            let disable_cookies = creds.awg_disable_cookies.unwrap_or(true);
+            let random_trailers = creds.awg_random_trailers.unwrap_or(true);
+            let hop_ports = if creds.awg_hop_ports.trim().is_empty() {
+                "20000:65000".to_string()
+            } else {
+                creds.awg_hop_ports.trim().to_string()
+            };
+
+            *awg_json_opt = Some(json!({
+                "server_private_key": s_priv,
+                "server_public_key": s_pub,
+                "client_private_key": "",
+                "client_public_key": "",
+                "header_protection_key": hpk,
+                "preshared_key": psk,
+                "port": port,
+                "hop_ports": hop_ports,
+                "jc": jc,
+                "jmin": jmin,
+                "jmax": jmax,
+                "s1": s1,
+                "s2": s2,
+                "s3": s3,
+                "s4": s4,
+                "h1": h1,
+                "h2": h2,
+                "h3": h3,
+                "h4": h4,
+                "rekey_after_time": rekey_after,
+                "rekey_timeout": rekey_to,
+                "reject_after_time": reject_after,
+                "keepalive_timeout": keepalive_to,
+                "max_handshake_attempts": max_handshake,
+                "random_trailers": random_trailers,
+                "disable_cookies": disable_cookies,
+                "persistent_keepalive": persistent_ka,
+                "devices": []
+            }));
+        }
+
+        if let Some(idx) = ep_idx {
+            if !ep_has_peers {
+                if let Some(ep) = cfg["endpoints"].as_array_mut().and_then(|a| a.get_mut(idx)) {
+                    ep["private_key"] = json!(awg_json_opt.as_ref().unwrap()["server_private_key"]);
+                    *cfg_dirty = true;
+                }
+            }
+        }
+        *awg_dirty = true;
+        emit_log(
+            app,
+            &format!(
+                "В контейнере {} отсутствовал {} — параметры {} созданы автоматически.",
+                target.id,
+                file_name,
+                if is_awg2 { "AmneziaWG 2.0" } else { "Amnezia 3.1" }
+            ),
+        );
+    }
+
+    if ep_idx.is_none() {
+        let aj = awg_json_opt.as_mut().unwrap();
+        if aj["port"].as_u64() != Some(port as u64) {
+            aj["port"] = json!(port);
+            *awg_dirty = true;
+        }
+        let server_priv = aj["server_private_key"].as_str().unwrap_or("").to_string();
+        let server_ip = format!("10.8.{}.1/24", subnet_octet);
+        let cidr = format!("10.8.{}.0/24", subnet_octet);
+
+        let ep_json = if is_awg2 {
+            json!({
+                "type": "wireguard",
+                "tag": "awg2-in",
+                "listen_port": port,
+                "address": [server_ip],
+                "private_key": server_priv,
+                "mtu": 1420,
+                "peers": []
+            })
+        } else {
+            let mut ep = json!({
+                "type": "wireguard",
+                "tag": "awg-in",
+                "listen_port": port,
+                "address": [server_ip],
+                "private_key": server_priv,
+                "header_protection_key": aj["header_protection_key"].as_str().unwrap_or(""),
+                "random_trailers": aj["random_trailers"].as_bool().unwrap_or(true),
+                "disable_cookies": aj["disable_cookies"].as_bool().unwrap_or(true),
+                "rekey_after_time": aj["rekey_after_time"].as_str().unwrap_or("95-125"),
+                "rekey_timeout": aj["rekey_timeout"].as_str().unwrap_or("3-7"),
+                "reject_after_time": aj["reject_after_time"].as_str().unwrap_or("150-180"),
+                "keepalive_timeout": aj["keepalive_timeout"].as_str().unwrap_or("5-15"),
+                "max_handshake_attempts": aj["max_handshake_attempts"].as_str().unwrap_or("14-20"),
+                "jc": aj["jc"].as_u64().unwrap_or(4),
+                "jmin": aj["jmin"].as_u64().unwrap_or(15),
+                "jmax": aj["jmax"].as_u64().unwrap_or(65),
+                "s1": aj["s1"].as_u64().unwrap_or(15),
+                "s2": aj["s2"].as_u64().unwrap_or(25),
+                "s3": aj["s3"].as_u64().unwrap_or(16),
+                "s4": aj["s4"].as_u64().unwrap_or(20),
+                "peers": []
+            });
+            for hk in ["h1", "h2", "h3", "h4"] {
+                if let Some(s) = aj[hk].as_str() {
+                    if let Ok(num) = s.trim().parse::<u32>() {
+                        ep[hk] = json!(num);
+                    } else {
+                        ep[hk] = json!(s);
+                    }
+                } else if let Some(u) = aj[hk].as_u64() {
+                    ep[hk] = json!(u);
+                }
+            }
+            ep
+        };
+
+        if !cfg["endpoints"].is_array() {
+            cfg["endpoints"] = json!([]);
+        }
+        if let Some(endpoints) = cfg["endpoints"].as_array_mut() {
+            endpoints.push(ep_json);
+        }
+        ensure_route_direct_for_wg(cfg, target_tag, &cidr);
+        append_udp_fw_rule(fw_rules, port, Some(&cidr));
+        *cfg_dirty = true;
+        emit_log(
+            app,
+            &format!(
+                "В контейнере {} автоматически создан endpoint {} (порт UDP {}, подсеть {}).",
+                target.id, target_tag, port, cidr
+            ),
+        );
+    }
+
+    Ok(())
+}
+
+async fn ensure_standard_inbound_ready(
+    app: &AppHandle,
+    sess: &Handle<SshClientHandler>,
+    target: &ResolvedContainer,
+    creds: &VpsCredentials,
+    proto: &str,
+    cfg: &mut serde_json::Value,
+    cfg_dirty: &mut bool,
+    host_probe: &mut Option<(HashSet<u16>, HashSet<u8>)>,
+    certs_ready: &mut bool,
+    fw_rules: &mut String,
+) -> Result<(), String> {
+    let has_matching = cfg["inbounds"]
+        .as_array()
+        .map(|arr| {
+            arr.iter().any(|ib| {
+                let ib_type = ib["type"].as_str().unwrap_or("");
+                let tr_type = ib["transport"]["type"].as_str().unwrap_or("");
+                if ib_type == "shadowsocks" && ib["listen"].as_str() == Some("127.0.0.1") {
+                    return false;
+                }
+                match proto {
+                    "vless_ws" => ib_type == "vless" && tr_type == "ws",
+                    "webrtc" => ib_type == "vless" && tr_type == "grpc",
+                    "shadowtls" => ib_type == "shadowtls",
+                    other => ib_type == other,
+                }
+            })
+        })
+        .unwrap_or(false);
+
+    if has_matching {
+        return Ok(());
+    }
+
+    if host_probe.is_none() {
+        *host_probe = Some(probe_vps_used_ports_and_octets(sess, cfg).await);
+    }
+    let (used_ports, _) = host_probe.as_mut().unwrap();
+    if !cfg["inbounds"].is_array() {
+        cfg["inbounds"] = json!([]);
+    }
+
+    let sni = if creds.sni.trim().is_empty() {
+        "www.bing.com".to_string()
+    } else {
+        creds.sni.trim().to_string()
+    };
+
+    match proto {
+        "hysteria2" => {
+            let port = allocate_free_port(if creds.hy2_port == 0 { 8443 } else { creds.hy2_port }, used_ports, false);
+            let (cert_path, key_path) = ensure_container_tls_certs_remote(sess, target, &sni, certs_ready).await?;
+            let mut hy2_in = json!({
+                "type": "hysteria2",
+                "tag": "hy2-in",
+                "listen": "::",
+                "listen_port": port,
+                "users": [],
+                "masquerade": format!("https://{}", sni),
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "alpn": ["h3"],
+                    "certificate_path": cert_path,
+                    "key_path": key_path
+                }
+            });
+            if creds.enable_salamander {
+                hy2_in["obfs"] = json!({
+                    "type": "salamander",
+                    "password": Uuid::new_v4().simple().to_string()
+                });
+            }
+            cfg["inbounds"].as_array_mut().unwrap().push(hy2_in);
+            append_udp_fw_rule(fw_rules, port, None);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд Hysteria 2 (порт UDP {}).", target.id, port));
+        }
+        "tuic" => {
+            let port = allocate_free_port(if creds.tuic_port == 0 { 9443 } else { creds.tuic_port }, used_ports, false);
+            let (cert_path, key_path) = ensure_container_tls_certs_remote(sess, target, &sni, certs_ready).await?;
+            let tuic_in = json!({
+                "type": "tuic",
+                "tag": "tuic-in",
+                "listen": "::",
+                "listen_port": port,
+                "users": [],
+                "congestion_control": "bbr",
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "alpn": ["h3"],
+                    "certificate_path": cert_path,
+                    "key_path": key_path
+                }
+            });
+            cfg["inbounds"].as_array_mut().unwrap().push(tuic_in);
+            append_udp_fw_rule(fw_rules, port, None);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд TUIC v5 (порт UDP {}).", target.id, port));
+        }
+        "shadowsocks" => {
+            let port = allocate_free_port(if creds.ss_port == 0 { 8388 } else { creds.ss_port }, used_ports, false);
+            let method = if creds.ss_method.trim().is_empty() {
+                "2022-blake3-aes-128-gcm".to_string()
+            } else {
+                creds.ss_method.trim().to_string()
+            };
+            let ss_password = if method.starts_with("2022-blake3-aes-128") {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(Uuid::new_v4().as_bytes())
+            } else if method.starts_with("2022-blake3") {
+                use base64::Engine;
+                let u1 = Uuid::new_v4();
+                let u2 = Uuid::new_v4();
+                let bytes = [u1.as_bytes().as_slice(), u2.as_bytes().as_slice()].concat();
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            } else {
+                Uuid::new_v4().simple().to_string()
+            };
+            let ss_in = json!({
+                "type": "shadowsocks",
+                "tag": "ss-in",
+                "listen": "::",
+                "listen_port": port,
+                "method": method,
+                "password": ss_password,
+                "multiplex": { "enabled": true }
+            });
+            cfg["inbounds"].as_array_mut().unwrap().push(ss_in);
+            append_tcp_fw_rule(fw_rules, port);
+            append_udp_fw_rule(fw_rules, port, None);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд Shadowsocks (порт {}).", target.id, port));
+        }
+        "shadowtls" => {
+            let ss_detour_tag = cfg["inbounds"]
+                .as_array()
+                .and_then(|arr| arr.iter().find(|i| i["type"].as_str() == Some("shadowsocks")))
+                .and_then(|i| i["tag"].as_str())
+                .map(|s| s.to_string());
+            let detour_tag = if let Some(t) = ss_detour_tag {
+                t
+            } else {
+                let ss_port = allocate_free_port(if creds.ss_port == 0 { 8388 } else { creds.ss_port }, used_ports, false);
+                let method = if creds.ss_method.trim().is_empty() {
+                    "2022-blake3-aes-128-gcm".to_string()
+                } else {
+                    creds.ss_method.trim().to_string()
+                };
+                let ss_password = if method.starts_with("2022-blake3-aes-128") {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD.encode(Uuid::new_v4().as_bytes())
+                } else if method.starts_with("2022-blake3") {
+                    use base64::Engine;
+                    let u1 = Uuid::new_v4();
+                    let u2 = Uuid::new_v4();
+                    let bytes = [u1.as_bytes().as_slice(), u2.as_bytes().as_slice()].concat();
+                    base64::engine::general_purpose::STANDARD.encode(&bytes)
+                } else {
+                    Uuid::new_v4().simple().to_string()
+                };
+                cfg["inbounds"].as_array_mut().unwrap().push(json!({
+                    "type": "shadowsocks",
+                    "tag": "ss-in",
+                    "listen": "127.0.0.1",
+                    "listen_port": ss_port,
+                    "method": method,
+                    "password": ss_password,
+                    "multiplex": { "enabled": true }
+                }));
+                "ss-in".to_string()
+            };
+            let st_port = allocate_free_port(if creds.shadowtls_port == 0 { 8443 } else { creds.shadowtls_port }, used_ports, false);
+            let st_sni = if creds.shadowtls_sni.trim().is_empty() {
+                "www.microsoft.com".to_string()
+            } else {
+                creds.shadowtls_sni.trim().to_string()
+            };
+            cfg["inbounds"].as_array_mut().unwrap().push(json!({
+                "type": "shadowtls",
+                "tag": "shadowtls-in",
+                "listen": "::",
+                "listen_port": st_port,
+                "version": 3,
+                "users": [],
+                "handshake": {
+                    "server": st_sni,
+                    "server_port": 443
+                },
+                "detour": detour_tag
+            }));
+            append_tcp_fw_rule(fw_rules, st_port);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд ShadowTLS v3 (порт TCP {}).", target.id, st_port));
+        }
+        "vless_ws" => {
+            let port = allocate_free_port(if creds.vless_ws_port == 0 { 8080 } else { creds.vless_ws_port }, used_ports, false);
+            let (cert_path, key_path) = ensure_container_tls_certs_remote(sess, target, &sni, certs_ready).await?;
+            cfg["inbounds"].as_array_mut().unwrap().push(json!({
+                "type": "vless",
+                "tag": "vless-ws-in",
+                "listen": "::",
+                "listen_port": port,
+                "users": [],
+                "transport": {
+                    "type": "ws",
+                    "path": "/neuroveil-ws"
+                },
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "alpn": ["http/1.1"],
+                    "certificate_path": cert_path,
+                    "key_path": key_path
+                }
+            }));
+            append_tcp_fw_rule(fw_rules, port);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд VLESS WS (порт TCP {}).", target.id, port));
+        }
+        "webrtc" => {
+            let port = allocate_free_port(if creds.webrtc_port == 0 { 2053 } else { creds.webrtc_port }, used_ports, false);
+            let (cert_path, key_path) = ensure_container_tls_certs_remote(sess, target, &sni, certs_ready).await?;
+            cfg["inbounds"].as_array_mut().unwrap().push(json!({
+                "type": "vless",
+                "tag": "webrtc-in",
+                "listen": "::",
+                "listen_port": port,
+                "users": [],
+                "transport": {
+                    "type": "grpc",
+                    "service_name": "neuroveil-webrtc"
+                },
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "alpn": ["h2"],
+                    "certificate_path": cert_path,
+                    "key_path": key_path
+                }
+            }));
+            append_tcp_fw_rule(fw_rules, port);
+            *cfg_dirty = true;
+            emit_log(app, &format!("В контейнере {} автоматически создан инбаунд WebRTC (порт TCP {}).", target.id, port));
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 pub async fn create_vps_device_keys(
@@ -2542,6 +3599,7 @@ pub async fn create_vps_device_keys(
     let connect_host = creds.host.trim().to_string();
     let awg_file = format!("{}/awg.json", target.cdir);
     let awg2_file = format!("{}/awg2.json", target.cdir);
+    let reality_file = format!("{}/reality.json", target.cdir);
 
     let mut awg_json_opt: Option<serde_json::Value> = None;
     let mut awg_loaded = false;
@@ -2553,6 +3611,10 @@ pub async fn create_vps_device_keys(
     let mut cfg_dirty = false;
     let mut awg_dirty = false;
     let mut awg2_dirty = false;
+    let mut reality_dirty = false;
+    let mut host_probe: Option<(HashSet<u16>, HashSet<u8>)> = None;
+    let mut certs_ready = false;
+    let mut extra_fw_rules = String::new();
 
     let mut created_profiles: Vec<VpnProfile> = Vec::new();
     let mut skipped_reasons: Vec<String> = Vec::new();
@@ -2563,35 +3625,66 @@ pub async fn create_vps_device_keys(
             let target_tag = if is_awg2 { "awg2-in" } else { "awg-in" };
             let default_port = if is_awg2 { creds.awg2_port } else { creds.awg_port };
 
-            if is_awg2 && !awg2_loaded {
-                let (_, raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg2_file)).await?;
-                awg2_json_opt = serde_json::from_str(&raw).ok();
-                awg2_loaded = true;
-            } else if !is_awg2 && !awg_loaded {
-                let (_, raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file)).await?;
-                awg_json_opt = serde_json::from_str(&raw).ok();
-                awg_loaded = true;
+            let ensure_res = if is_awg2 {
+                ensure_awg_ready(
+                    app,
+                    &sess,
+                    &target,
+                    creds,
+                    true,
+                    &mut cfg,
+                    &mut awg2_json_opt,
+                    &mut awg2_loaded,
+                    &mut awg2_dirty,
+                    &mut cfg_dirty,
+                    &mut host_probe,
+                    &mut extra_fw_rules,
+                )
+                .await
+            } else {
+                ensure_awg_ready(
+                    app,
+                    &sess,
+                    &target,
+                    creds,
+                    false,
+                    &mut cfg,
+                    &mut awg_json_opt,
+                    &mut awg_loaded,
+                    &mut awg_dirty,
+                    &mut cfg_dirty,
+                    &mut host_probe,
+                    &mut extra_fw_rules,
+                )
+                .await
+            };
+            if let Err(err) = ensure_res {
+                skipped_reasons.push(err);
+                continue;
             }
 
-            let awg_json_ref = if is_awg2 { &mut awg2_json_opt } else { &mut awg_json_opt };
-            let Some(awg_json) = awg_json_ref.as_mut() else {
-                skipped_reasons.push(format!(
-                    "В контейнере {} не найден файл {} для {}.",
-                    target.id,
-                    if is_awg2 { "awg2.json" } else { "awg.json" },
-                    proto
-                ));
-                continue;
-            };
-
-            // For hybrid AWG + Reality, verify plain VLESS inbound exists first
+            // For hybrid AWG + Reality, auto-provision VLESS Reality + reality.json if missing
             let mut hybrid_vless_data: Option<(u16, String, String, Option<String>, Option<String>)> = None;
             if proto == "awg_vless" {
-                if !reality_loaded {
-                    let (_, real_raw) = run_remote_cmd(&sess, &format!("cat \"{}/reality.json\" 2>/dev/null", target.cdir)).await?;
-                    reality_json_opt = serde_json::from_str(&real_raw).ok();
-                    reality_loaded = true;
+                if let Err(err) = ensure_vless_reality_ready(
+                    app,
+                    &sess,
+                    &target,
+                    creds,
+                    &mut cfg,
+                    &mut reality_json_opt,
+                    &mut reality_loaded,
+                    &mut reality_dirty,
+                    &mut cfg_dirty,
+                    &mut host_probe,
+                    &mut extra_fw_rules,
+                )
+                .await
+                {
+                    skipped_reasons.push(err);
+                    continue;
                 }
+
                 let mut vless_found = false;
                 if let Some(inbounds) = cfg["inbounds"].as_array_mut() {
                     for inbound in inbounds.iter_mut() {
@@ -2611,6 +3704,9 @@ pub async fn create_vps_device_keys(
                                     }
                                 });
                             let v_uuid = Uuid::new_v4().to_string();
+                            if !inbound["users"].is_array() {
+                                inbound["users"] = json!([]);
+                            }
                             if let Some(users) = inbound["users"].as_array_mut() {
                                 users.push(json!({
                                     "name": format!("{} (Hybrid)", clean_name),
@@ -2635,46 +3731,34 @@ pub async fn create_vps_device_keys(
                 }
                 if !vless_found {
                     skipped_reasons.push(format!(
-                        "В контейнере {} не найден VLESS Reality для гибрида AWG + Reality.",
+                        "В контейнере {} не удалось инициализировать VLESS Reality для гибрида AWG + Reality.",
                         target.id
                     ));
                     continue;
                 }
             }
 
-            let Some(endpoints) = cfg["endpoints"].as_array_mut() else {
-                skipped_reasons.push("В конфиге контейнера отсутствует секция endpoints.".to_string());
+            let awg_json_ref = if is_awg2 { &mut awg2_json_opt } else { &mut awg_json_opt };
+            let Some(awg_json) = awg_json_ref.as_mut() else {
+                skipped_reasons.push(format!(
+                    "В контейнере {} не удалось инициализировать {} для {}.",
+                    target.id,
+                    if is_awg2 { "awg2.json" } else { "awg.json" },
+                    proto
+                ));
                 continue;
             };
 
-            let mut wg_idx = None;
-            for (idx, ep) in endpoints.iter().enumerate() {
-                if ep["type"].as_str() == Some("wireguard") && ep["tag"].as_str() == Some(target_tag) {
-                    wg_idx = Some(idx);
-                    break;
-                }
-            }
-            if wg_idx.is_none() {
-                for (idx, ep) in endpoints.iter().enumerate() {
-                    if ep["type"].as_str() == Some("wireguard") && ep["listen_port"].as_u64() == Some(default_port as u64) {
-                        wg_idx = Some(idx);
-                        break;
-                    }
-                }
-            }
-            if wg_idx.is_none() && !is_awg2 {
-                for (idx, ep) in endpoints.iter().enumerate() {
-                    if ep["type"].as_str() == Some("wireguard") {
-                        wg_idx = Some(idx);
-                        break;
-                    }
-                }
-            }
+            let wg_idx = find_wg_endpoint_idx(&cfg, is_awg2, target_tag, default_port);
             let Some(wg_idx) = wg_idx else {
                 skipped_reasons.push(format!(
                     "В контейнере {} не найден WireGuard endpoint для {}.",
                     target.id, proto
                 ));
+                continue;
+            };
+            let Some(endpoints) = cfg["endpoints"].as_array_mut() else {
+                skipped_reasons.push("В конфиге контейнера отсутствует секция endpoints.".to_string());
                 continue;
             };
 
@@ -2767,7 +3851,7 @@ pub async fn create_vps_device_keys(
                     "awg_quic" => format!("{} (AWG+QUIC)", clean_name),
                     "awg_vless" => format!("{} (AWG+Reality)", clean_name),
                     "awg2" => format!("{} (AWG 2.0)", clean_name),
-                    _ => clean_name.clone(),
+                    _ => format!("{} (AWG 3.1)", clean_name),
                 }
             } else {
                 clean_name.clone()
@@ -2791,6 +3875,12 @@ pub async fn create_vps_device_keys(
                     dev_entry["vless_uuid"] = json!(vuuid);
                 }
                 devs.push(dev_entry);
+            }
+            if awg_json["client_private_key"].as_str().unwrap_or("").trim().is_empty() {
+                awg_json["client_private_key"] = json!(dev_priv);
+            }
+            if awg_json["client_public_key"].as_str().unwrap_or("").trim().is_empty() {
+                awg_json["client_public_key"] = json!(dev_pub);
             }
             if is_awg2 {
                 awg2_dirty = true;
@@ -2896,11 +3986,34 @@ pub async fn create_vps_device_keys(
         }
 
         if proto == "shadowtls" {
+            if let Err(err) = ensure_standard_inbound_ready(
+                app,
+                &sess,
+                &target,
+                creds,
+                "shadowtls",
+                &mut cfg,
+                &mut cfg_dirty,
+                &mut host_probe,
+                &mut certs_ready,
+                &mut extra_fw_rules,
+            )
+            .await
+            {
+                skipped_reasons.push(err);
+                continue;
+            }
+
             let mut st_port: Option<u16> = None;
             let mut st_sni = "www.microsoft.com".to_string();
             let mut detour_tag = "ss-in".to_string();
             let st_user_pass = Uuid::new_v4().simple().to_string();
             let mut st_updated = false;
+            let prof_name = if unique_protos.len() > 1 {
+                format!("{} (ShadowTLS)", clean_name)
+            } else {
+                clean_name.clone()
+            };
 
             if let Some(inbounds) = cfg["inbounds"].as_array_mut() {
                 for inbound in inbounds.iter_mut() {
@@ -2916,9 +4029,12 @@ pub async fn create_vps_device_keys(
                                 detour_tag = dt.to_string();
                             }
                         }
+                        if !inbound["users"].is_array() {
+                            inbound["users"] = json!([]);
+                        }
                         if let Some(users) = inbound["users"].as_array_mut() {
                             users.push(json!({
-                                "name": clean_name,
+                                "name": prof_name,
                                 "password": st_user_pass
                             }));
                             st_updated = true;
@@ -2950,11 +4066,6 @@ pub async fn create_vps_device_keys(
                 .and_then(|i| i["method"].as_str())
                 .unwrap_or("2022-blake3-aes-128-gcm")
                 .to_string();
-            let prof_name = if unique_protos.len() > 1 {
-                format!("{} (ShadowTLS)", clean_name)
-            } else {
-                clean_name.clone()
-            };
             let mut st_profile = VpnProfile {
                 id: Uuid::new_v4().to_string(),
                 name: prof_name,
@@ -2975,6 +4086,43 @@ pub async fn create_vps_device_keys(
             };
             st_profile.uri = build_profile_uri(&st_profile);
             created_profiles.push(st_profile);
+            continue;
+        }
+
+        if proto == "vless" {
+            if let Err(err) = ensure_vless_reality_ready(
+                app,
+                &sess,
+                &target,
+                creds,
+                &mut cfg,
+                &mut reality_json_opt,
+                &mut reality_loaded,
+                &mut reality_dirty,
+                &mut cfg_dirty,
+                &mut host_probe,
+                &mut extra_fw_rules,
+            )
+            .await
+            {
+                skipped_reasons.push(err);
+                continue;
+            }
+        } else if let Err(err) = ensure_standard_inbound_ready(
+            app,
+            &sess,
+            &target,
+            creds,
+            proto,
+            &mut cfg,
+            &mut cfg_dirty,
+            &mut host_probe,
+            &mut certs_ready,
+            &mut extra_fw_rules,
+        )
+        .await
+        {
+            skipped_reasons.push(err);
             continue;
         }
 
@@ -3014,6 +4162,21 @@ pub async fn create_vps_device_keys(
         let mut found_obfs: Option<String> = None;
         let mut found_ws_path: Option<String> = None;
         let mut updated = false;
+
+        let prof_name = if unique_protos.len() > 1 {
+            let tag = match proto.as_str() {
+                "vless" => "VLESS",
+                "hysteria2" => "Hy2",
+                "tuic" => "TUIC",
+                "shadowsocks" => "SS",
+                "vless_ws" => "CDN WS",
+                "webrtc" => "WebRTC",
+                other => other,
+            };
+            format!("{} ({})", clean_name, tag)
+        } else {
+            clean_name.clone()
+        };
 
         for inbound in inbounds.iter_mut() {
             let ib_type = inbound["type"].as_str().unwrap_or("");
@@ -3060,32 +4223,37 @@ pub async fn create_vps_device_keys(
                         .to_string();
                 }
                 updated = !ss_user_pw.is_empty();
-            } else if let Some(users) = inbound["users"].as_array_mut() {
-                if proto == "vless" {
-                    users.push(json!({
-                        "name": clean_name,
-                        "uuid": new_uuid,
-                        "flow": "xtls-rprx-vision"
-                    }));
-                } else if proto == "vless_ws" || proto == "webrtc" {
-                    users.push(json!({
-                        "name": clean_name,
-                        "uuid": new_uuid
-                    }));
-                } else if proto == "tuic" {
-                    users.push(json!({
-                        "name": clean_name,
-                        "uuid": new_uuid,
-                        "password": new_password
-                    }));
-                } else {
-                    users.push(json!({
-                        "name": clean_name,
-                        "password": new_password
-                    }));
+            } else {
+                if !inbound["users"].is_array() {
+                    inbound["users"] = json!([]);
                 }
-                updated = true;
-                cfg_dirty = true;
+                if let Some(users) = inbound["users"].as_array_mut() {
+                    if proto == "vless" {
+                        users.push(json!({
+                            "name": prof_name,
+                            "uuid": new_uuid,
+                            "flow": "xtls-rprx-vision"
+                        }));
+                    } else if proto == "vless_ws" || proto == "webrtc" {
+                        users.push(json!({
+                            "name": prof_name,
+                            "uuid": new_uuid
+                        }));
+                    } else if proto == "tuic" {
+                        users.push(json!({
+                            "name": prof_name,
+                            "uuid": new_uuid,
+                            "password": new_password
+                        }));
+                    } else {
+                        users.push(json!({
+                            "name": prof_name,
+                            "password": new_password
+                        }));
+                    }
+                    updated = true;
+                    cfg_dirty = true;
+                }
             }
             break;
         }
@@ -3114,21 +4282,6 @@ pub async fn create_vps_device_keys(
             }
         } else {
             (None, None)
-        };
-
-        let prof_name = if unique_protos.len() > 1 {
-            let tag = match proto.as_str() {
-                "vless" => "VLESS",
-                "hysteria2" => "Hy2",
-                "tuic" => "TUIC",
-                "shadowsocks" => "SS",
-                "vless_ws" => "CDN WS",
-                "webrtc" => "WebRTC",
-                other => other,
-            };
-            format!("{} ({})", clean_name, tag)
-        } else {
-            clean_name.clone()
         };
 
         let cdn_host = if proto == "vless_ws" {
@@ -3201,7 +4354,40 @@ pub async fn create_vps_device_keys(
         return Err(skipped_reasons.join(" "));
     }
 
-    if cfg_dirty || awg_dirty || awg2_dirty {
+    let mut multi_dirty = false;
+    let mut multi_json_str = String::new();
+    if created_profiles.len() >= 2 {
+        let group_id = Uuid::new_v4().to_string();
+        let group_name = clean_name.clone();
+        let multi_file = format!("{}/multi_protocols.json", target.cdir);
+        let (_, existing_multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null || true", multi_file))
+            .await
+            .unwrap_or((1, String::new()));
+        let mut stored_groups: Vec<StoredMultiGroup> = serde_json::from_str(&existing_multi_raw).unwrap_or_default();
+
+        let mut items: Vec<StoredMultiItem> = Vec::new();
+        for p in &mut created_profiles {
+            p.multi_group_id = Some(group_id.clone());
+            p.multi_group_name = Some(group_name.clone());
+            items.push(StoredMultiItem {
+                protocol: p.protocol.clone(),
+                port: p.port,
+                credential: profile_credential(p),
+                ip: p.awg_local_address.clone(),
+                label: p.name.clone(),
+            });
+        }
+        stored_groups.push(StoredMultiGroup {
+            id: group_id,
+            name: group_name,
+            created_at: chrono::Local::now().format("%d.%m.%Y %H:%M").to_string(),
+            items,
+        });
+        multi_json_str = serde_json::to_string_pretty(&stored_groups).map_err(|e| e.to_string())?;
+        multi_dirty = true;
+    }
+
+    if cfg_dirty || awg_dirty || awg2_dirty || reality_dirty || multi_dirty || !extra_fw_rules.is_empty() {
         let mut cmd_parts = Vec::new();
         if cfg_dirty {
             let new_cfg_str = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -3228,7 +4414,32 @@ pub async fn create_vps_device_keys(
                 ));
             }
         }
-        cmd_parts.push(build_container_restart_cmd(&target, true));
+        if reality_dirty {
+            if let Some(ref real_json) = reality_json_opt {
+                let new_real_str = serde_json::to_string_pretty(real_json).unwrap_or_default();
+                cmd_parts.push(format!(
+                    "cat << 'EOF_REAL' > \"{}\"\n{}\nEOF_REAL\nchmod 600 \"{}\"",
+                    reality_file, new_real_str, reality_file
+                ));
+            }
+        }
+        if multi_dirty {
+            let multi_file = format!("{}/multi_protocols.json", target.cdir);
+            cmd_parts.push(format!(
+                "cat << 'EOF_MULTI' > \"{}\"\n{}\nEOF_MULTI\nchmod 600 \"{}\"",
+                multi_file, multi_json_str, multi_file
+            ));
+        }
+        if !extra_fw_rules.trim().is_empty() {
+            cmd_parts.push(format!(
+                "{}\nif command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --reload >/dev/null 2>&1 || true; fi\nif command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save >/dev/null 2>&1 || true; fi\nif [ -d /etc/iptables ]; then iptables-save > /etc/iptables/rules.v4 2>/dev/null || true; fi",
+                extra_fw_rules.trim()
+            ));
+        }
+        let needs_restart = cfg_dirty || awg_dirty || awg2_dirty || reality_dirty;
+        if needs_restart {
+            cmd_parts.push(build_container_restart_cmd(&target, true));
+        }
         let update_cmd = cmd_parts.join("\n");
 
         let (restart_code, restart_out) = run_remote_cmd(&sess, &update_cmd).await?;
@@ -3236,7 +4447,7 @@ pub async fn create_vps_device_keys(
             .disconnect(russh::Disconnect::ByApplication, "done", "en")
             .await;
 
-        if restart_code != 0 || !restart_out.contains("active") {
+        if needs_restart && (restart_code != 0 || !restart_out.contains("active")) {
             return Err(format!(
                 "Ошибка перезапуска контейнера {} после добавления устройства: {}",
                 target.id, restart_out
@@ -3765,6 +4976,7 @@ pub async fn fetch_vps_admin_state(
 
     let mut containers: Vec<VpsContainerInfo> = Vec::new();
     let mut all_profiles: Vec<VpnProfile> = Vec::new();
+    let mut all_multi_groups: Vec<VpsMultiProtocolGroup> = Vec::new();
 
     if has_legacy {
         let (_, legacy_status_out) = run_remote_cmd(&sess, "systemctl is-active sing-box 2>/dev/null || echo inactive")
@@ -3773,9 +4985,10 @@ pub async fn fetch_vps_admin_state(
         let (_, real_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/reality.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
         let (_, awg_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/awg.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
         let (_, awg2_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/awg2.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
+        let (_, multi_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/multi_protocols.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
 
         if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&legacy_cfg_raw) {
-            let (profs, protos, ports) = parse_container_profiles(
+            let (mut profs, protos, ports) = parse_container_profiles(
                 "legacy-singbox",
                 &connect_host,
                 creds,
@@ -3786,8 +4999,10 @@ pub async fn fetch_vps_admin_state(
                 creds.enable_port_hopping,
                 multi_container_host,
             );
+            let m_groups = apply_multi_groups(&mut profs, "legacy-singbox", &multi_raw);
             let client_count = profs.len();
             all_profiles.extend(profs);
+            all_multi_groups.extend(m_groups);
             containers.push(VpsContainerInfo {
                 id: "legacy-singbox".to_string(),
                 name: "Основной сервис (sing-box)".to_string(),
@@ -3820,6 +5035,9 @@ pub async fn fetch_vps_admin_state(
             .await
             .unwrap_or((1, String::new()));
         let (_, awg2_raw) = run_remote_cmd(&sess, &format!("cat \"{}/awg2.json\" 2>/dev/null || true", cdir))
+            .await
+            .unwrap_or((1, String::new()));
+        let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}/multi_protocols.json\" 2>/dev/null || true", cdir))
             .await
             .unwrap_or((1, String::new()));
 
@@ -3870,7 +5088,7 @@ pub async fn fetch_vps_admin_state(
             }
         };
 
-        let (profs, protos, ports) = parse_container_profiles(
+        let (mut profs, protos, ports) = parse_container_profiles(
             cid,
             &connect_host,
             creds,
@@ -3881,8 +5099,10 @@ pub async fn fetch_vps_admin_state(
             enable_port_hopping,
             multi_container_host,
         );
+        let m_groups = apply_multi_groups(&mut profs, cid, &multi_raw);
         let client_count = profs.len();
         all_profiles.extend(profs);
+        all_multi_groups.extend(m_groups);
 
         containers.push(VpsContainerInfo {
             id: cid.clone(),
@@ -3982,15 +5202,17 @@ pub async fn fetch_vps_admin_state(
     emit_log(
         app,
         &format!(
-            "Успешно авторизовано на сервере. Контейнеров: {}, ключей: {}",
+            "Успешно авторизовано на сервере. Контейнеров: {}, ключей: {}, мульти-групп: {}",
             containers.len(),
-            all_profiles.len()
+            all_profiles.len(),
+            all_multi_groups.len()
         ),
     );
 
     Ok(VpsAdminState {
         containers,
         profiles: all_profiles,
+        multi_groups: all_multi_groups,
     })
 }
 
@@ -4090,59 +5312,23 @@ pub async fn manage_vps_container(
     Ok(msg)
 }
 
-pub async fn delete_vps_device(
-    app: &AppHandle,
-    creds: &VpsCredentials,
+struct RemovalState {
+    awg_json: Option<serde_json::Value>,
+    awg_dirty: bool,
+    awg_empty: bool,
+    awg2_json: Option<serde_json::Value>,
+    awg2_dirty: bool,
+    awg2_empty: bool,
+}
+
+fn remove_profile_in_memory(
+    cfg: &mut serde_json::Value,
+    state: &mut RemovalState,
     profile: &VpnProfile,
-) -> Result<(), String> {
-    emit_log(
-        app,
-        &format!(
-            "Удаление конфигурации «{}» ({}) с сервера {}...",
-            profile.name, profile.protocol, creds.host
-        ),
-    );
-    let sess = connect_ssh(app, creds).await?;
-
-    let target = match resolve_container_target(
-        &sess,
-        profile.container_id.as_deref(),
-        if profile.port > 0 { Some(profile.port) } else { None },
-    )
-    .await
-    {
-        Ok(t) => t,
-        Err(_) => {
-            let _ = sess.disconnect(russh::Disconnect::ByApplication, "done", "en").await;
-            return Ok(());
-        }
-    };
-
-    let (code, raw_cfg) = run_remote_cmd(&sess, &format!("cat \"{}/config.json\" 2>/dev/null", target.cdir)).await?;
-    if code != 0 || raw_cfg.trim().is_empty() {
-        let _ = sess
-            .disconnect(russh::Disconnect::ByApplication, "done", "en")
-            .await;
-        return Ok(());
-    }
-
-    let mut cfg: serde_json::Value = serde_json::from_str(&raw_cfg)
-        .map_err(|e| format!("Ошибка разбора серверного config.json: {}", e))?;
-
+) {
     let proto = profile.protocol.as_str();
-    let mut awg_update_script = String::new();
-
     if proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless" || proto == "awg2" {
         let is_awg2 = proto == "awg2" || profile.awg_version.as_deref() == Some("2.0");
-        let awg_file = if is_awg2 {
-            format!("{}/awg2.json", target.cdir)
-        } else {
-            format!("{}/awg.json", target.cdir)
-        };
-        let (_, awg_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file))
-            .await
-            .unwrap_or((1, String::new()));
-
         let prof_priv = profile
             .awg_private_key
             .as_deref()
@@ -4155,10 +5341,20 @@ pub async fn delete_vps_device(
         } else {
             None
         };
-        let mut removed_vless_uuid: Option<String> = profile.uuid.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let mut removed_vless_uuid: Option<String> = profile
+            .uuid
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let mut remaining_devices_count = 0usize;
 
-        if let Ok(mut awg_json) = serde_json::from_str::<serde_json::Value>(&awg_raw) {
+        let target_awg_opt = if is_awg2 {
+            &mut state.awg2_json
+        } else {
+            &mut state.awg_json
+        };
+
+        if let Some(awg_json) = target_awg_opt.as_mut() {
             if let Some(devs) = awg_json["devices"].as_array_mut() {
                 devs.retain(|d| {
                     let d_priv = d["client_private_key"].as_str().unwrap_or("").trim();
@@ -4175,7 +5371,10 @@ pub async fn delete_vps_device(
                             removed_ip = Some(ip.to_string());
                         }
                         if removed_vless_uuid.is_none() {
-                            removed_vless_uuid = d["vless_uuid"].as_str().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+                            removed_vless_uuid = d["vless_uuid"]
+                                .as_str()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
                         }
                         false
                     } else {
@@ -4202,18 +5401,17 @@ pub async fn delete_vps_device(
                     awg_json["client_public_key"] = json!("");
                     awg_json["devices"] = json!([]);
                     remaining_devices_count = 0;
+                } else {
+                    remaining_devices_count = 1;
                 }
             }
 
-            if remaining_devices_count == 0 {
-                awg_update_script = format!("rm -f \"{}\"\n", awg_file);
+            if is_awg2 {
+                state.awg2_dirty = true;
+                state.awg2_empty = remaining_devices_count == 0;
             } else {
-                let new_awg_str = serde_json::to_string_pretty(&awg_json).unwrap_or_default();
-                awg_update_script = format!(
-                    "cat << 'EOF_AWG' > \"{awg_file}\"\n{new_awg_str}\nEOF_AWG\nchmod 600 \"{awg_file}\"\n",
-                    awg_file = awg_file,
-                    new_awg_str = new_awg_str
-                );
+                state.awg_dirty = true;
+                state.awg_empty = remaining_devices_count == 0;
             }
         }
 
@@ -4344,12 +5542,12 @@ pub async fn delete_vps_device(
                     let u_uuid = u["uuid"].as_str().unwrap_or("").trim();
                     let u_pw = u["password"].as_str().unwrap_or("").trim();
                     let matched = if proto == "shadowtls" {
-                        (!prof_st_pw.is_empty() && u_pw == prof_st_pw) || u_name == prof_name
+                        (!prof_st_pw.is_empty() && u_pw == prof_st_pw) || (prof_st_pw.is_empty() && u_name == prof_name)
                     } else {
                         (!prof_uuid.is_empty() && u_uuid == prof_uuid)
                             || (!prof_pw.is_empty() && u_pw == prof_pw)
                             || (!prof_pw.is_empty() && u_uuid == prof_pw)
-                            || u_name == prof_name
+                            || (prof_uuid.is_empty() && prof_pw.is_empty() && u_name == prof_name)
                     };
                     !matched
                 });
@@ -4362,6 +5560,165 @@ pub async fn delete_vps_device(
             }
         });
     }
+}
+
+fn build_multi_prune_script(
+    multi_file: &str,
+    multi_raw: &str,
+    target_group_id: Option<&str>,
+    removed_profiles: &[&VpnProfile],
+) -> String {
+    let trimmed = multi_raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let Ok(mut groups) = serde_json::from_str::<Vec<StoredMultiGroup>>(trimmed) else {
+        return String::new();
+    };
+    let initial_len = groups.len();
+    let mut changed = false;
+
+    groups.retain_mut(|g| {
+        if let Some(gid) = target_group_id {
+            if !gid.is_empty() && g.id == gid {
+                changed = true;
+                return false;
+            }
+        }
+        let item_before = g.items.len();
+        g.items.retain(|it| {
+            let it_cred = it.credential.trim();
+            let hit = removed_profiles.iter().any(|rp| {
+                let rp_cred = profile_credential(rp);
+                rp.protocol == it.protocol
+                    && (it.port == 0 || rp.port == it.port)
+                    && ((!it_cred.is_empty() && rp_cred == it_cred)
+                        || (it.ip.is_some() && rp.awg_local_address == it.ip)
+                        || (!it.label.trim().is_empty() && rp.name.trim() == it.label.trim()))
+            });
+            !hit
+        });
+        if g.items.len() != item_before {
+            changed = true;
+        }
+        g.items.len() >= 2
+    });
+
+    if !changed && groups.len() == initial_len {
+        return String::new();
+    }
+
+    if groups.is_empty() {
+        format!("rm -f \"{}\"\n", multi_file)
+    } else if let Ok(serialized) = serde_json::to_string_pretty(&groups) {
+        format!(
+            "cat << 'EOF_MULTI' > \"{multi_file}\"\n{serialized}\nEOF_MULTI\nchmod 600 \"{multi_file}\"\n"
+        )
+    } else {
+        String::new()
+    }
+}
+
+pub async fn delete_vps_device(
+    app: &AppHandle,
+    creds: &VpsCredentials,
+    profile: &VpnProfile,
+) -> Result<(), String> {
+    emit_log(
+        app,
+        &format!(
+            "Удаление конфигурации «{}» ({}) с сервера {}...",
+            profile.name, profile.protocol, creds.host
+        ),
+    );
+    let sess = connect_ssh(app, creds).await?;
+
+    let target = match resolve_container_target(
+        &sess,
+        profile.container_id.as_deref(),
+        if profile.port > 0 { Some(profile.port) } else { None },
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = sess.disconnect(russh::Disconnect::ByApplication, "done", "en").await;
+            return Ok(());
+        }
+    };
+
+    let (code, raw_cfg) = run_remote_cmd(&sess, &format!("cat \"{}/config.json\" 2>/dev/null", target.cdir)).await?;
+    if code != 0 || raw_cfg.trim().is_empty() {
+        let _ = sess
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await;
+        return Ok(());
+    }
+
+    let mut cfg: serde_json::Value = serde_json::from_str(&raw_cfg)
+        .map_err(|e| format!("Ошибка разбора серверного config.json: {}", e))?;
+
+    let awg_file = format!("{}/awg.json", target.cdir);
+    let awg2_file = format!("{}/awg2.json", target.cdir);
+    let multi_file = format!("{}/multi_protocols.json", target.cdir);
+
+    let proto = profile.protocol.as_str();
+    let needs_awg = proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless";
+    let needs_awg2 = proto == "awg2";
+
+    let awg_json = if needs_awg {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
+    let awg2_json = if needs_awg2 {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg2_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
+    let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null || true", multi_file))
+        .await
+        .unwrap_or((1, String::new()));
+
+    let mut rem_state = RemovalState {
+        awg_json,
+        awg_dirty: false,
+        awg_empty: false,
+        awg2_json,
+        awg2_dirty: false,
+        awg2_empty: false,
+    };
+    remove_profile_in_memory(&mut cfg, &mut rem_state, profile);
+
+    let mut awg_update_script = String::new();
+    if rem_state.awg_dirty {
+        if rem_state.awg_empty {
+            awg_update_script.push_str(&format!("rm -f \"{}\"\n", awg_file));
+        } else if let Some(ref j) = rem_state.awg_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            awg_update_script.push_str(&format!(
+                "cat << 'EOF_AWG' > \"{awg_file}\"\n{s}\nEOF_AWG\nchmod 600 \"{awg_file}\"\n"
+            ));
+        }
+    }
+    if rem_state.awg2_dirty {
+        if rem_state.awg2_empty {
+            awg_update_script.push_str(&format!("rm -f \"{}\"\n", awg2_file));
+        } else if let Some(ref j) = rem_state.awg2_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            awg_update_script.push_str(&format!(
+                "cat << 'EOF_AWG2' > \"{awg2_file}\"\n{s}\nEOF_AWG2\nchmod 600 \"{awg2_file}\"\n"
+            ));
+        }
+    }
+    let multi_script = build_multi_prune_script(&multi_file, &multi_raw, None, &[profile]);
+    awg_update_script.push_str(&multi_script);
 
     let has_inbounds = cfg["inbounds"]
         .as_array()
@@ -4405,6 +5762,168 @@ EOF_CFG
         &format!(
             "Конфигурация «{}» успешно удалена с сервера {} (контейнер {})!",
             profile.name, creds.host, target.id
+        ),
+    );
+    Ok(())
+}
+
+pub async fn delete_vps_multi_group(
+    app: &AppHandle,
+    creds: &VpsCredentials,
+    profiles: &[VpnProfile],
+    group_id: Option<&str>,
+    group_name: &str,
+) -> Result<(), String> {
+    if profiles.is_empty() {
+        return Ok(());
+    }
+    emit_log(
+        app,
+        &format!(
+            "Удаление мультипротокольной группы «{}» ({} ключей) с сервера {}...",
+            group_name,
+            profiles.len(),
+            creds.host
+        ),
+    );
+    let sess = connect_ssh(app, creds).await?;
+
+    let first = &profiles[0];
+    let target = match resolve_container_target(
+        &sess,
+        first.container_id.as_deref(),
+        if first.port > 0 { Some(first.port) } else { None },
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = sess.disconnect(russh::Disconnect::ByApplication, "done", "en").await;
+            return Ok(());
+        }
+    };
+
+    let (code, raw_cfg) = run_remote_cmd(&sess, &format!("cat \"{}/config.json\" 2>/dev/null", target.cdir)).await?;
+    if code != 0 || raw_cfg.trim().is_empty() {
+        let _ = sess
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await;
+        return Ok(());
+    }
+
+    let mut cfg: serde_json::Value = serde_json::from_str(&raw_cfg)
+        .map_err(|e| format!("Ошибка разбора серверного config.json: {}", e))?;
+
+    let awg_file = format!("{}/awg.json", target.cdir);
+    let awg2_file = format!("{}/awg2.json", target.cdir);
+    let multi_file = format!("{}/multi_protocols.json", target.cdir);
+
+    let needs_awg = profiles.iter().any(|p| {
+        p.protocol == "amneziawg" || p.protocol == "awg_quic" || p.protocol == "awg_vless"
+    });
+    let needs_awg2 = profiles.iter().any(|p| p.protocol == "awg2");
+
+    let awg_json = if needs_awg {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
+    let awg2_json = if needs_awg2 {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg2_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
+    let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null || true", multi_file))
+        .await
+        .unwrap_or((1, String::new()));
+
+    let mut rem_state = RemovalState {
+        awg_json,
+        awg_dirty: false,
+        awg_empty: false,
+        awg2_json,
+        awg2_dirty: false,
+        awg2_empty: false,
+    };
+
+    for prof in profiles {
+        remove_profile_in_memory(&mut cfg, &mut rem_state, prof);
+    }
+
+    let mut extra_script = String::new();
+    if rem_state.awg_dirty {
+        if rem_state.awg_empty {
+            extra_script.push_str(&format!("rm -f \"{}\"\n", awg_file));
+        } else if let Some(ref j) = rem_state.awg_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            extra_script.push_str(&format!(
+                "cat << 'EOF_AWG' > \"{awg_file}\"\n{s}\nEOF_AWG\nchmod 600 \"{awg_file}\"\n"
+            ));
+        }
+    }
+    if rem_state.awg2_dirty {
+        if rem_state.awg2_empty {
+            extra_script.push_str(&format!("rm -f \"{}\"\n", awg2_file));
+        } else if let Some(ref j) = rem_state.awg2_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            extra_script.push_str(&format!(
+                "cat << 'EOF_AWG2' > \"{awg2_file}\"\n{s}\nEOF_AWG2\nchmod 600 \"{awg2_file}\"\n"
+            ));
+        }
+    }
+
+    let prof_refs: Vec<&VpnProfile> = profiles.iter().collect();
+    let multi_script = build_multi_prune_script(&multi_file, &multi_raw, group_id, &prof_refs);
+    extra_script.push_str(&multi_script);
+
+    let has_inbounds = cfg["inbounds"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    let has_endpoints = cfg["endpoints"]
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+
+    if !has_endpoints {
+        if let Some(obj) = cfg.as_object_mut() {
+            obj.remove("endpoints");
+        }
+    }
+
+    let new_cfg_str = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    let service_action = build_container_restart_cmd(&target, has_inbounds || has_endpoints);
+
+    let update_cmd = format!(
+        r#"
+cat << 'EOF_CFG' > "{cdir}/config.json"
+{new_cfg_str}
+EOF_CFG
+{extra_script}
+{service_action}
+"#,
+        cdir = target.cdir,
+        new_cfg_str = new_cfg_str,
+        extra_script = extra_script,
+        service_action = service_action
+    );
+
+    let _ = run_remote_cmd(&sess, &update_cmd).await?;
+    let _ = sess
+        .disconnect(russh::Disconnect::ByApplication, "done", "en")
+        .await;
+
+    emit_log(
+        app,
+        &format!(
+            "Мультипротокольная группа «{}» удалена с сервера {} (контейнер {})!",
+            group_name, creds.host, target.id
         ),
     );
     Ok(())

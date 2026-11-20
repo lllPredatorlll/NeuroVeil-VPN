@@ -124,6 +124,10 @@ pub struct VpnProfile {
     pub total_down_bytes: u64,
     #[serde(default)]
     pub container_id: Option<String>,
+    #[serde(default)]
+    pub multi_group_id: Option<String>,
+    #[serde(default)]
+    pub multi_group_name: Option<String>,
 }
 
 impl Default for VpnProfile {
@@ -197,6 +201,8 @@ impl Default for VpnProfile {
             total_up_bytes: 0,
             total_down_bytes: 0,
             container_id: None,
+            multi_group_id: None,
+            multi_group_name: None,
         }
     }
 }
@@ -698,9 +704,24 @@ pub struct VpsContainerInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpsMultiProtocolGroup {
+    pub id: String,
+    pub name: String,
+    pub container_id: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub protocols: Vec<String>,
+    #[serde(default)]
+    pub profile_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpsAdminState {
     pub containers: Vec<VpsContainerInfo>,
     pub profiles: Vec<VpnProfile>,
+    #[serde(default)]
+    pub multi_groups: Vec<VpsMultiProtocolGroup>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

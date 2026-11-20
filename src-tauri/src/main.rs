@@ -10,10 +10,11 @@ use models::{
     VpsAdminState, VpsCredentials,
 };
 use singbox::{
-    build_awg_conf, build_profile_uri, check_singbox_version, collect_exe_in_dir,
-    download_singbox_core, generate_mobile_singbox_config, generate_singbox_config,
-    generate_singbox_config_with_port, get_app_data_dir,
-    get_profile_candidate_ports, get_singbox_bin_path, parse_profile_uri,
+    build_awg_conf, build_multi_zip_bytes, build_profile_uri, check_singbox_version,
+    collect_exe_in_dir, download_singbox_core, generate_mobile_singbox_config,
+    generate_multi_singbox_config, generate_singbox_config, generate_singbox_config_with_port,
+    get_app_data_dir, get_profile_candidate_ports, get_singbox_bin_path,
+    parse_multi_profiles_input, parse_multi_zip_bytes, parse_profile_uri,
     reset_stale_app_sockets, set_windows_system_proxy, write_routing_rulesets,
 };
 use std::fs;
@@ -1578,18 +1579,24 @@ fn add_or_update_profile(
 }
 
 #[tauri::command]
-fn import_profile_uri(app: AppHandle, uri: String, state: State<'_, SharedState>) -> Result<VpnProfile, String> {
+fn import_profile_uri(app: AppHandle, uri: String, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
     use tauri::Emitter;
-    let mut profile = parse_profile_uri(&uri)?;
-    profile.pinned_on_pc = Some(true);
+    let mut imported = parse_multi_profiles_input(&uri)?;
+    if imported.is_empty() {
+        return Err("Не удалось распознать ни одного профиля".to_string());
+    }
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    rt.persistent.profiles.push(profile.clone());
+    for profile in imported.iter_mut() {
+        profile.pinned_on_pc = Some(true);
+        rt.persistent.profiles.push(profile.clone());
+    }
     if rt.persistent.selected_profile_id.is_none() {
-        rt.persistent.selected_profile_id = Some(profile.id.clone());
+        rt.persistent.selected_profile_id = imported.first().map(|p| p.id.clone());
     }
     save_persistent_state(&rt.persistent);
+    drop(rt);
     let _ = app.emit("state-updated", ());
-    Ok(profile)
+    Ok(imported)
 }
 
 #[tauri::command]
@@ -2214,15 +2221,15 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-async fn pick_config_file_and_import(app: AppHandle, state: State<'_, SharedState>) -> Result<Option<VpnProfile>, String> {
+async fn pick_config_file_and_import(app: AppHandle, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
     use tauri::Emitter;
     let file_path = tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>, String> {
         let ps_script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Title = "Выберите файл конфигурации VPN (.conf, .json, .txt)"
-$dlg.Filter = "Конфигурации VPN (*.conf;*.json;*.txt)|*.conf;*.json;*.txt|WireGuard / Amnezia (*.conf)|*.conf|sing-box (*.json)|*.json|Все файлы (*.*)|*.*"
+$dlg.Title = "Выберите файл конфигурации VPN (.conf, .json, .txt, .zip)"
+$dlg.Filter = "Конфигурации VPN (*.conf;*.json;*.txt;*.zip)|*.conf;*.json;*.txt;*.zip|WireGuard / Amnezia (*.conf)|*.conf|sing-box (*.json)|*.json|Архивы (*.zip)|*.zip|Все файлы (*.*)|*.*"
 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     Write-Output $dlg.FileName
 }
@@ -2245,47 +2252,46 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     let path_str = match file_path {
         Some(p) => p,
-        None => return Ok(None),
+        None => return Ok(Vec::new()),
     };
 
     let path = std::path::Path::new(&path_str);
     let file_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("config").to_string();
-    let content = std::fs::read_to_string(path).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
+    let is_zip = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
 
-    let trimmed = content.trim();
-    let mut profile = match parse_profile_uri(trimmed) {
-        Ok(p) => p,
-        Err(e) => {
-            // Check if file contains lines with URIs
-            let mut found = None;
-            for line in trimmed.lines() {
-                let l = line.trim();
-                if !l.is_empty() && !l.starts_with('#') {
-                    if let Ok(p) = parse_profile_uri(l) {
-                        found = Some(p);
-                        break;
-                    }
-                }
-            }
-            found.ok_or(e)?
-        }
+    let mut imported = if is_zip {
+        let bytes = std::fs::read(path).map_err(|e| format!("Не удалось прочитать ZIP-архив: {}", e))?;
+        parse_multi_zip_bytes(&bytes)?
+    } else {
+        let content = std::fs::read_to_string(path).map_err(|e| format!("Не удалось прочитать файл: {}", e))?;
+        parse_multi_profiles_input(&content)?
     };
 
-    // Set profile name strictly to the config file name (file stem) without any protocol tags
-    if !file_stem.is_empty() {
-        profile.name = file_stem;
+    if imported.is_empty() {
+        return Err("В выбранном файле не найдены поддерживаемые конфигурации".to_string());
     }
-    profile.pinned_on_pc = Some(true);
+
+    // Set profile name to the config file stem only when importing a single profile
+    if imported.len() == 1 && !file_stem.is_empty() {
+        imported[0].name = file_stem;
+    }
 
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    rt.persistent.profiles.push(profile.clone());
+    for profile in imported.iter_mut() {
+        profile.pinned_on_pc = Some(true);
+        rt.persistent.profiles.push(profile.clone());
+    }
     if rt.persistent.selected_profile_id.is_none() {
-        rt.persistent.selected_profile_id = Some(profile.id.clone());
+        rt.persistent.selected_profile_id = imported.first().map(|p| p.id.clone());
     }
     save_persistent_state(&rt.persistent);
+    drop(rt);
     let _ = app.emit("state-updated", ());
 
-    Ok(Some(profile))
+    Ok(imported)
 }
 
 #[tauri::command]
@@ -2520,8 +2526,15 @@ fn sync_server_profiles_with_state(
 
         for s_prof in server_profiles.iter_mut() {
             if let Some(existing) = rt.persistent.profiles.iter_mut().find(|p| {
-                (p.server == s_prof.server && p.port == s_prof.port && p.password == s_prof.password)
-                    || (p.server == s_prof.server && p.port == s_prof.port && p.name == s_prof.name)
+                (p.server == s_prof.server
+                    && p.port == s_prof.port
+                    && p.protocol == s_prof.protocol
+                    && !s_prof.password.is_empty()
+                    && p.password == s_prof.password)
+                    || (p.server == s_prof.server
+                        && p.port == s_prof.port
+                        && p.protocol == s_prof.protocol
+                        && p.name == s_prof.name)
             }) {
                 s_prof.id = existing.id.clone();
                 let merged_up = existing.total_up_bytes.max(s_prof.total_up_bytes);
@@ -2533,6 +2546,8 @@ fn sync_server_profiles_with_state(
                 if existing.container_id.is_none() {
                     existing.container_id = s_prof.container_id.clone();
                 }
+                existing.multi_group_id = s_prof.multi_group_id.clone();
+                existing.multi_group_name = s_prof.multi_group_name.clone();
                 existing.awg_private_key = s_prof.awg_private_key.clone();
                 existing.awg_public_key = s_prof.awg_public_key.clone();
                 existing.awg_preshared_key = s_prof.awg_preshared_key.clone();
@@ -2672,17 +2687,81 @@ async fn delete_vps_device_cmd(
 
     let res = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        if rt.active_profile_id.as_deref() == Some(&profile.id) {
+            stop_singbox_internal(&mut rt);
+        }
         rt.persistent.profiles.retain(|p| {
             let same_id = p.id == profile.id;
             let same_creds = p.server == profile.server
                 && p.port == profile.port
+                && p.protocol == profile.protocol
                 && !profile.password.is_empty()
                 && p.password == profile.password;
-            let same_name = p.server == profile.server && p.name == profile.name;
+            let same_name =
+                p.server == profile.server && p.protocol == profile.protocol && p.name == profile.name;
             !(same_id || same_creds || same_name)
         });
-        if rt.persistent.selected_profile_id.as_deref() == Some(&profile.id) {
-            rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+        if let Some(sel) = rt.persistent.selected_profile_id.as_deref() {
+            if !rt.persistent.profiles.iter().any(|p| p.id == sel) {
+                rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+            }
+        }
+        save_persistent_state(&rt.persistent);
+        rt.persistent.profiles.clone()
+    };
+    {
+        use tauri::Emitter;
+        let _ = app.emit("state-updated", ());
+    }
+    Ok(res)
+}
+
+#[tauri::command]
+async fn delete_vps_multi_group_cmd(
+    app: AppHandle,
+    creds: VpsCredentials,
+    profiles: Vec<VpnProfile>,
+    group_id: Option<String>,
+    group_name: String,
+    state: State<'_, SharedState>,
+) -> Result<Vec<VpnProfile>, String> {
+    if !creds.host.trim().is_empty() && !creds.password.trim().is_empty() {
+        ssh_deployer::delete_vps_multi_group(
+            &app,
+            &creds,
+            &profiles,
+            group_id.as_deref(),
+            &group_name,
+        )
+        .await?;
+    }
+
+    let res = {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        let matches_target = |p: &VpnProfile| -> bool {
+            if let Some(ref gid) = group_id {
+                if !gid.is_empty() && p.multi_group_id.as_deref() == Some(gid.as_str()) {
+                    return true;
+                }
+            }
+            profiles.iter().any(|t| {
+                p.id == t.id
+                    || (p.server == t.server
+                        && p.port == t.port
+                        && p.protocol == t.protocol
+                        && ((!t.password.is_empty() && p.password == t.password) || p.name == t.name))
+            })
+        };
+        if let Some(ref aid) = rt.active_profile_id {
+            if rt.persistent.profiles.iter().any(|p| p.id == *aid && matches_target(p)) {
+                stop_singbox_internal(&mut rt);
+            }
+        }
+        rt.persistent.profiles.retain(|p| !matches_target(p));
+        if let Some(sel) = rt.persistent.selected_profile_id.as_deref() {
+            if !rt.persistent.profiles.iter().any(|p| p.id == sel) {
+                rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+            }
         }
         save_persistent_state(&rt.persistent);
         rt.persistent.profiles.clone()
@@ -2762,6 +2841,137 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
         }
         fs::write(&chosen_path, cfg_str)
             .map_err(|e| format!("Не удалось сохранить файл: {}", e))?;
+        Ok(Some(chosen_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn clean_export_stem(raw: &str, fallback: &str) -> String {
+    let clean: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = clean.trim_matches('_');
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[tauri::command]
+async fn export_multi_profile_json(
+    profiles: Vec<VpnProfile>,
+    group_name: String,
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
+    if profiles.is_empty() {
+        return Err("Список профилей мульти-протокола пуст".to_string());
+    }
+    let routing = {
+        let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        let mut mobile_routing = rt.persistent.routing.clone();
+        mobile_routing.mode = "tun".to_string();
+        mobile_routing.default_outbound = "proxy".to_string();
+        mobile_routing.proxy_processes.clear();
+        mobile_routing.direct_processes.clear();
+        mobile_routing
+    };
+
+    let cfg_val = generate_multi_singbox_config(&profiles, &group_name, &routing);
+    let cfg_str = serde_json::to_string_pretty(&cfg_val).map_err(|e| e.to_string())?;
+    let default_filename = format!("{}_multi.json", clean_export_stem(&group_name, "neuroveil"));
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let ps_script = format!(
+            r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.SaveFileDialog
+$dlg.Title = "Сохранить мульти-протокол sing-box (.json)"
+$dlg.Filter = "Конфигурация sing-box (*.json)|*.json"
+$dlg.FileName = "{}"
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dlg.FileName
+}}
+"#,
+            default_filename
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Sta", "-Command", &ps_script]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        let chosen_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if chosen_path.is_empty() {
+            return Ok(None);
+        }
+        fs::write(&chosen_path, cfg_str)
+            .map_err(|e| format!("Не удалось сохранить файл: {}", e))?;
+        Ok(Some(chosen_path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_multi_profile_zip(
+    profiles: Vec<VpnProfile>,
+    group_name: String,
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
+    if profiles.is_empty() {
+        return Err("Список профилей мульти-протокола пуст".to_string());
+    }
+    let routing = {
+        let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        let mut mobile_routing = rt.persistent.routing.clone();
+        mobile_routing.mode = "tun".to_string();
+        mobile_routing.default_outbound = "proxy".to_string();
+        mobile_routing.proxy_processes.clear();
+        mobile_routing.direct_processes.clear();
+        mobile_routing
+    };
+
+    let zip_bytes = build_multi_zip_bytes(&profiles, &group_name, &routing)?;
+    let default_filename = format!("{}_multi.zip", clean_export_stem(&group_name, "neuroveil"));
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let ps_script = format!(
+            r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.SaveFileDialog
+$dlg.Title = "Сохранить архив мульти-протокола (.zip)"
+$dlg.Filter = "ZIP-архив (*.zip)|*.zip"
+$dlg.FileName = "{}"
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dlg.FileName
+}}
+"#,
+            default_filename
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Sta", "-Command", &ps_script]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        let chosen_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if chosen_path.is_empty() {
+            return Ok(None);
+        }
+        fs::write(&chosen_path, zip_bytes)
+            .map_err(|e| format!("Не удалось сохранить ZIP-архив: {}", e))?;
         Ok(Some(chosen_path))
     })
     .await
@@ -3599,7 +3809,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 1058)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2020)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -3612,12 +3822,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 1058).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2020).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 1058).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2020).",
                         current_version
                     )
                 };
@@ -3625,7 +3835,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 1058)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2020)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4203,6 +4413,8 @@ fn main() {
             create_device_key,
             create_device_keys,
             export_profile_json,
+            export_multi_profile_json,
+            export_multi_profile_zip,
             export_awg_conf,
             probe_awg_ports,
             probe_profile_ports,
@@ -4210,6 +4422,7 @@ fn main() {
             get_vps_admin_state,
             manage_vps_container_cmd,
             delete_vps_device_cmd,
+            delete_vps_multi_group_cmd,
             app_start_dragging,
             app_minimize,
             app_toggle_maximize,

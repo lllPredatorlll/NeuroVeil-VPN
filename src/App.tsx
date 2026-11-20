@@ -58,6 +58,9 @@ import {
   RotateCcw,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Archive,
   Crown,
   CreditCard,
   Play,
@@ -66,7 +69,7 @@ import {
 } from "lucide-react";
 import QRCode from "qrcode";
 import appIconLogo from "./assets/app-icon.png";
-import { THEMES } from "./themes";
+import { THEMES, resolveThemeId } from "./themes";
 import { LOCALES, Language } from "./locales";
 import {
   AppPersistentState,
@@ -81,11 +84,12 @@ import {
   VpsAdminState,
   VpsContainerInfo,
   VpsCredentials,
+  VpsMultiProtocolGroup,
 } from "./types";
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2001";
+const APP_BUILD = "2020";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -331,6 +335,195 @@ function getProtocolBadgeStyle(meta: ProtocolMeta, lightTheme: boolean): React.C
   };
 }
 
+interface ProtocolPowerTheme {
+  idleBg: string;
+  idleBorder: string;
+  idleGlow: string;
+  idleIconBg: string;
+  connectedBg: string;
+  connectedBorder: string;
+  connectedGlow: string;
+  connectedIconBg: string;
+  pulseOverlay: string;
+  dotColor: string;
+}
+
+const PROTOCOL_POWER_THEMES: Record<string, ProtocolPowerTheme> = {
+  vless: {
+    idleBg: "linear-gradient(135deg, #0b1628 0%, #0e3a4d 100%)",
+    idleBorder: "rgba(34, 211, 238, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(34, 211, 238, 0.30)",
+    idleIconBg: "rgba(6, 182, 212, 0.28)",
+    connectedBg: "linear-gradient(135deg, #0e7490 0%, #0891b2 50%, #0e7490 100%)",
+    connectedBorder: "rgba(103, 232, 249, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(34, 211, 238, 0.45)",
+    connectedIconBg: "#06b6d4",
+    pulseOverlay: "rgba(34, 211, 238, 0.14)",
+    dotColor: "#67e8f9",
+  },
+  amneziawg: {
+    idleBg: "linear-gradient(135deg, #0b1918 0%, #0b4432 100%)",
+    idleBorder: "rgba(52, 211, 153, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(52, 211, 153, 0.30)",
+    idleIconBg: "rgba(16, 185, 129, 0.28)",
+    connectedBg: "linear-gradient(135deg, #047857 0%, #059669 50%, #0d9488 100%)",
+    connectedBorder: "rgba(110, 231, 183, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(16, 185, 129, 0.45)",
+    connectedIconBg: "#10b981",
+    pulseOverlay: "rgba(52, 211, 153, 0.14)",
+    dotColor: "#6ee7b7",
+  },
+  awg_quic: {
+    idleBg: "linear-gradient(135deg, #0b1829 0%, #0c4a6e 52%, #065f46 100%)",
+    idleBorder: "rgba(45, 212, 191, 0.62)",
+    idleGlow: "0 4px 16px -4px rgba(56, 189, 248, 0.32)",
+    idleIconBg: "linear-gradient(135deg, rgba(14, 165, 233, 0.36), rgba(16, 185, 129, 0.36))",
+    connectedBg: "linear-gradient(135deg, #0369a1 0%, #0d9488 52%, #059669 100%)",
+    connectedBorder: "rgba(94, 234, 212, 0.68)",
+    connectedGlow: "0 6px 20px -4px rgba(45, 212, 191, 0.45)",
+    connectedIconBg: "linear-gradient(135deg, #0ea5e9, #10b981)",
+    pulseOverlay: "rgba(45, 212, 191, 0.15)",
+    dotColor: "#5eead4",
+  },
+  awg_vless: {
+    idleBg: "linear-gradient(135deg, #064e3b 0%, #164e63 50%, #701a75 100%)",
+    idleBorder: "rgba(232, 121, 249, 0.62)",
+    idleGlow: "0 4px 16px -4px rgba(232, 121, 249, 0.32)",
+    idleIconBg: "linear-gradient(135deg, rgba(16, 185, 129, 0.34), rgba(217, 70, 239, 0.42))",
+    connectedBg: "linear-gradient(135deg, #059669 0%, #0891b2 48%, #a21caf 100%)",
+    connectedBorder: "rgba(240, 171, 252, 0.68)",
+    connectedGlow: "0 6px 20px -4px rgba(232, 121, 249, 0.48)",
+    connectedIconBg: "linear-gradient(135deg, #10b981, #d946ef)",
+    pulseOverlay: "rgba(232, 121, 249, 0.14)",
+    dotColor: "#f0abfc",
+  },
+  awg2: {
+    idleBg: "linear-gradient(135deg, #0a1b1b 0%, #115e59 100%)",
+    idleBorder: "rgba(45, 212, 191, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(45, 212, 191, 0.30)",
+    idleIconBg: "rgba(20, 184, 166, 0.28)",
+    connectedBg: "linear-gradient(135deg, #0f766e 0%, #0d9488 50%, #0f766e 100%)",
+    connectedBorder: "rgba(94, 234, 212, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(20, 184, 166, 0.45)",
+    connectedIconBg: "#14b8a6",
+    pulseOverlay: "rgba(45, 212, 191, 0.14)",
+    dotColor: "#5eead4",
+  },
+  hysteria2: {
+    idleBg: "linear-gradient(135deg, #18102a 0%, #4c1d95 100%)",
+    idleBorder: "rgba(192, 132, 252, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(192, 132, 252, 0.30)",
+    idleIconBg: "rgba(168, 85, 247, 0.30)",
+    connectedBg: "linear-gradient(135deg, #6b21a8 0%, #9333ea 50%, #7e22ce 100%)",
+    connectedBorder: "rgba(216, 180, 254, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(168, 85, 247, 0.45)",
+    connectedIconBg: "#a855f7",
+    pulseOverlay: "rgba(192, 132, 252, 0.14)",
+    dotColor: "#d8b4fe",
+  },
+  tuic: {
+    idleBg: "linear-gradient(135deg, #11152c 0%, #312e81 100%)",
+    idleBorder: "rgba(129, 140, 248, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(129, 140, 248, 0.30)",
+    idleIconBg: "rgba(99, 102, 241, 0.30)",
+    connectedBg: "linear-gradient(135deg, #3730a3 0%, #4f46e5 50%, #4338ca 100%)",
+    connectedBorder: "rgba(165, 180, 252, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(99, 102, 241, 0.45)",
+    connectedIconBg: "#6366f1",
+    pulseOverlay: "rgba(129, 140, 248, 0.14)",
+    dotColor: "#a5b4fc",
+  },
+  shadowtls: {
+    idleBg: "linear-gradient(135deg, #24101e 0%, #831843 100%)",
+    idleBorder: "rgba(244, 114, 182, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(244, 114, 182, 0.30)",
+    idleIconBg: "rgba(236, 72, 153, 0.30)",
+    connectedBg: "linear-gradient(135deg, #9d174d 0%, #db2777 50%, #be185d 100%)",
+    connectedBorder: "rgba(249, 168, 212, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(236, 72, 153, 0.45)",
+    connectedIconBg: "#ec4899",
+    pulseOverlay: "rgba(244, 114, 182, 0.14)",
+    dotColor: "#f9a8d4",
+  },
+  shadowsocks: {
+    idleBg: "linear-gradient(135deg, #21170a 0%, #78350f 100%)",
+    idleBorder: "rgba(251, 191, 36, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(251, 191, 36, 0.28)",
+    idleIconBg: "rgba(245, 158, 11, 0.28)",
+    connectedBg: "linear-gradient(135deg, #92400e 0%, #d97706 50%, #b45309 100%)",
+    connectedBorder: "rgba(252, 211, 77, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(245, 158, 11, 0.45)",
+    connectedIconBg: "#f59e0b",
+    pulseOverlay: "rgba(251, 191, 36, 0.14)",
+    dotColor: "#fcd34d",
+  },
+  vless_ws: {
+    idleBg: "linear-gradient(135deg, #24140a 0%, #7c2d12 100%)",
+    idleBorder: "rgba(251, 146, 60, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(251, 146, 60, 0.28)",
+    idleIconBg: "rgba(249, 115, 22, 0.28)",
+    connectedBg: "linear-gradient(135deg, #9a3412 0%, #ea580c 50%, #c2410c 100%)",
+    connectedBorder: "rgba(253, 186, 116, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(249, 115, 22, 0.45)",
+    connectedIconBg: "#f97316",
+    pulseOverlay: "rgba(251, 146, 60, 0.14)",
+    dotColor: "#fdba74",
+  },
+  webrtc: {
+    idleBg: "linear-gradient(135deg, #161f0a 0%, #365314 100%)",
+    idleBorder: "rgba(163, 230, 53, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(163, 230, 53, 0.26)",
+    idleIconBg: "rgba(132, 204, 22, 0.26)",
+    connectedBg: "linear-gradient(135deg, #3f6212 0%, #65a30d 50%, #4d7c0f 100%)",
+    connectedBorder: "rgba(190, 242, 100, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(132, 204, 22, 0.42)",
+    connectedIconBg: "#65a30d",
+    pulseOverlay: "rgba(163, 230, 53, 0.14)",
+    dotColor: "#bef264",
+  },
+  ssh: {
+    idleBg: "linear-gradient(135deg, #191229 0%, #4c1d95 100%)",
+    idleBorder: "rgba(167, 139, 250, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(167, 139, 250, 0.28)",
+    idleIconBg: "rgba(139, 92, 246, 0.28)",
+    connectedBg: "linear-gradient(135deg, #5b21b6 0%, #7c3aed 50%, #6d28d9 100%)",
+    connectedBorder: "rgba(196, 181, 253, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(139, 92, 246, 0.45)",
+    connectedIconBg: "#8b5cf6",
+    pulseOverlay: "rgba(167, 139, 250, 0.14)",
+    dotColor: "#c4b5fd",
+  },
+  wireguard: {
+    idleBg: "linear-gradient(135deg, #240f17 0%, #881337 100%)",
+    idleBorder: "rgba(251, 113, 133, 0.55)",
+    idleGlow: "0 4px 16px -4px rgba(251, 113, 133, 0.28)",
+    idleIconBg: "rgba(244, 63, 94, 0.28)",
+    connectedBg: "linear-gradient(135deg, #9f1239 0%, #e11d48 50%, #be123c 100%)",
+    connectedBorder: "rgba(253, 164, 175, 0.65)",
+    connectedGlow: "0 6px 20px -4px rgba(244, 63, 94, 0.45)",
+    connectedIconBg: "#f43f5e",
+    pulseOverlay: "rgba(251, 113, 133, 0.14)",
+    dotColor: "#fda4af",
+  },
+};
+
+function getProtocolPowerTheme(meta: ProtocolMeta): ProtocolPowerTheme {
+  return (
+    PROTOCOL_POWER_THEMES[meta.id] || {
+      idleBg: "linear-gradient(135deg, #1e293b 0%, #334155 100%)",
+      idleBorder: meta.border || "rgba(148, 163, 184, 0.45)",
+      idleGlow: "0 4px 14px -4px rgba(148, 163, 184, 0.25)",
+      idleIconBg: meta.bg || "rgba(148, 163, 184, 0.24)",
+      connectedBg: "linear-gradient(135deg, #047857 0%, #059669 50%, #0d9488 100%)",
+      connectedBorder: "rgba(110, 231, 183, 0.6)",
+      connectedGlow: "0 6px 18px -4px rgba(16, 185, 129, 0.4)",
+      connectedIconBg: "#10b981",
+      pulseOverlay: "rgba(52, 211, 153, 0.12)",
+      dotColor: "#6ee7b7",
+    }
+  );
+}
+
 type VpsDeviceProtocolId =
   | "vless"
   | "amneziawg"
@@ -496,10 +689,8 @@ export default function App() {
 
   // Visual Theme State
   const [currentThemeId, setCurrentThemeId] = useState<string>(() => {
-    return (
-      localStorage.getItem("neuroveil_theme") ||
-      localStorage.getItem("aegis_theme") ||
-      "cyber_obsidian"
+    return resolveThemeId(
+      localStorage.getItem("neuroveil_theme") || localStorage.getItem("aegis_theme")
     );
   });
   const currentTheme = THEMES.find((t) => t.id === currentThemeId) || THEMES[0];
@@ -565,14 +756,15 @@ export default function App() {
   };
 
   const handleSelectTheme = (themeId: string) => {
-    setCurrentThemeId(themeId);
-    localStorage.setItem("neuroveil_theme", themeId);
+    const resolved = resolveThemeId(themeId);
+    setCurrentThemeId(resolved);
+    localStorage.setItem("neuroveil_theme", resolved);
     invoke("emit_window_event", { event: "ui-prefs-updated", payload: {} }).catch(() => {});
-    const themeName = THEMES.find((t) => t.id === themeId)?.name || themeId;
+    const themeName = THEMES.find((t) => t.id === resolved)?.name || resolved;
     showNotice("success", `Тема «${themeName}» успешно применена!`);
   };
 
-  const isLightTheme = currentThemeId === "nordic_frost" || currentThemeId === "cyber_quartz";
+  const isLightTheme = Boolean(currentTheme.isLight);
 
   const cssVarsStyle = {
     "--bg-app": currentTheme.vars.bgApp,
@@ -737,6 +929,10 @@ export default function App() {
   const [isVpsAdmin, setIsVpsAdmin] = useState(false);
   const [adminLoginLoading, setAdminLoginLoading] = useState(false);
   const [vpsContainers, setVpsContainers] = useState<VpsContainerInfo[]>([]);
+  const [vpsMultiGroups, setVpsMultiGroups] = useState<VpsMultiProtocolGroup[]>([]);
+  const [expandedMultiGroupIds, setExpandedMultiGroupIds] = useState<string[]>([]);
+  const [copiedMultiId, setCopiedMultiId] = useState<string | null>(null);
+  const [deletingMultiGroupId, setDeletingMultiGroupId] = useState<string | null>(null);
   const [vpsAdminSubTab, setVpsAdminSubTab] = useState<"containers" | "configs" | "new_key">("containers");
   const [selectedAdminContainerId, setSelectedAdminContainerId] = useState<string>("");
   const [configsFilterContainerId, setConfigsFilterContainerId] = useState<string>("all");
@@ -950,8 +1146,9 @@ export default function App() {
 
       if (res.ui_prefs) {
         if (res.ui_prefs.theme) {
-          setCurrentThemeId(res.ui_prefs.theme);
-          localStorage.setItem("neuroveil_theme", res.ui_prefs.theme);
+          const resolvedTh = resolveThemeId(res.ui_prefs.theme);
+          setCurrentThemeId(resolvedTh);
+          localStorage.setItem("neuroveil_theme", resolvedTh);
         }
         if (res.ui_prefs.language === "ru" || res.ui_prefs.language === "en") {
           setLanguage(res.ui_prefs.language);
@@ -1012,7 +1209,7 @@ export default function App() {
         cdn_domain: "",
       }));
 
-      setCurrentThemeId("cyber_midnight");
+      setCurrentThemeId(THEMES[0].id);
       setWindowOpacity(100);
       setLanguage("ru");
       try {
@@ -1484,7 +1681,7 @@ export default function App() {
     const syncPrefsFromStorage = () => {
       try {
         const th = localStorage.getItem("neuroveil_theme") || localStorage.getItem("aegis_theme");
-        if (th) setCurrentThemeId(th);
+        if (th) setCurrentThemeId(resolveThemeId(th));
         const lg = localStorage.getItem("neuroveil_lang") as Language | null;
         if (lg) setLanguage(lg);
         const op =
@@ -1664,6 +1861,26 @@ export default function App() {
       showNotice("success", `Профиль «${prof.name}» добавлен на этот ПК`);
     } catch (e: any) {
       console.error(e);
+    }
+  };
+
+  const handlePinMultiGroupOnPc = async (items: VpnProfile[], groupName: string) => {
+    try {
+      let latestList: VpnProfile[] | null = null;
+      for (const item of items) {
+        latestList = await invoke<VpnProfile[]>("add_or_update_profile", {
+          profile: { ...item, pinned_on_pc: true },
+        });
+      }
+      if (latestList) {
+        setProfiles(latestList);
+      }
+      showNotice(
+        "success",
+        `Мульти-протокол «${groupName}» (${items.length} шт.) добавлен на этот ПК`
+      );
+    } catch (e: any) {
+      showNotice("error", String(e));
     }
   };
 
@@ -2186,12 +2403,22 @@ export default function App() {
   const handleImportUri = async () => {
     if (!uriInput.trim()) return;
     try {
-      const created = await invoke<VpnProfile>("import_profile_uri", { uri: uriInput.trim() });
+      const created = await invoke<VpnProfile[]>("import_profile_uri", { uri: uriInput.trim() });
       const appState = await invoke<AppPersistentState>("get_app_state");
       setProfiles(appState.profiles);
-      setSelectedProfileId(created.id);
+      if (created.length > 0) {
+        setSelectedProfileId(created[0].id);
+      }
       setUriInput("");
-      showNotice("success", `Профиль «${created.name}» успешно импортирован`);
+      if (created.length === 1) {
+        showNotice("success", `Профиль «${created[0].name}» успешно импортирован`);
+      } else if (created.length > 1) {
+        const gName = created[0].multi_group_name || "Мульти-протокол";
+        showNotice(
+          "success",
+          `Мульти-протокол «${gName}» (${created.length} шт.) успешно импортирован!`
+        );
+      }
     } catch (err: any) {
       showNotice("error", String(err));
     }
@@ -2199,15 +2426,23 @@ export default function App() {
 
   const handlePickConfigFile = async () => {
     try {
-      const created = await invoke<VpnProfile | null>("pick_config_file_and_import");
-      if (created) {
+      const created = await invoke<VpnProfile[]>("pick_config_file_and_import");
+      if (created && created.length > 0) {
         const appState = await invoke<AppPersistentState>("get_app_state");
         setProfiles(appState.profiles);
-        setSelectedProfileId(created.id);
-        showNotice(
-          "success",
-          `Конфигурация «${created.name}» успешно импортирована из файла!`
-        );
+        setSelectedProfileId(created[0].id);
+        if (created.length === 1) {
+          showNotice(
+            "success",
+            `Конфигурация «${created[0].name}» успешно импортирована из файла!`
+          );
+        } else {
+          const gName = created[0].multi_group_name || "Мульти-протокол";
+          showNotice(
+            "success",
+            `Мульти-протокол «${gName}» (${created.length} шт.) успешно импортирован из файла!`
+          );
+        }
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -2454,6 +2689,185 @@ export default function App() {
     }
   };
 
+  const handleCopyMultiUris = async (
+    items: VpnProfile[],
+    groupName: string,
+    keyId: string
+  ) => {
+    const text = items
+      .map((p) => `${p.name}: ${p.uri}`)
+      .filter((line) => line.trim().length > 0)
+      .join("\n");
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedMultiId(keyId);
+      setTimeout(() => setCopiedMultiId((prev) => (prev === keyId ? null : prev)), 2000);
+      showNotice("success", `Скопированы ссылки (${items.length}) для «${groupName}»`);
+    } catch {
+      showNotice("error", "Не удалось скопировать ссылки в буфер обмена");
+    }
+  };
+
+  const handleExportMultiJson = async (items: VpnProfile[], groupName: string) => {
+    try {
+      const savedPath = await invoke<string | null>("export_multi_profile_json", {
+        profiles: items,
+        groupName,
+      });
+      if (savedPath) {
+        showNotice("success", `Мульти-протокол (.json) сохранен: ${savedPath}`);
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
+    }
+  };
+
+  const handleExportMultiZip = async (items: VpnProfile[], groupName: string) => {
+    try {
+      const savedPath = await invoke<string | null>("export_multi_profile_zip", {
+        profiles: items,
+        groupName,
+      });
+      if (savedPath) {
+        showNotice("success", `Архив мульти-протокола (.zip) сохранен: ${savedPath}`);
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
+    }
+  };
+
+  const handleDeleteMultiGroup = async (
+    groupId: string | null | undefined,
+    groupName: string,
+    items: VpnProfile[],
+    keyId: string
+  ) => {
+    if (!items.length) return;
+    setDeletingMultiGroupId(keyId);
+    try {
+      const shouldDeleteFromVps =
+        isVpsAdmin && vpsCreds.host.trim().length > 0 && vpsCreds.password.trim().length > 0;
+      let updated: VpnProfile[];
+      if (shouldDeleteFromVps) {
+        showNotice(
+          "info",
+          `Удаление мульти-протокола «${groupName}» (${items.length}) с VPS ${vpsCreds.host}...`
+        );
+        updated = await invoke<VpnProfile[]>("delete_vps_multi_group_cmd", {
+          creds: vpsCreds,
+          profiles: items,
+          groupId: groupId || null,
+          groupName,
+        });
+      } else {
+        updated = profiles;
+        for (const item of items) {
+          updated = await invoke<VpnProfile[]>("delete_profile", { id: item.id });
+        }
+      }
+      setProfiles(updated);
+      const removedIds = new Set(items.map((x) => x.id));
+      setSyncedServerProfiles((prev) =>
+        prev.filter((p) => {
+          if (groupId && p.multi_group_id === groupId) return false;
+          if (removedIds.has(p.id)) return false;
+          return !items.some(
+            (t) =>
+              p.server === t.server &&
+              p.port === t.port &&
+              p.protocol === t.protocol &&
+              ((t.password && p.password === t.password) || p.name === t.name)
+          );
+        })
+      );
+      if (groupId) {
+        setVpsMultiGroups((prev) => prev.filter((g) => g.id !== groupId));
+      }
+      if (removedIds.has(selectedProfileId)) {
+        setSelectedProfileId(updated[0]?.id || "");
+      }
+      showNotice(
+        "success",
+        shouldDeleteFromVps
+          ? `Мульти-протокол «${groupName}» удален с VPS и в приложении`
+          : `Мульти-протокол «${groupName}» удален`
+      );
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setDeletingMultiGroupId(null);
+    }
+  };
+
+  type VpsConfigEntry =
+    | {
+        kind: "multi";
+        keyId: string;
+        groupId: string;
+        groupName: string;
+        containerId?: string | null;
+        profiles: VpnProfile[];
+      }
+    | {
+        kind: "single";
+        profile: VpnProfile;
+      };
+
+  const buildVpsConfigEntries = (list: VpnProfile[]): VpsConfigEntry[] => {
+    const buckets = new Map<string, VpnProfile[]>();
+    for (const p of list) {
+      const gid = (p.multi_group_id || "").trim();
+      if (!gid) continue;
+      const keyId = `${p.container_id || "legacy"}::${gid}`;
+      const arr = buckets.get(keyId);
+      if (arr) {
+        arr.push(p);
+      } else {
+        buckets.set(keyId, [p]);
+      }
+    }
+    const seenGroups = new Set<string>();
+    const entries: VpsConfigEntry[] = [];
+    for (const p of list) {
+      const gid = (p.multi_group_id || "").trim();
+      const keyId = gid ? `${p.container_id || "legacy"}::${gid}` : "";
+      const groupProfiles = keyId ? buckets.get(keyId) : undefined;
+      if (gid && groupProfiles && groupProfiles.length >= 2) {
+        if (seenGroups.has(keyId)) continue;
+        seenGroups.add(keyId);
+        const groupMeta = vpsMultiGroups.find((g) => g.id === gid);
+        const groupName =
+          groupProfiles.find((gp) => gp.multi_group_name)?.multi_group_name ||
+          groupMeta?.name ||
+          p.name.replace(/\s*\([^)]*\)\s*$/, "").trim() ||
+          "Мультипротокол";
+        entries.push({
+          kind: "multi",
+          keyId,
+          groupId: gid,
+          groupName,
+          containerId: p.container_id,
+          profiles: groupProfiles,
+        });
+      } else {
+        entries.push({ kind: "single", profile: p });
+      }
+    }
+    return entries;
+  };
+
+  const isServerProfilePinnedOnPc = (p: VpnProfile): boolean =>
+    profiles.some(
+      (lp) =>
+        lp.pinned_on_pc !== false &&
+        (lp.id === p.id ||
+          (lp.server === p.server &&
+            lp.port === p.port &&
+            lp.protocol === p.protocol &&
+            lp.password === p.password))
+    );
+
   const handleLoginVpsAdmin = async (silent = false) => {
     if (!vpsCreds.host.trim() || !vpsCreds.password.trim()) {
       showNotice("error", "Введите IP-адрес сервера и пароль SSH (root)");
@@ -2468,6 +2882,7 @@ export default function App() {
       setProfiles(appState.profiles);
       setVpsContainers(adminState.containers);
       setSyncedServerProfiles(adminState.profiles);
+      setVpsMultiGroups(adminState.multi_groups || []);
       if (adminState.containers.length > 0) {
         const nextCid =
           selectedAdminContainerId && adminState.containers.some((c) => c.id === selectedAdminContainerId)
@@ -2507,6 +2922,8 @@ export default function App() {
     setIsVpsAdmin(false);
     setVpsContainers([]);
     setSyncedServerProfiles([]);
+    setVpsMultiGroups([]);
+    setExpandedMultiGroupIds([]);
     setSelectedAdminContainerId("");
     setConfigsFilterContainerId("all");
     setConfirmDeleteContainerId(null);
@@ -3119,11 +3536,14 @@ export default function App() {
     return (
       <div
         data-theme={currentTheme.id}
+        data-theme-mode={isLightTheme ? "light" : "dark"}
         style={{
           ...cssVarsStyle,
           opacity: windowOpacity / 100,
         }}
-        className="flex flex-col h-screen w-screen overflow-hidden text-slate-100 select-none bg-[#090d16] border border-cyan-500/40 rounded-xl shadow-2xl relative"
+        className={`flex flex-col h-screen w-screen overflow-hidden ${
+          isLightTheme ? "text-slate-900" : "text-slate-100"
+        } select-none bg-[#090d16] border border-cyan-500/40 rounded-xl shadow-2xl relative`}
       >
         {/* Draggable Top Titlebar for Floating Popup Window */}
         <header className="h-9 w-full flex items-center justify-between px-3 pt-0.5 shrink-0 select-none cursor-default z-30 bg-transparent">
@@ -5555,7 +5975,7 @@ export default function App() {
                       </div>
                       <div className="text-[11px] text-slate-400">
                         Контейнеров: <b className="text-slate-200">{vpsContainers.length}</b> • Конфигураций:{" "}
-                        <b className="text-slate-200">{syncedServerProfiles.length}</b>
+                        <b className="text-slate-200">{buildVpsConfigEntries(syncedServerProfiles).length}</b>
                       </div>
                     </div>
                   </div>
@@ -5616,7 +6036,7 @@ export default function App() {
                     }`}
                   >
                     <Key className="w-3.5 h-3.5" />
-                    <span>Конфигурации ({syncedServerProfiles.length})</span>
+                    <span>Конфигурации ({buildVpsConfigEntries(syncedServerProfiles).length})</span>
                   </button>
                   <button
                     type="button"
@@ -5823,73 +6243,361 @@ export default function App() {
                   )}
 
                   {/* SUBTAB 2: CONFIGS / CLIENT KEYS */}
-                  {vpsAdminSubTab === "configs" && (
-                    <div className="space-y-2.5">
-                      {vpsContainers.length > 1 && (
-                        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
-                          <button
-                            type="button"
-                            onClick={() => setConfigsFilterContainerId("all")}
-                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
-                              configsFilterContainerId === "all"
-                                ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
-                                : "bg-[#0d1322] text-slate-400 hover:text-white"
-                            }`}
-                          >
-                            Все ({syncedServerProfiles.length})
-                          </button>
-                          {vpsContainers.map((c) => {
-                            const count = syncedServerProfiles.filter((p) => p.container_id === c.id).length;
-                            return (
-                              <button
-                                key={c.id}
-                                type="button"
-                                onClick={() => setConfigsFilterContainerId(c.id)}
-                                className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
-                                  configsFilterContainerId === c.id
-                                    ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
-                                    : "bg-[#0d1322] text-slate-400 hover:text-white"
-                                }`}
-                              >
-                                {c.name} ({count})
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
+                  {vpsAdminSubTab === "configs" && (() => {
+                    const allEntries = buildVpsConfigEntries(syncedServerProfiles);
+                    const filteredRaw = syncedServerProfiles.filter(
+                      (p) =>
+                        configsFilterContainerId === "all" ||
+                        p.container_id === configsFilterContainerId
+                    );
+                    const filteredEntries = buildVpsConfigEntries(filteredRaw);
 
-                      {syncedServerProfiles.filter(
-                        (p) =>
-                          configsFilterContainerId === "all" ||
-                          p.container_id === configsFilterContainerId
-                      ).length === 0 ? (
-                        <div className="p-6 rounded-2xl bg-[#111827] border text-center text-xs text-slate-400">
-                          Конфигурации не найдены. Создайте новый ключ во вкладке «Новый ключ» или разверните контейнер.
-                        </div>
-                      ) : (
-                        syncedServerProfiles
-                          .filter(
-                            (p) =>
-                              configsFilterContainerId === "all" ||
-                              p.container_id === configsFilterContainerId
-                          )
-                          .map((p) => {
+                    return (
+                      <div className="space-y-2.5">
+                        {vpsContainers.length > 1 && (
+                          <div className="flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
+                            <button
+                              type="button"
+                              onClick={() => setConfigsFilterContainerId("all")}
+                              className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
+                                configsFilterContainerId === "all"
+                                  ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
+                                  : "bg-[#0d1322] text-slate-400 hover:text-white"
+                              }`}
+                            >
+                              Все ({allEntries.length})
+                            </button>
+                            {vpsContainers.map((c) => {
+                              const count = buildVpsConfigEntries(
+                                syncedServerProfiles.filter((p) => p.container_id === c.id)
+                              ).length;
+                              return (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  onClick={() => setConfigsFilterContainerId(c.id)}
+                                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
+                                    configsFilterContainerId === c.id
+                                      ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
+                                      : "bg-[#0d1322] text-slate-400 hover:text-white"
+                                  }`}
+                                >
+                                  {c.name} ({count})
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        {filteredEntries.length === 0 ? (
+                          <div className="p-6 rounded-2xl bg-[#111827] border text-center text-xs text-slate-400">
+                            Конфигурации не найдены. Создайте новый ключ во вкладке «Новый ключ» или разверните контейнер.
+                          </div>
+                        ) : (
+                          filteredEntries.map((entry) => {
+                            if (entry.kind === "multi") {
+                              const isExpanded = expandedMultiGroupIds.includes(entry.keyId);
+                              const allPinnedOnPc = entry.profiles.every((sub) =>
+                                isServerProfilePinnedOnPc(sub)
+                              );
+                              const totalUp = entry.profiles.reduce(
+                                (sum, sub) => sum + (sub.total_up_bytes || 0),
+                                0
+                              );
+                              const totalDown = entry.profiles.reduce(
+                                (sum, sub) => sum + (sub.total_down_bytes || 0),
+                                0
+                              );
+                              const uniquePorts = Array.from(
+                                new Set(entry.profiles.map((sub) => sub.port))
+                              );
+                              const containerLabel = vpsContainers.find(
+                                (c) => c.id === entry.containerId
+                              )?.name;
+                              const isDeleting = deletingMultiGroupId === entry.keyId;
+
+                              return (
+                                <div
+                                  key={entry.keyId}
+                                  className="p-3 rounded-2xl bg-[#111827] border space-y-2.5"
+                                >
+                                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2.5">
+                                    <div className="min-w-0 space-y-1.5">
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-bold inline-flex items-center gap-1 shrink-0">
+                                          <Layers className="w-3 h-3" />
+                                          <span>МУЛЬТИ ×{entry.profiles.length}</span>
+                                        </span>
+                                        <span className="text-xs font-bold text-white truncate">
+                                          {entry.groupName}
+                                        </span>
+                                        {containerLabel && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border font-mono">
+                                            {containerLabel}
+                                          </span>
+                                        )}
+                                        {allPinnedOnPc && (
+                                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                                            На этом ПК
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      <div className="flex items-center gap-1.5 flex-wrap">
+                                        {entry.profiles.map((sub) => (
+                                          <span key={sub.id}>
+                                            {renderProtocolBadge(sub.protocol, sub.awg_version)}
+                                          </span>
+                                        ))}
+                                      </div>
+
+                                      <div className="text-[11px] text-slate-400 font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                                        <span>{entry.profiles[0]?.server}</span>
+                                        <span>Порты: {uniquePorts.join(", ")}</span>
+                                        <span>
+                                          Трафик: ↑ {formatBytes(totalUp)} / ↓{" "}
+                                          {formatBytes(totalDown)}
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleCopyMultiUris(
+                                            entry.profiles,
+                                            entry.groupName,
+                                            entry.keyId
+                                          )
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                        title="Скопировать все URI мульти-протокола"
+                                      >
+                                        {copiedMultiId === entry.keyId ? (
+                                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                        ) : (
+                                          <Copy className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>URI</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleExportMultiJson(
+                                            entry.profiles,
+                                            entry.groupName
+                                          )
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 flex items-center gap-1 transition cursor-pointer"
+                                        title="Скачать единый мульти-протокол (.json для sing-box / NeuroVeil)"
+                                      >
+                                        <FileCode className="w-3.5 h-3.5" />
+                                        <span>.json</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleExportMultiZip(
+                                            entry.profiles,
+                                            entry.groupName
+                                          )
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                                        title="Скачать полный пакет мульти-протокола (.zip: .conf + .json + URI)"
+                                      >
+                                        <Archive className="w-3.5 h-3.5" />
+                                        <span>.zip</span>
+                                      </button>
+
+                                      {!allPinnedOnPc && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            void handlePinMultiGroupOnPc(
+                                              entry.profiles,
+                                              entry.groupName
+                                            )
+                                          }
+                                          className="px-2 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                          title="Добавить все ключи мульти-протокола на этот ПК"
+                                        >
+                                          <Monitor className="w-3.5 h-3.5" />
+                                          <span>На ПК</span>
+                                        </button>
+                                      )}
+
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setExpandedMultiGroupIds((prev) =>
+                                            prev.includes(entry.keyId)
+                                              ? prev.filter((id) => id !== entry.keyId)
+                                              : [...prev, entry.keyId]
+                                          )
+                                        }
+                                        className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border text-[11px] font-semibold text-slate-200 flex items-center gap-1 transition cursor-pointer"
+                                        title="Показать или скрыть отдельные протоколы в составе мульти-ключа"
+                                      >
+                                        {isExpanded ? (
+                                          <ChevronUp className="w-3.5 h-3.5" />
+                                        ) : (
+                                          <ChevronDown className="w-3.5 h-3.5" />
+                                        )}
+                                        <span>Состав ({entry.profiles.length})</span>
+                                      </button>
+
+                                      <button
+                                        type="button"
+                                        disabled={isDeleting}
+                                        onClick={() =>
+                                          void handleDeleteMultiGroup(
+                                            entry.groupId,
+                                            entry.groupName,
+                                            entry.profiles,
+                                            entry.keyId
+                                          )
+                                        }
+                                        className="p-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 transition cursor-pointer disabled:opacity-50"
+                                        title="Удалить весь мульти-протокол с VPS"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {isExpanded && (
+                                    <div className="pt-2 border-t space-y-1.5">
+                                      {entry.profiles.map((sub) => {
+                                        const subAwgConfSupported =
+                                          sub.protocol === "amneziawg" ||
+                                          sub.protocol === "awg2" ||
+                                          sub.protocol === "awg_quic" ||
+                                          sub.protocol === "awg_vless" ||
+                                          sub.protocol === "wireguard";
+                                        const subPinnedOnPc = isServerProfilePinnedOnPc(sub);
+
+                                        return (
+                                          <div
+                                            key={sub.id}
+                                            className="p-2.5 rounded-xl bg-[#0b101d] border flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                          >
+                                            <div className="min-w-0 space-y-0.5">
+                                              <div className="flex items-center gap-2 flex-wrap">
+                                                {renderProtocolBadge(sub.protocol, sub.awg_version)}
+                                                <span className="text-[11px] font-bold text-white truncate">
+                                                  {sub.name}
+                                                </span>
+                                                {subPinnedOnPc && (
+                                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                                                    На этом ПК
+                                                  </span>
+                                                )}
+                                              </div>
+                                              <div className="text-[10.5px] text-slate-400 font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                                                <span>
+                                                  {sub.server}:{sub.port}
+                                                </span>
+                                                {sub.awg_local_address && (
+                                                  <span>IP: {sub.awg_local_address}</span>
+                                                )}
+                                                <span>
+                                                  Трафик: ↑ {formatBytes(sub.total_up_bytes || 0)} / ↓{" "}
+                                                  {formatBytes(sub.total_down_bytes || 0)}
+                                                </span>
+                                              </div>
+                                            </div>
+
+                                            <div className="flex items-center gap-1 flex-wrap shrink-0">
+                                              <button
+                                                type="button"
+                                                onClick={() => handleCopyUri(sub)}
+                                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10.5px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                                title="Скопировать ссылку-ключ"
+                                              >
+                                                {copiedId === sub.id ? (
+                                                  <Check className="w-3 h-3 text-emerald-400" />
+                                                ) : (
+                                                  <Copy className="w-3 h-3" />
+                                                )}
+                                                <span>URI</span>
+                                              </button>
+
+                                              <button
+                                                type="button"
+                                                onClick={() => void handleOpenQrModal(sub)}
+                                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10.5px] font-semibold text-purple-300 flex items-center gap-1 transition cursor-pointer"
+                                                title="Показать QR-код для телефона"
+                                              >
+                                                <QrCode className="w-3 h-3" />
+                                                <span>QR</span>
+                                              </button>
+
+                                              {subAwgConfSupported && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => void handleDownloadAwgConf(sub)}
+                                                  className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[10.5px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                                                  title="Скачать .conf файл"
+                                                >
+                                                  <FileDown className="w-3 h-3" />
+                                                  <span>.conf</span>
+                                                </button>
+                                              )}
+
+                                              <button
+                                                type="button"
+                                                onClick={() => void handleExportJson(sub)}
+                                                className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10.5px] font-semibold text-slate-300 flex items-center gap-1 transition cursor-pointer"
+                                                title="Сохранить .json конфиг"
+                                              >
+                                                <FileCode className="w-3 h-3" />
+                                                <span>.json</span>
+                                              </button>
+
+                                              {!subPinnedOnPc && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => void handlePinProfileOnPc(sub.id)}
+                                                  className="px-2 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[10.5px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                                  title="Добавить этот ключ в список подключений на этом ПК"
+                                                >
+                                                  <Monitor className="w-3 h-3" />
+                                                  <span>На ПК</span>
+                                                </button>
+                                              )}
+
+                                              <button
+                                                type="button"
+                                                onClick={() => void handleDeleteProfile(sub.id, true)}
+                                                className="p-1 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 transition cursor-pointer"
+                                                title="Удалить этот протокол с VPS"
+                                              >
+                                                <Trash2 className="w-3 h-3" />
+                                              </button>
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+
+                            const p = entry.profile;
                             const isAwgConfSupported =
                               p.protocol === "amneziawg" ||
                               p.protocol === "awg2" ||
                               p.protocol === "awg_quic" ||
                               p.protocol === "awg_vless" ||
                               p.protocol === "wireguard";
-                            const isPinnedOnPc = profiles.some(
-                              (lp) =>
-                                lp.pinned_on_pc !== false &&
-                                (lp.id === p.id ||
-                                  (lp.server === p.server &&
-                                    lp.port === p.port &&
-                                    lp.protocol === p.protocol &&
-                                    lp.password === p.password))
-                            );
-                            const containerLabel = vpsContainers.find((c) => c.id === p.container_id)?.name;
+                            const isPinnedOnPc = isServerProfilePinnedOnPc(p);
+                            const containerLabel = vpsContainers.find(
+                              (c) => c.id === p.container_id
+                            )?.name;
 
                             return (
                               <div
@@ -5899,7 +6607,9 @@ export default function App() {
                                 <div className="min-w-0 space-y-1">
                                   <div className="flex items-center gap-2 flex-wrap">
                                     {renderProtocolBadge(p.protocol, p.awg_version)}
-                                    <span className="text-xs font-bold text-white truncate">{p.name}</span>
+                                    <span className="text-xs font-bold text-white truncate">
+                                      {p.name}
+                                    </span>
                                     {containerLabel && (
                                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border font-mono">
                                         {containerLabel}
@@ -5994,9 +6704,10 @@ export default function App() {
                               </div>
                             );
                           })
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* SUBTAB 3: CREATE NEW DEVICE KEY (MULTI-PROTOCOL) */}
                   {vpsAdminSubTab === "new_key" && (() => {
@@ -6196,7 +6907,7 @@ export default function App() {
                                           >
                                             {isAvailable
                                               ? "● активен в контейнере"
-                                              : "○ нет в контейнере"}
+                                              : "○ создастся автоматически"}
                                           </span>
                                         </div>
                                       )}
@@ -6237,22 +6948,63 @@ export default function App() {
                             lastCreatedKeys.skipped.length > 0) && (
                             <div className="p-3.5 rounded-2xl bg-[#111827] border space-y-2.5">
                               <div className="flex flex-wrap items-center justify-between gap-2">
-                                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                                <span className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                                   <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                                   <span>
                                     Созданные ключи ({lastCreatedKeys.created.length})
                                   </span>
+                                  {lastCreatedKeys.created.length > 1 && (
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-bold inline-flex items-center gap-1">
+                                      <Layers className="w-3 h-3" />
+                                      <span>МУЛЬТИ ×{lastCreatedKeys.created.length}</span>
+                                    </span>
+                                  )}
                                 </span>
-                                {lastCreatedKeys.created.length > 1 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => void copyAllCreatedUris()}
-                                    className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 cursor-pointer transition"
-                                  >
-                                    <Copy className="w-3 h-3" />
-                                    <span>Скопировать все ссылки</span>
-                                  </button>
-                                )}
+                                {lastCreatedKeys.created.length > 1 && (() => {
+                                  const multiName =
+                                    lastCreatedKeys.created[0]?.multi_group_name ||
+                                    "NeuroVeil_Multi";
+                                  return (
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <button
+                                        type="button"
+                                        onClick={() => void copyAllCreatedUris()}
+                                        className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 cursor-pointer transition"
+                                      >
+                                        <Copy className="w-3 h-3" />
+                                        <span>Скопировать все ссылки</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleExportMultiJson(
+                                            lastCreatedKeys.created,
+                                            multiName
+                                          )
+                                        }
+                                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                                        title="Скачать единый мульти-протокол (.json для sing-box / NeuroVeil)"
+                                      >
+                                        <FileCode className="w-3 h-3" />
+                                        <span>.json (Мульти)</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void handleExportMultiZip(
+                                            lastCreatedKeys.created,
+                                            multiName
+                                          )
+                                        }
+                                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 cursor-pointer transition"
+                                        title="Скачать пакет мульти-протокола (.zip: .conf + .json + URI)"
+                                      >
+                                        <Archive className="w-3 h-3" />
+                                        <span>.zip (Пакет)</span>
+                                      </button>
+                                    </div>
+                                  );
+                                })()}
                               </div>
 
                               {lastCreatedKeys.created.length > 0 && (
@@ -6349,6 +7101,7 @@ export default function App() {
   return (
     <div
       data-theme={currentTheme.id}
+      data-theme-mode={isLightTheme ? "light" : "dark"}
       style={{
         ...cssVarsStyle,
         opacity: windowOpacity / 100,
@@ -6399,53 +7152,22 @@ export default function App() {
               }}
               className="pointer-events-none absolute top-0 left-0 -right-[7px] h-10 z-0"
             >
-              {/* Seamless background fill */}
-              <div
-                style={{ backgroundColor: "var(--bg-app)" }}
-                className="absolute inset-0 rounded-l-xl"
-              />
-
-              {/* Left C-border only (stops before 14px concave corners to avoid horizontal lines) */}
-              <div
-                style={{
-                  borderTopColor: "var(--color-accent-border)",
-                  borderBottomColor: "var(--color-accent-border)",
-                  borderLeftColor: "var(--color-accent-border)",
-                }}
-                className="absolute top-0 bottom-0 left-0 right-[14px] rounded-l-xl border-y border-l"
-              />
-
-              {/* Top-right concave curve */}
+              {/* Single seamless SVG silhouette (no overlapping div/SVG borders, larger 18px rounding) */}
               <svg
-                className="pointer-events-none absolute right-0 -top-[14px] w-[14px] h-[15px] overflow-visible"
-                viewBox="0 0 14 15"
+                className="pointer-events-none absolute -top-[18px] left-0 w-full h-[76px] overflow-visible"
+                viewBox="0 0 54 76"
                 fill="none"
+                shapeRendering="geometricPrecision"
               >
                 <path
-                  d="M14 0v15H-0.5v-.5H0C7.456 14.5 13.5 8.456 13.5 1V0H14Z"
+                  d="M54 0H53.5A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76H54V0Z"
                   fill="var(--bg-app)"
                 />
                 <path
-                  d="M-0.5 14.5H0C7.456 14.5 13.5 8.456 13.5 1V0"
+                  d="M53.5 0A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76"
                   stroke="var(--color-accent-border)"
                   strokeWidth="1"
-                />
-              </svg>
-
-              {/* Bottom-right concave curve */}
-              <svg
-                className="pointer-events-none absolute right-0 -bottom-[14px] w-[14px] h-[15px] overflow-visible"
-                viewBox="0 0 14 15"
-                fill="none"
-              >
-                <path
-                  d="M14 15V0H-0.5v.5H0C7.456.5 13.5 6.544 13.5 14v1h.5Z"
-                  fill="var(--bg-app)"
-                />
-                <path
-                  d="M-0.5 0.5H0C7.456.5 13.5 6.544 13.5 14v1"
-                  stroke="var(--color-accent-border)"
-                  strokeWidth="1"
+                  strokeLinecap="butt"
                 />
               </svg>
             </div>
@@ -6547,9 +7269,6 @@ export default function App() {
               }`}
             >
               <Server className="w-4 h-4 shrink-0" />
-              <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-cyan-600 text-white flex items-center justify-center border border-[#0d1322]">
-                <Plus className="w-2.5 h-2.5" />
-              </span>
             </button>
 
             {/* 5. Настройки */}
@@ -6722,7 +7441,7 @@ export default function App() {
                 NeuroVeil VPN
               </h1>
               <div className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-[11px] font-mono font-bold text-cyan-300">
-                <span>Версия 2.0</span>
+                <span>Версия {APP_VERSION}</span>
               </div>
 
               <p className="text-xs text-slate-400 mt-4 leading-relaxed">
@@ -6763,93 +7482,162 @@ export default function App() {
 
           {/* 1. POWER / CONNECT BUTTON CARD */}
           <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0 shadow-md">
-            <button
-              onClick={handleToggleConnect}
-              disabled={(connecting && !autoPortHunting) || reconnectCooldown}
-              className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
-                status.connected
-                  ? status.is_handshaking
-                    ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25"
-                    : "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25"
-                  : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 hover:from-cyan-900/40 hover:to-indigo-900/40 text-white border-slate-700 hover:border-cyan-500/50"
-              }`}
-            >
-              {status.connected && (
-                <div
-                  className={`absolute inset-0 ${
-                    status.is_handshaking ? "bg-amber-400/15" : "bg-emerald-400/10"
-                  } animate-pulse pointer-events-none`}
-                />
-              )}
+            {(() => {
+              const powerProfile =
+                (status.connected && status.active_profile_id
+                  ? profiles.find((p) => p.id === status.active_profile_id)
+                  : null) || selectedProfile;
+              const powerProtoMeta = powerProfile
+                ? getProtocolMeta(powerProfile.protocol, powerProfile.awg_version)
+                : null;
+              const powerTheme = powerProtoMeta ? getProtocolPowerTheme(powerProtoMeta) : null;
+              const isHandshaking = status.connected && status.is_handshaking;
 
-              <div className="flex items-center gap-3 relative z-10 min-w-0">
-                <div
-                  className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
-                    status.connected
-                      ? status.is_handshaking
-                        ? "bg-amber-500 text-white shadow-amber-700/50"
-                        : "bg-emerald-500 text-white shadow-emerald-700/50"
-                      : "bg-slate-700/80 group-hover:bg-cyan-500 text-white"
+              const buttonStyle: React.CSSProperties | undefined = isHandshaking
+                ? undefined
+                : powerTheme
+                ? status.connected
+                  ? {
+                      background: powerTheme.connectedBg,
+                      borderColor: powerTheme.connectedBorder,
+                      boxShadow: powerTheme.connectedGlow,
+                    }
+                  : {
+                      background: powerTheme.idleBg,
+                      borderColor: powerTheme.idleBorder,
+                      boxShadow: powerTheme.idleGlow,
+                    }
+                : undefined;
+
+              const iconBoxStyle: React.CSSProperties | undefined = isHandshaking
+                ? undefined
+                : powerTheme
+                ? status.connected
+                  ? { background: powerTheme.connectedIconBg }
+                  : {
+                      background: powerTheme.idleIconBg,
+                      border: `1px solid ${powerProtoMeta?.border || "rgba(255,255,255,0.2)"}`,
+                    }
+                : undefined;
+
+              const dotStyle: React.CSSProperties | undefined = isHandshaking
+                ? undefined
+                : powerTheme
+                ? status.connected
+                  ? {
+                      backgroundColor: powerTheme.dotColor,
+                      boxShadow: `0 0 8px ${powerProtoMeta?.accent || powerTheme.dotColor}`,
+                    }
+                  : {
+                      backgroundColor: powerProtoMeta?.accent || powerTheme.dotColor,
+                      boxShadow: `0 0 6px ${powerProtoMeta?.accent || powerTheme.dotColor}`,
+                    }
+                : undefined;
+
+              return (
+                <button
+                  onClick={handleToggleConnect}
+                  disabled={(connecting && !autoPortHunting) || reconnectCooldown}
+                  style={buttonStyle}
+                  className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white hover:brightness-110 ${
+                    isHandshaking
+                      ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25"
+                      : !powerTheme
+                      ? status.connected
+                        ? "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25"
+                        : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 text-white border-slate-700"
+                      : "text-white"
                   }`}
                 >
-                  {connecting || autoPortHunting ? (
-                    <RefreshCw className="w-6 h-6 animate-spin text-cyan-300" />
-                  ) : status.connected ? (
-                    status.is_handshaking ? (
-                      <Activity className="w-6 h-6 animate-pulse text-amber-100" />
-                    ) : (
-                      <ShieldCheck className="w-6 h-6" />
-                    )
-                  ) : (
-                    <Power className="w-6 h-6" />
+                  {status.connected && (
+                    <div
+                      style={
+                        !isHandshaking && powerTheme
+                          ? { background: powerTheme.pulseOverlay }
+                          : undefined
+                      }
+                      className={`absolute inset-0 ${
+                        isHandshaking ? "bg-amber-400/15" : !powerTheme ? "bg-emerald-400/10" : ""
+                      } animate-pulse pointer-events-none`}
+                    />
                   )}
-                </div>
 
-                <div className="text-left min-w-0">
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
-                    {autoPortHunting
-                      ? `Автоподбор порта (#${autoPortAttempt})`
-                      : connecting
-                      ? "Подождите..."
-                      : reconnectCooldown
-                      ? "Защитная пауза WireGuard"
-                      : status.connected
-                      ? status.is_handshaking
-                        ? "Рукопожатие туннеля..."
-                        : status.active_profile_name || "Туннель активен"
-                      : selectedProfile
-                      ? selectedProfile.name
-                      : "Туннель не выбран"}
-                  </div>
-                  <div className="text-lg font-extrabold tracking-wide text-white leading-tight truncate mt-0.5">
-                    {connecting && !autoPortHunting
-                      ? "ПОДКЛЮЧЕНИЕ..."
-                      : reconnectCooldown
-                      ? "ПАУЗА..."
-                      : status.connected
-                      ? "ОТКЛЮЧИТЬ"
-                      : "ПОДКЛЮЧИТЬ"}
-                  </div>
-                </div>
-              </div>
+                  <div className="flex items-center gap-3 relative z-10 min-w-0">
+                    <div
+                      style={iconBoxStyle}
+                      className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner text-white ${
+                        isHandshaking
+                          ? "bg-amber-500 shadow-amber-700/50"
+                          : !powerTheme
+                          ? status.connected
+                            ? "bg-emerald-500 shadow-emerald-700/50"
+                            : "bg-slate-700/80"
+                          : ""
+                      }`}
+                    >
+                      {connecting || autoPortHunting ? (
+                        <RefreshCw className="w-6 h-6 animate-spin text-white" />
+                      ) : status.connected ? (
+                        isHandshaking ? (
+                          <Activity className="w-6 h-6 animate-pulse text-amber-100" />
+                        ) : (
+                          <ShieldCheck className="w-6 h-6" />
+                        )
+                      ) : (
+                        <Power className="w-6 h-6" />
+                      )}
+                    </div>
 
-              <div className="shrink-0 flex flex-col items-end gap-1 relative z-10">
-                <span
-                  className={`w-3 h-3 rounded-full ${
-                    status.connected
-                      ? status.is_handshaking
-                        ? "bg-amber-300 animate-ping"
-                        : "bg-emerald-300 shadow-[0_0_8px_#34d399]"
-                      : "bg-slate-500"
-                  }`}
-                />
-                {selectedProfile && (
-                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
-                    {routing.mode === "tun" ? "TUN" : "Proxy"}
-                  </span>
-                )}
-              </div>
-            </button>
+                    <div className="text-left min-w-0">
+                      <div className="text-[11px] font-semibold uppercase tracking-wider text-white/80 group-hover:text-white truncate">
+                        {autoPortHunting
+                          ? `Автоподбор порта (#${autoPortAttempt})`
+                          : connecting
+                          ? "Подождите..."
+                          : reconnectCooldown
+                          ? "Защитная пауза WireGuard"
+                          : status.connected
+                          ? status.is_handshaking
+                            ? "Рукопожатие туннеля..."
+                            : status.active_profile_name || "Туннель активен"
+                          : selectedProfile
+                          ? selectedProfile.name
+                          : "Туннель не выбран"}
+                      </div>
+                      <div className="text-lg font-extrabold tracking-wide text-white leading-tight truncate mt-0.5">
+                        {connecting && !autoPortHunting
+                          ? "ПОДКЛЮЧЕНИЕ..."
+                          : reconnectCooldown
+                          ? "ПАУЗА..."
+                          : status.connected
+                          ? "ОТКЛЮЧИТЬ"
+                          : "ПОДКЛЮЧИТЬ"}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="shrink-0 flex flex-col items-end gap-1 relative z-10">
+                    <span
+                      style={dotStyle}
+                      className={`w-3 h-3 rounded-full ${
+                        isHandshaking
+                          ? "bg-amber-300 animate-ping"
+                          : !powerTheme
+                          ? status.connected
+                            ? "bg-emerald-300 shadow-[0_0_8px_#34d399]"
+                            : "bg-slate-500"
+                          : ""
+                      }`}
+                    />
+                    {powerProfile && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
+                        {routing.mode === "tun" ? "TUN" : "Proxy"}
+                      </span>
+                    )}
+                  </div>
+                </button>
+              );
+            })()}
 
             {/* Quick Reconnect & Auto Port Hunt bar when connected */}
             {(status.connected || autoPortHunting) && (
@@ -7209,18 +7997,18 @@ export default function App() {
 
               {/* 4 Main Action Buttons */}
               <div className="space-y-2.5 pt-0.5">
-                {/* 1. Добавить из файла -> напрямую Проводник Windows */}
+                {/* 1. Добавить из файла -> Цветной (Sky) */}
                 <button
                   type="button"
                   onClick={handlePickConfigFile}
-                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-cyan-500/35 hover:border-cyan-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-cyan-500/5"
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-sky-950/30 border border-sky-500/40 hover:border-sky-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-sky-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition shrink-0">
+                    <div className="w-10 h-10 rounded-xl bg-sky-500/20 border border-sky-400/50 flex items-center justify-center text-sky-400 group-hover:scale-105 transition shrink-0">
                       <FolderOpen className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-sm font-bold text-white group-hover:text-cyan-300 transition">
+                      <div className="text-sm font-bold text-white group-hover:text-sky-300 transition">
                         Добавить из файла
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
@@ -7228,19 +8016,25 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-[11px] font-bold text-cyan-300 shrink-0">
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-sky-600/15 border-sky-600/40 text-sky-700"
+                        : "bg-sky-500/20 border-sky-400/40 text-sky-300"
+                    }`}
+                  >
                     Выбрать
                   </div>
                 </button>
 
-                {/* 2. Добавить VPS */}
+                {/* 2. Добавить VPS -> Цветной (Emerald) */}
                 <button
                   type="button"
                   onClick={() => invoke("open_popup_window", { mode: "vps" })}
-                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-emerald-500/35 hover:border-emerald-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-emerald-500/5"
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-emerald-950/30 border border-emerald-500/40 hover:border-emerald-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-emerald-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition shrink-0">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/20 border border-emerald-400/50 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition shrink-0">
                       <Server className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
@@ -7252,23 +8046,29 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-bold text-emerald-300 shrink-0">
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-emerald-600/15 border-emerald-600/40 text-emerald-700"
+                        : "bg-emerald-500/20 border-emerald-400/40 text-emerald-300"
+                    }`}
+                  >
                     Открыть
                   </div>
                 </button>
 
-                {/* 3. Вставить ключ */}
+                {/* 3. Вставить ключ -> Цветной (Violet) */}
                 <button
                   type="button"
                   onClick={() => invoke("open_popup_window", { mode: "key" })}
-                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-indigo-500/35 hover:border-indigo-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-indigo-500/5"
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-violet-950/30 border border-violet-500/40 hover:border-violet-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-violet-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center text-indigo-400 group-hover:scale-105 transition shrink-0">
+                    <div className="w-10 h-10 rounded-xl bg-violet-500/20 border border-violet-400/50 flex items-center justify-center text-violet-400 group-hover:scale-105 transition shrink-0">
                       <Key className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
-                      <div className="text-sm font-bold text-white group-hover:text-indigo-300 transition">
+                      <div className="text-sm font-bold text-white group-hover:text-violet-300 transition">
                         Вставить ключ
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
@@ -7276,19 +8076,25 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-[11px] font-bold text-indigo-300 shrink-0">
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-violet-600/15 border-violet-600/40 text-violet-700"
+                        : "bg-violet-500/20 border-violet-400/40 text-violet-300"
+                    }`}
+                  >
                     Открыть
                   </div>
                 </button>
 
-                {/* 4. Управление VPS */}
+                {/* 4. Управление VPS -> Цветной */}
                 <button
                   type="button"
                   onClick={() => invoke("open_popup_window", { mode: "vps_admin" })}
-                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-amber-500/35 hover:border-amber-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-amber-500/5"
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-amber-950/30 border border-amber-500/40 hover:border-amber-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-amber-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 group-hover:scale-105 transition shrink-0">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/50 flex items-center justify-center text-amber-400 group-hover:scale-105 transition shrink-0">
                       <Sliders className="w-5 h-5" />
                     </div>
                     <div className="min-w-0">
@@ -7300,7 +8106,13 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-300 shrink-0">
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-amber-600/15 border-amber-600/40 text-amber-700"
+                        : "bg-amber-500/20 border-amber-400/40 text-amber-300"
+                    }`}
+                  >
                     Открыть
                   </div>
                 </button>
@@ -8211,6 +9023,17 @@ export default function App() {
                       <div className="flex items-center justify-between gap-2 min-w-0">
                         <div className="flex items-center gap-1.5 min-w-0 flex-1">
                           {renderProtocolBadge(prof.protocol, prof.awg_version)}
+                          {prof.multi_group_id && (
+                            <span
+                              className="text-[9.5px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 font-bold inline-flex items-center gap-1 shrink-0 max-w-[120px]"
+                              title={`Мульти-протокол: ${prof.multi_group_name || "Пакет"}`}
+                            >
+                              <Layers className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">
+                                {prof.multi_group_name || "МУЛЬТИ"}
+                              </span>
+                            </span>
+                          )}
                           <span
                             className="text-xs font-bold text-white truncate"
                             title={prof.name}
@@ -8540,20 +9363,12 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleToggleSplitForProfile}
-                  style={
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer border ${
                     routing.split_tunneling
-                      ? {
-                          backgroundColor: "var(--btn-grad-from)",
-                          boxShadow: "0 0 12px var(--color-accent-glow)",
-                        }
-                      : undefined
-                  }
-                  className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer ${
-                    routing.split_tunneling
-                      ? ""
+                      ? "theme-toggle-on"
                       : isLightTheme
-                      ? "bg-slate-300"
-                      : "bg-slate-700"
+                      ? "bg-slate-300 border-slate-400/40"
+                      : "bg-slate-700 border-slate-600/50"
                   }`}
                   title={
                     routing.split_tunneling
@@ -8562,7 +9377,7 @@ export default function App() {
                   }
                 >
                   <div
-                    className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
+                    className={`w-5 h-5 rounded-full bg-white shadow-sm transform transition-transform ${
                       routing.split_tunneling ? "translate-x-5" : "translate-x-0"
                     }`}
                   />
@@ -8986,7 +9801,7 @@ export default function App() {
               <p className="text-[11px] text-slate-400 mt-0.5">{t.settingsSubtitle}</p>
             </div>
 
-            {/* NETWORK OPERATING MODE SECTION (Moved from Connection tab) */}
+            {/* NETWORK OPERATING MODE SECTION */}
             <div
               className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
@@ -9010,15 +9825,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleQuickSwitchMode("system_proxy")}
-                  className={`p-3 rounded-xl border text-left transition cursor-pointer ${
-                    routing.mode === "system_proxy"
-                      ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
-                      : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                  className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
+                    routing.mode === "system_proxy" ? "is-active" : ""
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold">System Proxy</span>
-                    <Globe className="w-4 h-4 text-cyan-400" />
+                    <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                   </div>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
                     Легкий режим без прав администратора (браузеры, Telegram, Discord).
@@ -9028,15 +9841,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleQuickSwitchMode("tun")}
-                  className={`p-3 rounded-xl border text-left transition cursor-pointer ${
-                    routing.mode === "tun"
-                      ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
-                      : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                  className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
+                    routing.mode === "tun" ? "is-active" : ""
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
-                    <Zap className="w-4 h-4 text-indigo-400" />
+                    <Zap className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                   </div>
                   <p className="text-[11px] text-slate-400 leading-relaxed">
                     Перехватывает весь трафик ПК, включая игры и любые приложения.
@@ -9045,139 +9856,54 @@ export default function App() {
               </div>
             </div>
 
-            {/* DNS-СЕРВЕРЫ И ЛОКАЛЬНЫЙ ПОРТ (Moved from Routing tab) */}
+            {/* SECURITY & KILL SWITCH SECTION (Compact) */}
             <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
-              style={{ backgroundColor: currentTheme.styles.cardBg }}
-            >
-              <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800/60">
-                <div className="flex items-center gap-2">
-                  <Activity className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
-                  <div>
-                    <h3 className="text-xs font-bold text-white">
-                      DNS-серверы и локальный порт
-                    </h3>
-                    <p className="text-[10px] text-slate-400">
-                      Параметры DNS, локального прокси-порта и ядра sing-box
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleSaveRouting}
-                  className="px-2.5 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/35 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer shrink-0"
-                >
-                  <Save className="w-3 h-3" />
-                  Сохранить
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
-                <div>
-                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
-                    <Shield className="w-3 h-3 text-cyan-400" />
-                    <span>Защищенный DNS (VPN)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={routing.remote_dns}
-                    onChange={(e) =>
-                      setRouting({ ...routing, remote_dns: e.target.value })
-                    }
-                    placeholder="tls://1.1.1.1"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
-                    <Globe className="w-3 h-3 text-emerald-400" />
-                    <span>Прямой DNS (RU)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={routing.direct_dns}
-                    onChange={(e) =>
-                      setRouting({ ...routing, direct_dns: e.target.value })
-                    }
-                    placeholder="77.88.8.8"
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
-                    <Layers className="w-3 h-3 text-indigo-400" />
-                    <span>Локальный прокси-порт</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={routing.local_mixed_port}
-                    onChange={(e) =>
-                      setRouting({
-                        ...routing,
-                        local_mixed_port: Number(e.target.value) || 2080,
-                      })
-                    }
-                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <button
-                    type="button"
-                    onClick={handleDownloadCore}
-                    disabled={downloadingCore}
-                    className="w-full py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[11px] font-semibold text-cyan-300 border border-cyan-500/30 flex items-center justify-center gap-1.5 transition cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${downloadingCore ? "animate-spin" : ""}`} />
-                    {downloadingCore ? "Обновление..." : "Обновить sing-box"}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* SECURITY & KILL SWITCH SECTION */}
-            <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+              className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center gap-2">
-                <ShieldAlert className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                <ShieldAlert className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-xs font-bold text-white">
+                  <h3 className="text-[11px] font-bold text-white">
                     Сетевая безопасность, Kill Switch и защита от утечек
                   </h3>
-                  <p className="text-[10px] text-slate-400">
-                    Управление защитой от утечек IP, DNS и аварийной блокировкой сетевого трафика
+                  <p className="text-[9.5px] text-slate-400">
+                    Защита от утечек IP, DNS и аварийная блокировка трафика
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-2.5 pt-1">
+              <div className="grid grid-cols-1 gap-1.5 pt-0.5">
                 {/* Kill Switch Toggle */}
                 <div
                   onClick={handleToggleKillSwitch}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
+                  <div className="min-w-0 pr-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                      <span className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                         Kill Switch (Аварийная блокировка)
                       </span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                      <span className="text-[8.5px] px-1 py-0.2 rounded bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold">
                         PRO
                       </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                      Мгновенно блокирует весь исходящий трафик в Windows при обрыве или сбое VPN-соединения
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                      Блокирует исходящий трафик в Windows при обрыве VPN
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      routing.kill_switch ? "bg-rose-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      routing.kill_switch
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        routing.kill_switch ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        routing.kill_switch ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9186,26 +9912,30 @@ export default function App() {
                 {/* DNS Leak Protection Toggle */}
                 <div
                   onClick={handleToggleDnsLeakProtect}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
+                  <div className="min-w-0 pr-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                      <span className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                         Защита от утечек DNS (DNS Leak Protection)
                       </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                      Перехватывает 53 порт и шифрует все запросы через защищенный Cloudflare DoH (1.1.1.1)
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                      Шифрует DNS-запросы (53 порт) через Cloudflare DoH (1.1.1.1)
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      (routing.dns_leak_protect ?? true) ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      (routing.dns_leak_protect ?? true)
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        (routing.dns_leak_protect ?? true) ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        (routing.dns_leak_protect ?? true) ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9214,32 +9944,36 @@ export default function App() {
                 {/* IPv6 Leak Shield Toggle */}
                 <div
                   onClick={handleToggleBlockIpv6}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
+                  <div className="min-w-0 pr-1">
                     <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                      <span className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                         Блокировка протокола IPv6 (IPv6 Shield)
                       </span>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                      Предотвращает утечку реального IPv6 провайдера мимо VPN-туннеля
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                      Предотвращает утечку реального IPv6 мимо VPN-туннеля
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      (routing.block_ipv6 ?? true) ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      (routing.block_ipv6 ?? true)
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        (routing.block_ipv6 ?? true) ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        (routing.block_ipv6 ?? true) ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
                 </div>
 
-                {/* TLS ClientHello Splitting Full Card */}
+                {/* TLS ClientHello Splitting Card */}
                 <div
                   onClick={async () => {
                     const nextVal = !(routing.tls_fragment ?? true);
@@ -9255,42 +9989,44 @@ export default function App() {
                       showNotice("error", String(e));
                     }
                   }}
-                  className={`p-3 rounded-xl border cursor-pointer transition flex items-center justify-between gap-3 group ${
+                  className={`p-2 px-2.5 rounded-lg border cursor-pointer transition flex items-center justify-between gap-2.5 group ${
                     (routing.tls_fragment ?? true)
-                      ? "bg-emerald-950/20 border-emerald-500/40 shadow-sm"
+                      ? "bg-cyan-500/10 border-cyan-500/40"
                       : "bg-slate-900/60 border-slate-800/80 hover:border-slate-700"
                   }`}
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                  <div className="min-w-0 pr-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                         Фрагментация TLS-рукопожатия (ClientHello)
                       </span>
                       <span
-                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${
+                        className={`text-[8.5px] font-bold px-1.5 py-0.2 rounded-full border ${
                           (routing.tls_fragment ?? true)
-                            ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
+                            ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"
                             : "bg-slate-800 border-slate-700 text-slate-400"
                         }`}
                       >
                         {(routing.tls_fragment ?? true) ? "Активно" : "Выкл"}
                       </span>
                     </div>
-                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                      Разбивает TCP-пакет и TLS-записи рукопожатия ClientHello на фрагменты для протоколов VLESS Reality, TUIC и Hysteria 2.
+                    <p className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                      Разбивает ClientHello на фрагменты для VLESS Reality, TUIC и Hysteria 2
                     </p>
                   </div>
 
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
                       (routing.tls_fragment ?? true)
-                        ? "bg-emerald-500 shadow-sm shadow-emerald-500/50"
-                        : "bg-slate-700"
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        (routing.tls_fragment ?? true) ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        (routing.tls_fragment ?? true) ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9298,41 +10034,45 @@ export default function App() {
               </div>
             </div>
 
-            {/* SYSTEM AUTOSTART & TRAY BEHAVIOR SECTION */}
+            {/* SYSTEM AUTOSTART & TRAY BEHAVIOR SECTION (Compact) */}
             <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+              className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center gap-2">
-                <Monitor className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                <Monitor className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-xs font-bold text-white">{t.systemSectionTitle}</h3>
-                  <p className="text-[10px] text-slate-400">{t.systemSectionSubtitle}</p>
+                  <h3 className="text-[11px] font-bold text-white">{t.systemSectionTitle}</h3>
+                  <p className="text-[9.5px] text-slate-400">{t.systemSectionSubtitle}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-2.5 pt-1">
+              <div className="grid grid-cols-1 gap-1.5 pt-0.5">
                 {/* Autostart Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ autostart: !autostart })}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                  <div className="min-w-0 pr-1">
+                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                       {t.autostartTitle}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
                       {t.autostartDesc}
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      autostart ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      autostart
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        autostart ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        autostart ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9341,24 +10081,28 @@ export default function App() {
                 {/* Start Minimized Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ startMinimized: !startMinimized })}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                  <div className="min-w-0 pr-1">
+                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                       {t.startMinimizedTitle}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
                       {t.startMinimizedDesc}
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      startMinimized ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      startMinimized
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        startMinimized ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        startMinimized ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9367,24 +10111,28 @@ export default function App() {
                 {/* Close to Tray Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ closeToTray: !closeToTray })}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                  <div className="min-w-0 pr-1">
+                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                       {t.closeToTrayTitle}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
                       {t.closeToTrayDesc}
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      closeToTray ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      closeToTray
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        closeToTray ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        closeToTray ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9393,24 +10141,28 @@ export default function App() {
                 {/* Auto-connect on startup Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ autoConnect: !autoConnect })}
-                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                 >
-                  <div className="min-w-0 pr-2">
-                    <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                  <div className="min-w-0 pr-1">
+                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
                       {t.autoConnectTitle}
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
                       {t.autoConnectDesc}
                     </div>
                   </div>
                   <div
-                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
-                      autoConnect ? "bg-cyan-500" : "bg-slate-700"
+                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                      autoConnect
+                        ? "theme-toggle-on"
+                        : isLightTheme
+                        ? "bg-slate-300 border border-slate-400/40"
+                        : "bg-slate-700 border border-white/10"
                     }`}
                   >
                     <div
-                      className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        autoConnect ? "translate-x-5" : "translate-x-0"
+                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                        autoConnect ? "translate-x-4" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -9418,150 +10170,173 @@ export default function App() {
               </div>
             </div>
 
-            {/* INTERFACE LANGUAGE SECTION */}
+            {/* INTERFACE LANGUAGE SECTION (Compact) */}
             <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+              className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center gap-2">
-                <Languages className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                <Languages className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-xs font-bold text-white">{t.languageSectionTitle}</h3>
-                  <p className="text-[10px] text-slate-400">{t.languageSectionSubtitle}</p>
+                  <h3 className="text-[11px] font-bold text-white">{t.languageSectionTitle}</h3>
+                  <p className="text-[9.5px] text-slate-400">{t.languageSectionSubtitle}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <div className="grid grid-cols-2 gap-1.5 pt-0.5">
                 {/* Russian Card */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ language: "ru" })}
-                  className={`p-3 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
+                  style={
                     language === "ru"
-                      ? "border-cyan-400 bg-cyan-500/10 shadow-md ring-1 ring-cyan-400/50"
+                      ? { boxShadow: "0 0 10px -2px var(--color-accent-glow)" }
+                      : undefined
+                  }
+                  className={`p-2 rounded-lg cursor-pointer border transition-all flex items-center justify-between ${
+                    language === "ru"
+                      ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/50"
                       : "border-slate-800 bg-slate-900/50 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center font-black font-mono text-xs text-blue-300 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-md bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center font-black font-mono text-[10px] text-cyan-300 shrink-0">
                       RU
                     </div>
                     <div>
-                      <div className="text-xs font-bold text-white">{t.langRu}</div>
-                      <div className="text-[10px] text-slate-400">Русский</div>
+                      <div className="text-[11px] font-bold text-white">{t.langRu}</div>
+                      <div className="text-[9px] text-slate-400">Русский</div>
                     </div>
                   </div>
                   <div
-                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                    className={`w-3 h-3 rounded-full border flex items-center justify-center ${
                       language === "ru"
                         ? "border-cyan-400 bg-cyan-500"
                         : "border-slate-600 bg-transparent"
                     }`}
                   >
-                    {language === "ru" && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    {language === "ru" && <div className="w-1 h-1 rounded-full bg-white" />}
                   </div>
                 </div>
 
                 {/* English Card */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ language: "en" })}
-                  className={`p-3 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
+                  style={
                     language === "en"
-                      ? "border-cyan-400 bg-cyan-500/10 shadow-md ring-1 ring-cyan-400/50"
+                      ? { boxShadow: "0 0 10px -2px var(--color-accent-glow)" }
+                      : undefined
+                  }
+                  className={`p-2 rounded-lg cursor-pointer border transition-all flex items-center justify-between ${
+                    language === "en"
+                      ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/50"
                       : "border-slate-800 bg-slate-900/50 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center font-black font-mono text-xs text-amber-300 shrink-0">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-md bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center font-black font-mono text-[10px] text-cyan-300 shrink-0">
                       EN
                     </div>
                     <div>
-                      <div className="text-xs font-bold text-white">{t.langEn}</div>
-                      <div className="text-[10px] text-slate-400">English</div>
+                      <div className="text-[11px] font-bold text-white">{t.langEn}</div>
+                      <div className="text-[9px] text-slate-400">English</div>
                     </div>
                   </div>
                   <div
-                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+                    className={`w-3 h-3 rounded-full border flex items-center justify-center ${
                       language === "en"
                         ? "border-cyan-400 bg-cyan-500"
                         : "border-slate-600 bg-transparent"
                     }`}
                   >
-                    {language === "en" && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                    {language === "en" && <div className="w-1 h-1 rounded-full bg-white" />}
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* THEMES & APPEARANCE SECTION */}
+            {/* THEMES & APPEARANCE SECTION (Compact) */}
             <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2.5 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
                 <div className="flex items-center gap-2">
-                  <Palette className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                  <Palette className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                   <div>
-                    <h3 className="text-xs font-bold text-white">{t.themesSectionTitle}</h3>
-                    <p className="text-[10px] text-slate-400">{t.themesSectionSubtitle}</p>
+                    <h3 className="text-[11px] font-bold text-white">{t.themesSectionTitle}</h3>
+                    <p className="text-[9.5px] text-slate-400">{t.themesSectionSubtitle}</p>
                   </div>
                 </div>
-                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium">
+                <span className="text-[9.5px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium">
                   {t.activeTheme}: <b className="text-white">{currentTheme.name}</b>
                 </span>
               </div>
 
-              {/* Theme Grid Cards (Compact) */}
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5">
+              {/* Theme Grid Cards (Smaller) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-0.5">
                 {THEMES.map((theme) => {
                   const isSelected = theme.id === currentThemeId;
                   return (
                     <div
                       key={theme.id}
                       onClick={() => handleSelectTheme(theme.id)}
-                      className={`p-2 rounded-xl cursor-pointer border transition-all text-left relative group flex flex-col justify-between ${
+                      style={
                         isSelected
-                          ? `border-cyan-400 shadow-md ${theme.styles.accentGlow} bg-slate-800/40 ring-1 ring-cyan-400/50`
+                          ? { boxShadow: "0 0 12px -2px var(--color-accent-glow)" }
+                          : undefined
+                      }
+                      className={`p-1.5 rounded-lg cursor-pointer border transition-all text-left relative group flex flex-col justify-between ${
+                        isSelected
+                          ? "border-cyan-400 bg-cyan-500/10 ring-1 ring-cyan-400/50"
                           : "border-slate-800 hover:border-slate-600 bg-slate-900/50 hover:bg-slate-800/30"
                       }`}
                     >
                       <div>
                         {/* Swatch Previews */}
-                        <div className="flex items-center justify-between gap-1 mb-1.5">
-                          <div className="flex items-center gap-1">
+                        <div className="flex items-center justify-between gap-1 mb-1">
+                          <div className="flex items-center gap-0.5">
                             <div
-                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              className={`w-2.5 h-2.5 rounded-sm border ${
+                                theme.isLight ? "border-slate-400/50" : "border-white/15"
+                              }`}
                               style={{ backgroundColor: theme.preview.bg }}
                               title="Background"
                             />
                             <div
-                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              className={`w-2.5 h-2.5 rounded-sm border ${
+                                theme.isLight ? "border-slate-400/50" : "border-white/15"
+                              }`}
                               style={{ backgroundColor: theme.preview.card }}
                               title="Cards"
                             />
                             <div
-                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              className="w-2.5 h-2.5 rounded-sm border border-white/15"
                               style={{ backgroundColor: theme.preview.accent }}
-                              title="Primary Accent"
+                              title="Color Note Accent"
                             />
                             <div
-                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              className="w-2.5 h-2.5 rounded-sm border border-white/15"
                               style={{ backgroundColor: theme.preview.secondary }}
                               title="Secondary Accent"
                             />
                           </div>
-                          {isSelected && (
-                            <span className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center shrink-0">
-                              <Check className="w-2.5 h-2.5 text-cyan-400" />
+                          {isSelected ? (
+                            <span className="w-3.5 h-3.5 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center shrink-0">
+                              <Check className="w-2 h-2 text-cyan-400" />
+                            </span>
+                          ) : (
+                            <span className="text-[7.5px] px-1 py-0.2 rounded bg-slate-800/80 text-slate-400 font-medium shrink-0">
+                              {theme.isLight ? "Light" : "Dark"}
                             </span>
                           )}
                         </div>
 
-                        <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition truncate mb-0.5">
+                        <div className="text-[10px] font-bold text-white group-hover:text-cyan-200 transition truncate mb-0.5">
                           {theme.name}
                         </div>
 
                         <p
-                          className="text-[9px] text-slate-400 leading-snug line-clamp-1 mb-2"
+                          className="text-[8.5px] text-slate-400 leading-tight line-clamp-1 mb-1.5"
                           title={theme.description}
                         >
                           {theme.description}
@@ -9574,7 +10349,7 @@ export default function App() {
                           e.stopPropagation();
                           handleSelectTheme(theme.id);
                         }}
-                        className={`w-full py-1 px-2 rounded-md text-[10px] font-semibold flex items-center justify-center gap-1 transition ${
+                        className={`w-full py-0.5 px-1.5 rounded text-[9px] font-semibold flex items-center justify-center gap-1 transition ${
                           isSelected
                             ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
                             : "bg-slate-800 text-slate-300 hover:bg-slate-700"
@@ -9582,7 +10357,7 @@ export default function App() {
                       >
                         {isSelected ? (
                           <>
-                            <Check className="w-3 h-3 text-cyan-400" />
+                            <Check className="w-2.5 h-2.5 text-cyan-400" />
                             <span>{t.themeSelected}</span>
                           </>
                         ) : (
@@ -9595,21 +10370,21 @@ export default function App() {
               </div>
 
               {/* Window Opacity Slider (Внешний вид и прозрачность окна) */}
-              <div className="pt-4 border-t border-slate-800/80 space-y-2.5">
+              <div className="pt-2.5 border-t border-slate-800/80 space-y-1.5">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <Sliders className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                    <Sliders className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                     <div>
-                      <h4 className="text-xs font-bold text-white">Прозрачность окна приложения</h4>
+                      <h4 className="text-[11px] font-bold text-white">Прозрачность окна приложения</h4>
                     </div>
                   </div>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
+                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
                     {windowOpacity}%
                   </span>
                 </div>
 
-                <div className="flex items-center gap-2.5 pt-1">
-                  <span className="text-[11px] text-slate-400 font-mono">70%</span>
+                <div className="flex items-center gap-2 pt-0.5">
+                  <span className="text-[10px] text-slate-400 font-mono">70%</span>
                   <input
                     type="range"
                     min={70}
@@ -9617,12 +10392,12 @@ export default function App() {
                     step={1}
                     value={windowOpacity}
                     onChange={(e) => handleUpdateOpacity(parseInt(e.target.value, 10))}
-                    className="flex-1 accent-cyan-500 cursor-pointer h-2 bg-slate-800 rounded-lg appearance-none"
+                    className="flex-1 cursor-pointer h-1.5 rounded-lg appearance-none"
                   />
-                  <span className="text-[11px] text-slate-400 font-mono">100%</span>
+                  <span className="text-[10px] text-slate-400 font-mono">100%</span>
                   <button
                     onClick={() => handleUpdateOpacity(100)}
-                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-medium text-slate-300 transition"
+                    className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-[10px] font-medium text-slate-300 transition"
                   >
                     100%
                   </button>
