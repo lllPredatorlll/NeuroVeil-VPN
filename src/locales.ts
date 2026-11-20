@@ -2,6 +2,7 @@ export type Language = "ru" | "en";
 
 export interface Translations {
   // Navigation
+  navPremium: string;
   navDashboard: string;
   navVps: string;
   navProfiles: string;
@@ -76,6 +77,7 @@ export interface Translations {
 
 export const LOCALES: Record<Language, Translations> = {
   ru: {
+    navPremium: "Премиум",
     navDashboard: "Подключение",
     navVps: "VPS Автодеплой",
     navProfiles: "Устройства и Ключи",
@@ -116,7 +118,7 @@ export const LOCALES: Record<Language, Translations> = {
 
     aboutTitle: "О программе NeuroVeil VPN",
     aboutSubtitle: "Технологический стек, архитектура безопасности и системная информация",
-    aboutAppDesc: "NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения на базе ядра sing-box с поддержкой современных протоколов AmneziaWG 3.1, VLESS Reality, Hysteria 2 и TUIC v5 с адаптивной защитой от блокировок и ТСПУ.",
+    aboutAppDesc: "NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения на базе ядра sing-box с поддержкой современных протоколов AmneziaWG 3.1, VLESS Reality, Hysteria 2 и TUIC v5 с адаптивной защитой заголовков и интеллектуальной маршрутизацией.",
     specCore: "Ядро маршрутизации: sing-box v1.14.4 (Go Runtime)",
     specDriver: "Виртуальный адаптер: WinTun Layer-3 High-Performance Driver (wintun.dll)",
     specProtocols: "Протоколы: Hysteria 2 (Salamander Obfs) & TUIC v5 (BBR Congestion)",
@@ -142,6 +144,7 @@ export const LOCALES: Record<Language, Translations> = {
     manageRoutingLink: "Настроить раздельное туннелирование →",
   },
   en: {
+    navPremium: "Premium",
     navDashboard: "Connection",
     navVps: "VPS Auto-deploy",
     navProfiles: "Devices & Keys",
@@ -182,7 +185,7 @@ export const LOCALES: Record<Language, Translations> = {
 
     aboutTitle: "About NeuroVeil VPN",
     aboutSubtitle: "Technology stack, security architecture and system specifications",
-    aboutAppDesc: "NeuroVeil VPN is a high-performance, next-generation secure proxy client built on top of the sing-box core, powered by AmneziaWG 3.1, VLESS Reality, Hysteria 2 and TUIC v5 with anti-censorship obfuscation.",
+    aboutAppDesc: "NeuroVeil VPN is a high-performance, next-generation secure proxy client built on top of the sing-box core, powered by AmneziaWG 3.1, VLESS Reality, Hysteria 2 and TUIC v5 with adaptive header protection and smart routing.",
     specCore: "Routing Engine: sing-box v1.14.4 (Go Runtime)",
     specDriver: "Virtual Adapter: WinTun Layer-3 High-Performance Driver (wintun.dll)",
     specProtocols: "Protocols: Hysteria 2 (Salamander Obfs) & TUIC v5 (BBR Congestion)",

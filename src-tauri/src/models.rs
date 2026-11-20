@@ -101,7 +101,7 @@ pub struct VpnProfile {
     #[serde(default)]
     pub awg_version: Option<String>,               // "3.1" | "2.0"
     #[serde(default)]
-    pub tls_fragment: Option<bool>,         // Anti-DPI TLS ClientHello fragmentation
+    pub tls_fragment: Option<bool>,         // TLS ClientHello fragmentation
     #[serde(default)]
     pub shadowtls_password: Option<String>, // ShadowTLS v3 password
     #[serde(default)]
@@ -122,6 +122,8 @@ pub struct VpnProfile {
     pub total_up_bytes: u64,
     #[serde(default)]
     pub total_down_bytes: u64,
+    #[serde(default)]
+    pub container_id: Option<String>,
 }
 
 impl Default for VpnProfile {
@@ -194,6 +196,7 @@ impl Default for VpnProfile {
             routing: None,
             total_up_bytes: 0,
             total_down_bytes: 0,
+            container_id: None,
         }
     }
 }
@@ -313,7 +316,7 @@ pub fn default_routing_presets() -> Vec<RoutingPreset> {
         RoutingPreset {
             id: "builtin-media-social".to_string(),
             name: "Discord + YouTube + Spotify".to_string(),
-            description: Some("Разблокировка Discord, YouTube (браузеры) и Spotify, весь остальной ПК работает напрямую.".to_string()),
+            description: Some("Маршрутизация Discord, YouTube (браузеры) и Spotify через туннель, весь остальной ПК работает напрямую.".to_string()),
             default_outbound: "direct".to_string(),
             proxy_processes: vec![
                 "Discord.exe".to_string(),
@@ -676,6 +679,28 @@ pub struct DeployResult {
     pub message: String,
     pub created_profiles: Vec<VpnProfile>,
     pub new_ssh_port: Option<u16>,
+    #[serde(default)]
+    pub container_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpsContainerInfo {
+    pub id: String,
+    pub name: String,
+    pub runtime: String, // "docker" | "systemd"
+    pub status: String,  // "running" | "stopped" | "unknown"
+    pub created_at: String,
+    pub protocols: Vec<String>,
+    pub ports: Vec<u16>,
+    pub client_count: usize,
+    #[serde(default)]
+    pub is_legacy: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpsAdminState {
+    pub containers: Vec<VpsContainerInfo>,
+    pub profiles: Vec<VpnProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

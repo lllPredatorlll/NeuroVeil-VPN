@@ -66,6 +66,7 @@ export interface VpnProfile {
   routing?: RoutingConfig | null;
   total_up_bytes?: number;
   total_down_bytes?: number;
+  container_id?: string | null;
 }
 
 export interface RoutingConfig {
@@ -228,6 +229,24 @@ export interface DeployResult {
   message: string;
   created_profiles: VpnProfile[];
   new_ssh_port?: number;
+  container_id?: string | null;
+}
+
+export interface VpsContainerInfo {
+  id: string;
+  name: string;
+  runtime: "docker" | "systemd" | string;
+  status: "running" | "stopped" | "unknown" | string;
+  created_at: string;
+  protocols: string[];
+  ports: number[];
+  client_count: number;
+  is_legacy?: boolean;
+}
+
+export interface VpsAdminState {
+  containers: VpsContainerInfo[];
+  profiles: VpnProfile[];
 }
 
 export interface AppUpdateInfo {

@@ -12,8 +12,7 @@ target_*/
 src-tauri/target/
 src-tauri/target_*/
 src-tauri/WixTools/
-src-tauri/gen/android/
-src-tauri/gen/apple/
+src-tauri/gen/
 *.pdb
 *.exp
 *.lib
@@ -26,15 +25,20 @@ src-tauri/gen/apple/
 *.mdmp
 CrashDumps/
 
-# Локальные данные пользователя, рантайм-конфиги, кэш WebView2, логи и секреты
-# (ВАЖНО: никогда не выгружать личные профили, ключи и состояние!)
+# Локальные данные пользователя, рантайм-конфиги, бэкапы, логи и секреты
+# (ВАЖНО: никогда не выгружать личные профили, ключи, бэкапы и состояние!)
 data/
+**/data/
+bin/
 state.json
 state.json.*
 active_config.json
 singbox_config*.json
 config.json
 rules_*.json
+*.nvbackup
+*.nvbackup.json
+*backup*.json
 sing-box.exe
 sing-box-*.zip
 wintun.zip
@@ -63,19 +67,27 @@ npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
 
-# Портативные сборки, инсталляторы, версионные и временные бинарники
-# (основной NeuroVeil.exe, wintun.dll и WebView2Loader.dll отслеживаются для GitHub Releases и автообновления)
+# Исполняемые файлы, библиотеки, инсталляторы и архивы
+# (отслеживается только финальный NeuroVeil.exe и WebView2Loader.dll для GitHub Releases и автообновления)
+*.exe
+!NeuroVeil.exe
+*.dll
+!WebView2Loader.dll
+!wintun.dll
+*.msi
+*.nsis
+*.zip
+*.7z
+*.rar
 NeuroVeil-Portable*/
+NeuroVeil_v*/
 NeuroVeil_v*.exe
 NeuroVeil_VPN_v*_Setup.exe
 NeuroVeil_Update*.exe
-NeuroVeil*.zip
 *.old.exe
-*.msi
-*.nsis
-!NeuroVeil.exe
-!wintun.dll
-!WebView2Loader.dll
+
+# Дубликаты иконок и вспомогательные скрипты вне сборки
+/app-icon.png
 
 # IDE, AI-ассистенты, ОС и временные файлы
 .idea/
@@ -93,5 +105,5 @@ desktop.ini
 *~
 *.tmp
 *.bak
+*.bak.*
 scratch/
-

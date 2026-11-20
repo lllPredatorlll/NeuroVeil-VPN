@@ -7,7 +7,7 @@ mod ssh_deployer;
 use models::{
     default_routing_presets, is_awg_protocol, AppPersistentState, AppUpdateInfo, DeployResult,
     PortProbeResult, RoutingConfig, RoutingPreset, RunningProcessInfo, VpnProfile, VpnStatus,
-    VpsCredentials,
+    VpsAdminState, VpsCredentials,
 };
 use singbox::{
     build_awg_conf, build_profile_uri, check_singbox_version, collect_exe_in_dir,
@@ -1112,7 +1112,7 @@ async fn connect_vpn_internal(
                     push_log(
                         &mut rt.logs,
                         format!(
-                            "[QUIC Pre-Warm] Отправлены маскировочные пакеты QUIC v1 Initial (1200B) + STUN с ListenPort {} → {}:{} для ослепления ТСПУ перед рукопожатием",
+                            "[QUIC Pre-Warm] Отправлены пакеты инициализации QUIC v1 Initial (1200B) + STUN с ListenPort {} → {}:{} перед рукопожатием",
                             lp, profile.server, profile.port
                         ),
                     );
@@ -1273,9 +1273,11 @@ fn get_routing_presets(state: State<'_, SharedState>) -> Result<Vec<RoutingPrese
 
 #[tauri::command]
 fn save_routing_preset(
+    app: AppHandle,
     preset: RoutingPreset,
     state: State<'_, SharedState>,
 ) -> Result<Vec<RoutingPreset>, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     let preset_clone = preset.clone();
     if let Some(pos) = rt.persistent.routing_presets.iter().position(|p| p.id == preset.id) {
@@ -1308,25 +1310,34 @@ fn save_routing_preset(
     }
 
     save_persistent_state(&rt.persistent);
-    Ok(rt.persistent.routing_presets.clone())
+    let res = rt.persistent.routing_presets.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
 fn delete_routing_preset(
+    app: AppHandle,
     preset_id: String,
     state: State<'_, SharedState>,
 ) -> Result<Vec<RoutingPreset>, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     rt.persistent.routing_presets.retain(|p| p.id != preset_id);
     if rt.persistent.active_preset_id.as_deref() == Some(&preset_id) {
         rt.persistent.active_preset_id = None;
     }
     save_persistent_state(&rt.persistent);
-    Ok(rt.persistent.routing_presets.clone())
+    let res = rt.persistent.routing_presets.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
-fn reset_routing_presets(state: State<'_, SharedState>) -> Result<Vec<RoutingPreset>, String> {
+fn reset_routing_presets(app: AppHandle, state: State<'_, SharedState>) -> Result<Vec<RoutingPreset>, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     let user_presets: Vec<RoutingPreset> = rt
         .persistent
@@ -1339,17 +1350,22 @@ fn reset_routing_presets(state: State<'_, SharedState>) -> Result<Vec<RoutingPre
     all_presets.extend(user_presets);
     rt.persistent.routing_presets = all_presets;
     save_persistent_state(&rt.persistent);
-    Ok(rt.persistent.routing_presets.clone())
+    let res = rt.persistent.routing_presets.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
 async fn apply_routing_preset(
+    app: AppHandle,
     preset_id: String,
     profile_id: Option<String>,
     state: State<'_, SharedState>,
 ) -> Result<VpnStatus, String> {
+    use tauri::Emitter;
     let state_clone = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let res = tauri::async_runtime::spawn_blocking(move || {
         let (preset, profile, routing_snapshot, is_running, old_routing) = {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
             let old_routing = rt.persistent.routing.clone();
@@ -1428,18 +1444,22 @@ async fn apply_routing_preset(
         Ok(build_vpn_status(&mut rt))
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
 async fn apply_routing_on_the_fly(
+    app: AppHandle,
     routing: RoutingConfig,
     profile_id: Option<String>,
     preset_id: Option<String>,
     state: State<'_, SharedState>,
 ) -> Result<VpnStatus, String> {
+    use tauri::Emitter;
     let state_clone = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let res = tauri::async_runtime::spawn_blocking(move || {
         let (profile, routing_snapshot, is_running, old_routing) = {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
             let old_routing = rt.persistent.routing.clone();
@@ -1494,14 +1514,18 @@ async fn apply_routing_on_the_fly(
         Ok(build_vpn_status(&mut rt))
     })
     .await
-    .map_err(|e| format!("Task join error: {}", e))?
+    .map_err(|e| format!("Task join error: {}", e))??;
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
 fn add_or_update_profile(
+    app: AppHandle,
     mut profile: VpnProfile,
     state: State<'_, SharedState>,
 ) -> Result<Vec<VpnProfile>, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     if profile.id.trim().is_empty() {
         profile.id = Uuid::new_v4().to_string();
@@ -1549,11 +1573,13 @@ fn add_or_update_profile(
         rt.persistent.selected_profile_id = Some(profile.id);
     }
     save_persistent_state(&rt.persistent);
+    let _ = app.emit("state-updated", ());
     Ok(rt.persistent.profiles.clone())
 }
 
 #[tauri::command]
-fn import_profile_uri(uri: String, state: State<'_, SharedState>) -> Result<VpnProfile, String> {
+fn import_profile_uri(app: AppHandle, uri: String, state: State<'_, SharedState>) -> Result<VpnProfile, String> {
+    use tauri::Emitter;
     let mut profile = parse_profile_uri(&uri)?;
     profile.pinned_on_pc = Some(true);
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
@@ -1562,6 +1588,7 @@ fn import_profile_uri(uri: String, state: State<'_, SharedState>) -> Result<VpnP
         rt.persistent.selected_profile_id = Some(profile.id.clone());
     }
     save_persistent_state(&rt.persistent);
+    let _ = app.emit("state-updated", ());
     Ok(profile)
 }
 
@@ -1571,7 +1598,8 @@ fn parse_profile_text(text: String) -> Result<VpnProfile, String> {
 }
 
 #[tauri::command]
-fn delete_profile(id: String, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
+fn delete_profile(app: AppHandle, id: String, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     if rt.active_profile_id.as_deref() == Some(&id) {
         stop_singbox_internal(&mut rt);
@@ -1581,7 +1609,10 @@ fn delete_profile(id: String, state: State<'_, SharedState>) -> Result<Vec<VpnPr
         rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
     }
     save_persistent_state(&rt.persistent);
-    Ok(rt.persistent.profiles.clone())
+    let res = rt.persistent.profiles.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(res)
 }
 
 #[tauri::command]
@@ -1717,7 +1748,7 @@ async fn probe_single_port(
                     port,
                     reachable: false,
                     latency_ms: None,
-                    message: "Таймаут (заблокирован DPI или закрыт)".to_string(),
+                    message: "Таймаут (порт недоступен или закрыт)".to_string(),
                 }
             }
         }
@@ -1790,7 +1821,7 @@ async fn probe_single_port(
                     port,
                     reachable: false,
                     latency_ms: None,
-                    message: "Таймаут (заблокирован DPI или закрыт)".to_string(),
+                    message: "Таймаут (порт недоступен или закрыт)".to_string(),
                 }
             }
         }
@@ -1818,13 +1849,13 @@ async fn probe_single_port(
             };
         }
 
-        // Port 51820 is standard WireGuard - universally blocked by TSPPU in RU
+        // Standard port 51820 check
         if port == 51820 {
             return PortProbeResult {
                 port,
                 reachable: false,
                 latency_ms: None,
-                message: "Порт 51820 заблокирован DPI (ТСПУ WireGuard)".to_string(),
+                message: "Стандартный порт 51820 недоступен (рекомендуется сменить порт)".to_string(),
             };
         }
 
@@ -2024,19 +2055,54 @@ fn export_awg_conf(
 
 #[tauri::command]
 fn save_routing_config(
+    app: AppHandle,
     routing: RoutingConfig,
     profile_id: Option<String>,
     state: State<'_, SharedState>,
 ) -> Result<RoutingConfig, String> {
+    use tauri::Emitter;
     let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
     if let Some(ref pid) = profile_id {
         if let Some(prof) = rt.persistent.profiles.iter_mut().find(|p| &p.id == pid) {
             prof.routing = Some(routing.clone());
         }
     }
+    for prof in rt.persistent.profiles.iter_mut() {
+        if let Some(ref mut r) = prof.routing {
+            r.mode = routing.mode.clone();
+        }
+    }
     rt.persistent.routing = routing.clone();
     save_persistent_state(&rt.persistent);
+    drop(rt);
+    let _ = app.emit("state-updated", ());
     Ok(routing)
+}
+
+#[tauri::command]
+fn set_network_mode(
+    app: AppHandle,
+    mode: String,
+    state: State<'_, SharedState>,
+) -> Result<RoutingConfig, String> {
+    use tauri::Emitter;
+    let normalized = if mode == "tun" {
+        "tun".to_string()
+    } else {
+        "system_proxy".to_string()
+    };
+    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    rt.persistent.routing.mode = normalized.clone();
+    for prof in rt.persistent.profiles.iter_mut() {
+        if let Some(ref mut r) = prof.routing {
+            r.mode = normalized.clone();
+        }
+    }
+    let updated = rt.persistent.routing.clone();
+    save_persistent_state(&rt.persistent);
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -2148,7 +2214,8 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-async fn pick_config_file_and_import(state: State<'_, SharedState>) -> Result<Option<VpnProfile>, String> {
+async fn pick_config_file_and_import(app: AppHandle, state: State<'_, SharedState>) -> Result<Option<VpnProfile>, String> {
+    use tauri::Emitter;
     let file_path = tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>, String> {
         let ps_script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -2216,6 +2283,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         rt.persistent.selected_profile_id = Some(profile.id.clone());
     }
     save_persistent_state(&rt.persistent);
+    let _ = app.emit("state-updated", ());
 
     Ok(Some(profile))
 }
@@ -2307,6 +2375,7 @@ async fn test_vps_ssh(
     creds: VpsCredentials,
     state: State<'_, SharedState>,
 ) -> Result<String, String> {
+    use tauri::Emitter;
     {
         if let Ok(mut rt) = state.lock() {
             let mut saved = creds.clone();
@@ -2315,6 +2384,7 @@ async fn test_vps_ssh(
             save_persistent_state(&rt.persistent);
         }
     }
+    let _ = app.emit("state-updated", ());
     ssh_deployer::test_ssh_connection(&app, &creds).await
 }
 
@@ -2324,11 +2394,14 @@ async fn deploy_vps_server(
     creds: VpsCredentials,
     state: State<'_, SharedState>,
 ) -> Result<DeployResult, String> {
+    use tauri::Emitter;
     let result = ssh_deployer::deploy_vps(&app, &creds).await?;
     if let Ok(mut rt) = state.lock() {
-        // Remove older auto-deployed profiles for the same hosts to avoid duplicates
-        rt.persistent.profiles.retain(|p| p.server != creds.host.trim());
+        // Keep previous container deployments on the same host; only replace exact (server, port, protocol) matches
         for prof in &result.created_profiles {
+            rt.persistent.profiles.retain(|p| {
+                !(p.server == prof.server && p.port == prof.port && p.protocol == prof.protocol)
+            });
             rt.persistent.profiles.push(prof.clone());
         }
         if let Some(first) = result.created_profiles.first() {
@@ -2342,6 +2415,7 @@ async fn deploy_vps_server(
         rt.persistent.saved_vps = Some(saved);
         save_persistent_state(&rt.persistent);
     }
+    let _ = app.emit("state-updated", ());
     Ok(result)
 }
 
@@ -2356,6 +2430,7 @@ async fn create_device_key(
     creds: VpsCredentials,
     device_name: String,
     protocol: String,
+    container_id: Option<String>,
     _state: State<'_, SharedState>,
 ) -> Result<VpnProfile, String> {
     let clean_name = device_name.trim().to_string();
@@ -2377,37 +2452,76 @@ async fn create_device_key(
         );
     }
 
-    // Connect to VPS strictly via SSH with root credentials and register new user in /etc/sing-box/config.json
-    let profile =
-        ssh_deployer::create_vps_device_user(&app, &creds, &clean_name, &protocol).await?;
+    let profile = ssh_deployer::create_vps_device_user(
+        &app,
+        &creds,
+        &clean_name,
+        &protocol,
+        container_id.as_deref(),
+    )
+    .await?;
 
     Ok(profile)
 }
 
 #[tauri::command]
-async fn login_vps_admin(
+async fn create_device_keys(
     app: AppHandle,
     creds: VpsCredentials,
-    state: State<'_, SharedState>,
-) -> Result<Vec<VpnProfile>, String> {
+    device_name: String,
+    protocols: Vec<String>,
+    container_id: Option<String>,
+    _state: State<'_, SharedState>,
+) -> Result<ssh_deployer::CreateDeviceKeysResult, String> {
+    let clean_name = device_name.trim().to_string();
+    if clean_name.is_empty() {
+        return Err("Введите название устройства или клиента".to_string());
+    }
+
     if creds.host.trim().is_empty() {
-        return Err("Введите IP-адрес сервера".to_string());
+        return Err(
+            "Не указан IP-адрес VPS сервера. Выпуск новых ключей доступен только владельцу сервера."
+                .to_string(),
+        );
     }
+
     if creds.password.trim().is_empty() {
-        return Err("Введите пароль SSH (root)".to_string());
+        return Err(
+            "Отказано в доступе. Для выпуска нового ключа на сервере требуется ввести SSH-пароль root. Доступ разрешен только владельцу VPS."
+                .to_string(),
+        );
     }
 
-    let mut server_profiles = ssh_deployer::fetch_vps_profiles(&app, &creds).await?;
+    if protocols.is_empty() {
+        return Err("Выберите хотя бы один протокол для выпуска ключа".to_string());
+    }
 
+    let result = ssh_deployer::create_vps_device_keys(
+        &app,
+        &creds,
+        &clean_name,
+        &protocols,
+        container_id.as_deref(),
+    )
+    .await?;
+
+    Ok(result)
+}
+
+fn sync_server_profiles_with_state(
+    creds: &VpsCredentials,
+    server_profiles: &mut [VpnProfile],
+    state: &State<'_, SharedState>,
+) {
     if let Ok(mut rt) = state.lock() {
         let mut saved = creds.clone();
         saved.password = String::new(); // Do not store plaintext password on disk
         rt.persistent.saved_vps = Some(saved);
 
-        for s_prof in &mut server_profiles {
+        for s_prof in server_profiles.iter_mut() {
             if let Some(existing) = rt.persistent.profiles.iter_mut().find(|p| {
                 (p.server == s_prof.server && p.port == s_prof.port && p.password == s_prof.password)
-                || (p.server == s_prof.server && p.name == s_prof.name)
+                    || (p.server == s_prof.server && p.port == s_prof.port && p.name == s_prof.name)
             }) {
                 s_prof.id = existing.id.clone();
                 let merged_up = existing.total_up_bytes.max(s_prof.total_up_bytes);
@@ -2416,6 +2530,9 @@ async fn login_vps_admin(
                 existing.total_down_bytes = merged_down;
                 s_prof.total_up_bytes = merged_up;
                 s_prof.total_down_bytes = merged_down;
+                if existing.container_id.is_none() {
+                    existing.container_id = s_prof.container_id.clone();
+                }
                 existing.awg_private_key = s_prof.awg_private_key.clone();
                 existing.awg_public_key = s_prof.awg_public_key.clone();
                 existing.awg_preshared_key = s_prof.awg_preshared_key.clone();
@@ -2449,8 +2566,97 @@ async fn login_vps_admin(
         rt.persistent.profiles.retain(|p| p.pinned_on_pc != Some(false));
         save_persistent_state(&rt.persistent);
     }
+}
+
+#[tauri::command]
+async fn login_vps_admin(
+    app: AppHandle,
+    creds: VpsCredentials,
+    state: State<'_, SharedState>,
+) -> Result<Vec<VpnProfile>, String> {
+    if creds.host.trim().is_empty() {
+        return Err("Введите IP-адрес сервера".to_string());
+    }
+    if creds.password.trim().is_empty() {
+        return Err("Введите пароль SSH (root)".to_string());
+    }
+
+    let mut server_profiles = ssh_deployer::fetch_vps_profiles(&app, &creds).await?;
+    sync_server_profiles_with_state(&creds, &mut server_profiles, &state);
+    {
+        use tauri::Emitter;
+        let _ = app.emit("state-updated", ());
+    }
 
     Ok(server_profiles)
+}
+
+#[tauri::command]
+async fn get_vps_admin_state(
+    app: AppHandle,
+    creds: VpsCredentials,
+    state: State<'_, SharedState>,
+) -> Result<VpsAdminState, String> {
+    if creds.host.trim().is_empty() {
+        return Err("Введите IP-адрес сервера".to_string());
+    }
+    if creds.password.trim().is_empty() {
+        return Err("Введите пароль SSH (root)".to_string());
+    }
+
+    let mut admin_state = ssh_deployer::fetch_vps_admin_state(&app, &creds).await?;
+    sync_server_profiles_with_state(&creds, &mut admin_state.profiles, &state);
+    {
+        use tauri::Emitter;
+        let _ = app.emit("state-updated", ());
+    }
+
+    Ok(admin_state)
+}
+
+#[tauri::command]
+async fn manage_vps_container_cmd(
+    app: AppHandle,
+    creds: VpsCredentials,
+    container_id: String,
+    action: String,
+    state: State<'_, SharedState>,
+) -> Result<String, String> {
+    if creds.host.trim().is_empty() || creds.password.trim().is_empty() {
+        return Err("Введите IP-адрес сервера и пароль SSH (root)".to_string());
+    }
+    let msg = ssh_deployer::manage_vps_container(&app, &creds, &container_id, &action).await?;
+
+    if action == "delete" {
+        if let Ok(mut rt) = state.lock() {
+            let host_trimmed = creds.host.trim().to_string();
+            let active_in_deleted = rt.active_profile_id.as_ref().is_some_and(|aid| {
+                rt.persistent.profiles.iter().any(|p| {
+                    p.id == *aid
+                        && p.server == host_trimmed
+                        && p.container_id.as_deref() == Some(container_id.as_str())
+                })
+            });
+            if active_in_deleted {
+                stop_singbox_internal(&mut rt);
+            }
+            rt.persistent.profiles.retain(|p| {
+                !(p.server == host_trimmed
+                    && p.container_id.as_deref() == Some(container_id.as_str()))
+            });
+            if let Some(sel) = rt.persistent.selected_profile_id.as_deref() {
+                if !rt.persistent.profiles.iter().any(|p| p.id == sel) {
+                    rt.persistent.selected_profile_id =
+                        rt.persistent.profiles.first().map(|p| p.id.clone());
+                }
+            }
+            save_persistent_state(&rt.persistent);
+        }
+        use tauri::Emitter;
+        let _ = app.emit("state-updated", ());
+    }
+
+    Ok(msg)
 }
 
 #[tauri::command]
@@ -2464,21 +2670,28 @@ async fn delete_vps_device_cmd(
         ssh_deployer::delete_vps_device(&app, &creds, &profile).await?;
     }
 
-    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    rt.persistent.profiles.retain(|p| {
-        let same_id = p.id == profile.id;
-        let same_creds = p.server == profile.server
-            && p.port == profile.port
-            && !profile.password.is_empty()
-            && p.password == profile.password;
-        let same_name = p.server == profile.server && p.name == profile.name;
-        !(same_id || same_creds || same_name)
-    });
-    if rt.persistent.selected_profile_id.as_deref() == Some(&profile.id) {
-        rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+    let res = {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        rt.persistent.profiles.retain(|p| {
+            let same_id = p.id == profile.id;
+            let same_creds = p.server == profile.server
+                && p.port == profile.port
+                && !profile.password.is_empty()
+                && p.password == profile.password;
+            let same_name = p.server == profile.server && p.name == profile.name;
+            !(same_id || same_creds || same_name)
+        });
+        if rt.persistent.selected_profile_id.as_deref() == Some(&profile.id) {
+            rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+        }
+        save_persistent_state(&rt.persistent);
+        rt.persistent.profiles.clone()
+    };
+    {
+        use tauri::Emitter;
+        let _ = app.emit("state-updated", ());
     }
-    save_persistent_state(&rt.persistent);
-    Ok(rt.persistent.profiles.clone())
+    Ok(res)
 }
 
 #[tauri::command]
@@ -2655,42 +2868,197 @@ fn set_windows_autostart(enable: bool, start_minimized: bool) -> Result<(), Stri
 }
 
 #[tauri::command]
-fn app_start_dragging(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.start_dragging();
-    }
+fn app_start_dragging(window: tauri::WebviewWindow) {
+    let _ = window.start_dragging();
 }
 
 #[tauri::command]
-fn app_minimize(app: tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.minimize();
-    }
+fn app_minimize(window: tauri::WebviewWindow) {
+    let _ = window.minimize();
 }
 
-#[tauri::command]
-fn app_toggle_maximize(app: tauri::AppHandle, state: State<'_, SharedState>) {
-    if let Some(w) = app.get_webview_window("main") {
-        if let Ok(is_max) = w.is_maximized() {
-            if is_max {
-                let _ = w.unmaximize();
-                if let Ok(mut rt) = state.lock() {
-                    rt.persistent.window_maximized = Some(false);
-                    save_persistent_state(&rt.persistent);
-                }
-            } else {
-                let _ = w.maximize();
-                if let Ok(mut rt) = state.lock() {
-                    rt.persistent.window_maximized = Some(true);
-                    save_persistent_state(&rt.persistent);
-                }
+fn compute_screen_scale_factor(window: &tauri::WebviewWindow) -> (f64, f64, f64) {
+    let mon = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten());
+    if let Some(m) = mon {
+        let sf = m.scale_factor().max(0.5);
+        let sw = m.size().width as f64 / sf;
+        let sh = m.size().height as f64 / sf;
+        let ratio = (sw / 1920.0).min(sh / 1080.0);
+        let k = (0.5 + 0.5 * ratio).clamp(0.84, 1.32);
+        return (k, sw, sh);
+    }
+    (1.0, 1920.0, 1080.0)
+}
+
+#[cfg(target_os = "windows")]
+static MAIN_ORIG_WNDPROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn non_resizable_main_wndproc(
+    hwnd: isize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    #[link(name = "user32")]
+    extern "system" {
+        fn CallWindowProcW(
+            lp_prev_wnd_func: isize,
+            hwnd: isize,
+            msg: u32,
+            w_param: usize,
+            l_param: isize,
+        ) -> isize;
+    }
+
+    const WM_NCHITTEST: u32 = 0x0084;
+    const WM_NCLBUTTONDBLCLK: u32 = 0x00A3;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const HTCLIENT: isize = 1;
+    const SC_SIZE: usize = 0xF000;
+    const SC_MAXIMIZE: usize = 0xF030;
+
+    if msg == WM_NCLBUTTONDBLCLK {
+        return 0;
+    }
+    if msg == WM_SYSCOMMAND {
+        let cmd = wparam & 0xFFF0;
+        if cmd == SC_SIZE || cmd == SC_MAXIMIZE {
+            return 0;
+        }
+    }
+
+    let orig = MAIN_ORIG_WNDPROC.load(std::sync::atomic::Ordering::SeqCst);
+    if orig == 0 {
+        return 0;
+    }
+    let res = CallWindowProcW(orig, hwnd, msg, wparam, lparam);
+    if msg == WM_NCHITTEST && (10..=18).contains(&res) {
+        return HTCLIENT;
+    }
+    res
+}
+
+#[cfg(target_os = "windows")]
+fn install_non_resizable_frameless_hook(window: &tauri::WebviewWindow) {
+    if MAIN_ORIG_WNDPROC.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+        return;
+    }
+    if let Ok(hwnd) = window.hwnd() {
+        #[link(name = "user32")]
+        extern "system" {
+            fn SetWindowLongPtrW(hwnd: isize, n_index: i32, dw_new_long: isize) -> isize;
+        }
+        const GWLP_WNDPROC: i32 = -4;
+        unsafe {
+            let h = hwnd.0 as isize;
+            let prev = SetWindowLongPtrW(
+                h,
+                GWLP_WNDPROC,
+                non_resizable_main_wndproc as *const () as isize,
+            );
+            if prev != 0 {
+                MAIN_ORIG_WNDPROC.store(prev, std::sync::atomic::Ordering::SeqCst);
             }
         }
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn install_non_resizable_frameless_hook(_window: &tauri::WebviewWindow) {}
+
+#[cfg(target_os = "windows")]
+fn apply_frameless_dark_border(window: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = window.hwnd() {
+        #[link(name = "dwmapi")]
+        extern "system" {
+            fn DwmSetWindowAttribute(
+                hwnd: isize,
+                dw_attribute: u32,
+                pv_attribute: *const std::ffi::c_void,
+                cb_attribute: u32,
+            ) -> i32;
+        }
+        unsafe {
+            let h = hwnd.0 as isize;
+            // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            let dark_mode: i32 = 1;
+            let _ = DwmSetWindowAttribute(
+                h,
+                20,
+                &dark_mode as *const i32 as *const std::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
+            );
+            // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+            let round_corners: u32 = 2;
+            let _ = DwmSetWindowAttribute(
+                h,
+                33,
+                &round_corners as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+            // DWMWA_BORDER_COLOR = 34, DWMWA_COLOR_NONE = 0xFFFFFFFE
+            let no_border: u32 = 0xFFFF_FFFE;
+            let _ = DwmSetWindowAttribute(
+                h,
+                34,
+                &no_border as *const u32 as *const std::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn apply_frameless_dark_border(_window: &tauri::WebviewWindow) {}
+
+fn apply_scaled_main_window_size(window: &tauri::WebviewWindow) {
+    let _ = window.set_maximizable(false);
+    let (mut k, sw, sh) = compute_screen_scale_factor(window);
+    let max_k_w = (sw * 0.90) / 460.0;
+    let max_k_h = (sh * 0.86) / 680.0;
+    k = k.min(max_k_w).min(max_k_h).clamp(0.75, 1.32);
+
+    let target_w = (460.0 * k).round();
+    let target_h = (680.0 * k).round();
+    let fixed_size = tauri::Size::Logical(tauri::LogicalSize {
+        width: target_w,
+        height: target_h,
+    });
+    let _ = window.set_min_size(None::<tauri::Size>);
+    let _ = window.set_max_size(None::<tauri::Size>);
+    let _ = window.set_size(fixed_size.clone());
+    let _ = window.set_min_size(Some(fixed_size.clone()));
+    let _ = window.set_max_size(Some(fixed_size));
+    let _ = window.set_zoom(k);
+    install_non_resizable_frameless_hook(window);
+    apply_frameless_dark_border(window);
+}
+
 #[tauri::command]
-fn app_close(app: tauri::AppHandle, state: State<'_, SharedState>) {
+fn app_toggle_maximize(window: tauri::WebviewWindow, _state: State<'_, SharedState>) {
+    if window.label() == "main" {
+        return;
+    }
+    if let Ok(is_max) = window.is_maximized() {
+        if is_max {
+            let _ = window.unmaximize();
+        } else {
+            let _ = window.maximize();
+        }
+    }
+}
+
+#[tauri::command]
+fn app_close(window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_, SharedState>) {
+    if window.label() != "main" {
+        let _ = window.close();
+        return;
+    }
     let should_hide = {
         if let Ok(rt) = state.lock() {
             save_persistent_state(&rt.persistent);
@@ -2699,17 +3067,118 @@ fn app_close(app: tauri::AppHandle, state: State<'_, SharedState>) {
             true
         }
     };
-    if let Some(w) = app.get_webview_window("main") {
-        if should_hide {
-            let _ = w.hide();
-        } else {
-            if let Ok(mut rt) = state.lock() {
-                stop_singbox_internal(&mut rt);
-                save_persistent_state(&rt.persistent);
+    if should_hide {
+        let _ = window.hide();
+    } else {
+        if let Ok(mut rt) = state.lock() {
+            stop_singbox_internal(&mut rt);
+            save_persistent_state(&rt.persistent);
+        }
+        app.exit(0);
+    }
+}
+
+fn simple_url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
             }
-            app.exit(0);
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
         }
     }
+    out
+}
+
+#[tauri::command]
+fn emit_window_event(app: tauri::AppHandle, event: String, payload: serde_json::Value) {
+    use tauri::Emitter;
+    let _ = app.emit(&event, payload);
+}
+
+#[tauri::command]
+async fn open_popup_window(
+    app: tauri::AppHandle,
+    mode: String,
+    profile_id: Option<String>,
+    submode: Option<String>,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let label = format!("popup_{}", mode);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.emit(
+            "popup-params",
+            serde_json::json!({
+                "mode": mode,
+                "profileId": profile_id,
+                "submode": submode,
+            }),
+        );
+        let _ = existing.show();
+        if let Ok(true) = existing.is_minimized() {
+            let _ = existing.unminimize();
+        }
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+
+    let (title, width, height, min_w, min_h) = match mode.as_str() {
+        "file" => ("NeuroVeil VPN — Добавить из файла", 480.0, 390.0, 400.0, 320.0),
+        "key" => ("NeuroVeil VPN — Вставить ключ", 500.0, 430.0, 400.0, 340.0),
+        "vps" => ("NeuroVeil VPN — Добавить VPS (Автодеплой по SSH)", 740.0, 660.0, 520.0, 460.0),
+        "vps_admin" => ("NeuroVeil VPN — Управление VPS", 760.0, 660.0, 560.0, 480.0),
+        "logs" => ("NeuroVeil VPN — Журнал ядра sing-box", 720.0, 520.0, 460.0, 340.0),
+        "qr" => ("NeuroVeil VPN — QR-код и подключение смартфона", 540.0, 640.0, 420.0, 480.0),
+        "edit" => ("NeuroVeil VPN — Редактирование конфигурации", 660.0, 650.0, 460.0, 440.0),
+        "routing_rules" => ("NeuroVeil VPN — Настройка правил маршрутизации", 560.0, 640.0, 440.0, 440.0),
+        "processes" => ("NeuroVeil VPN — Выбор из запущенных процессов", 640.0, 540.0, 460.0, 380.0),
+        "save_preset" => ("NeuroVeil VPN — Новая предустановка маршрутов", 480.0, 430.0, 380.0, 340.0),
+        "confirm_clean" => ("NeuroVeil VPN — Подтвердите очистку сервера", 440.0, 235.0, 360.0, 200.0),
+        _ => ("NeuroVeil VPN", 500.0, 420.0, 380.0, 300.0),
+    };
+
+    let mut query = format!("index.html?popup={}", simple_url_encode(&mode));
+    if let Some(ref pid) = profile_id {
+        if !pid.trim().is_empty() {
+            query.push_str(&format!("&profileId={}", simple_url_encode(pid)));
+        }
+    }
+    if let Some(ref sub) = submode {
+        if !sub.trim().is_empty() {
+            query.push_str(&format!("&submode={}", simple_url_encode(sub)));
+        }
+    }
+
+    let url = tauri::WebviewUrl::App(query.into());
+    let win = tauri::WebviewWindowBuilder::new(&app, &label, url)
+        .title(title)
+        .inner_size(width, height)
+        .min_inner_size(min_w, min_h)
+        .resizable(true)
+        .decorations(false)
+        .always_on_top(true)
+        .center()
+        .focused(true)
+        .build()
+        .map_err(|e| format!("Не удалось открыть окно: {}", e))?;
+
+    let (k, sw, sh) = compute_screen_scale_factor(&win);
+    let max_k_w = (sw * 0.92) / width;
+    let max_k_h = (sh * 0.86) / height;
+    let popup_k = k.min(max_k_w).min(max_k_h).clamp(0.75, 1.32);
+    let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+        width: (width * popup_k).round(),
+        height: (height * popup_k).round(),
+    }));
+    let _ = win.set_zoom(popup_k);
+    let _ = win.center();
+    let _ = win.show();
+    apply_frameless_dark_border(&win);
+    let _ = win.set_focus();
+    Ok(())
 }
 
 #[tauri::command]
@@ -3314,6 +3783,186 @@ fn save_system_settings(
     Ok(res)
 }
 
+#[tauri::command]
+async fn export_backup_file(
+    ui_prefs: Option<serde_json::Value>,
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
+    let persistent_snapshot = {
+        let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        rt.persistent.clone()
+    };
+
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H-%M").to_string();
+    let default_name = format!("NeuroVeil_v2_backup_{}.nvbackup", timestamp);
+
+    let payload = serde_json::json!({
+        "app": "NeuroVeil VPN",
+        "format_version": 1,
+        "created_at": chrono::Local::now().to_rfc3339(),
+        "state": persistent_snapshot,
+        "ui_prefs": ui_prefs.unwrap_or_else(|| serde_json::json!({}))
+    });
+    let json_text = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Ошибка сериализации резервной копии: {}", e))?;
+
+    let save_path = tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        let ps_script = format!(
+            r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.SaveFileDialog
+$dlg.Title = "Сохранить резервную копию NeuroVeil VPN"
+$dlg.FileName = "{}"
+$dlg.Filter = "Резервная копия NeuroVeil (*.nvbackup;*.json)|*.nvbackup;*.json|Все файлы (*.*)|*.*"
+$dlg.AddExtension = $true
+$dlg.DefaultExt = "nvbackup"
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dlg.FileName
+}}
+"#,
+            default_name
+        );
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Sta", "-Command", &ps_script]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let path_str = match save_path {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    fs::write(&path_str, json_text.as_bytes())
+        .map_err(|e| format!("Не удалось записать файл резервной копии: {}", e))?;
+    Ok(Some(path_str))
+}
+
+#[tauri::command]
+async fn import_backup_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<Option<serde_json::Value>, String> {
+    use tauri::Emitter;
+    let file_path = tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>, String> {
+        let ps_script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Title = "Выберите файл резервной копии NeuroVeil VPN"
+$dlg.Filter = "Резервная копия NeuroVeil (*.nvbackup;*.json;*.bak)|*.nvbackup;*.json;*.bak|Все файлы (*.*)|*.*"
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dlg.FileName
+}
+"#;
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-Sta", "-Command", ps_script]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let path_str = match file_path {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let content = fs::read_to_string(&path_str)
+        .map_err(|e| format!("Не удалось прочитать файл резервной копии: {}", e))?;
+    let val: serde_json::Value = serde_json::from_str(content.trim())
+        .map_err(|e| format!("Файл резервной копии поврежден или имеет неверный JSON: {}", e))?;
+
+    let (restored_state_val, ui_prefs_val) = if val.get("state").is_some() {
+        (
+            val["state"].clone(),
+            val.get("ui_prefs").cloned().unwrap_or_else(|| serde_json::json!({})),
+        )
+    } else {
+        (val.clone(), serde_json::json!({}))
+    };
+
+    let mut restored_state: AppPersistentState = serde_json::from_value(restored_state_val)
+        .map_err(|e| format!("Некорректная структура резервной копии: {}", e))?;
+
+    if restored_state.routing_presets.is_empty() {
+        restored_state.routing_presets = default_routing_presets();
+    }
+
+    let autostart_flag = restored_state.autostart;
+    let start_min_flag = restored_state.start_minimized;
+
+    {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        stop_singbox_internal(&mut rt);
+        rt.persistent = restored_state.clone();
+        save_persistent_state(&rt.persistent);
+    }
+
+    let _ = set_windows_autostart(autostart_flag, start_min_flag);
+    let _ = app.emit("state-updated", ());
+
+    Ok(Some(serde_json::json!({
+        "path": path_str,
+        "state": restored_state,
+        "ui_prefs": ui_prefs_val
+    })))
+}
+
+#[tauri::command]
+fn factory_reset_app(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<AppPersistentState, String> {
+    use tauri::Emitter;
+    let dir = get_app_data_dir();
+    let default_state = AppPersistentState::default();
+
+    {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        stop_singbox_internal(&mut rt);
+        rt.logs.clear();
+        rt.persistent = default_state.clone();
+
+        for fname in [
+            "state.json",
+            "state.json.bak",
+            "state.json.tmp",
+            "active_config.json",
+            "singbox.log",
+        ] {
+            let p = dir.join(fname);
+            if p.exists() {
+                let _ = fs::remove_file(p);
+            }
+        }
+        save_persistent_state(&rt.persistent);
+    }
+
+    let _ = set_windows_autostart(false, false);
+    let _ = app.emit("state-updated", ());
+    Ok(default_state)
+}
+
 fn main() {
     #[cfg(target_os = "windows")]
     {
@@ -3469,35 +4118,27 @@ fn main() {
             // Determine if window should start minimized
             let is_minimized_arg = std::env::args().any(|a| a == "--minimized");
             let st = app.state::<SharedState>();
-            let (should_start_minimized, persistent_snapshot) = if let Ok(rt) = st.lock() {
-                (is_minimized_arg || rt.persistent.start_minimized, rt.persistent.clone())
+            let should_start_minimized = if let Ok(rt) = st.lock() {
+                is_minimized_arg || rt.persistent.start_minimized
             } else {
-                (is_minimized_arg, AppPersistentState::default())
+                is_minimized_arg
             };
 
             if let Some(window) = app.get_webview_window("main") {
-                // Restore saved window size if present
-                if let (Some(w), Some(h)) = (persistent_snapshot.window_width, persistent_snapshot.window_height) {
-                    if w >= 940.0 && h >= 640.0 {
-                        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
-                        let _ = window.center();
-                    }
-                }
-
-                if persistent_snapshot.window_maximized == Some(true) {
-                    let _ = window.maximize();
-                }
+                apply_scaled_main_window_size(&window);
+                let _ = window.center();
 
                 if should_start_minimized {
                     let _ = window.hide();
-                    println!("[NeuroVeil VPN] Window started minimized to system tray.");
+                    println!("[NeuroVeil VPN 2.0] Window started minimized to system tray.");
                 } else {
                     let _ = window.show();
+                    apply_frameless_dark_border(&window);
                     if let Ok(true) = window.is_minimized() {
                         let _ = window.unminimize();
                     }
                     let _ = window.set_focus();
-                    println!("[NeuroVeil VPN] Main window shown and focused.");
+                    println!("[NeuroVeil VPN 2.0] Main window shown and focused.");
                 }
             }
 
@@ -3548,6 +4189,7 @@ fn main() {
             delete_profile,
             ping_profile,
             save_routing_config,
+            set_network_mode,
             clear_core_logs,
             export_core_logs_to_file,
             pick_exe_file,
@@ -3559,18 +4201,26 @@ fn main() {
             deploy_vps_server,
             clean_vps_server,
             create_device_key,
+            create_device_keys,
             export_profile_json,
             export_awg_conf,
             probe_awg_ports,
             probe_profile_ports,
             login_vps_admin,
+            get_vps_admin_state,
+            manage_vps_container_cmd,
             delete_vps_device_cmd,
             app_start_dragging,
             app_minimize,
             app_toggle_maximize,
             app_close,
+            open_popup_window,
+            emit_window_event,
             app_show_window,
             save_system_settings,
+            export_backup_file,
+            import_backup_file,
+            factory_reset_app,
             get_routing_presets,
             save_routing_preset,
             delete_routing_preset,
@@ -3581,61 +4231,46 @@ fn main() {
             download_and_install_update,
             open_external_url
         ])
-        .on_window_event(move |window, event| match event {
-            tauri::WindowEvent::Resized(phys_size) => {
-                let is_max = window.is_maximized().unwrap_or(false);
-                let is_min = window.is_minimized().unwrap_or(false);
-
-                if !is_min {
-                    if is_max {
-                        if let Ok(mut rt) = resize_state.lock() {
-                            rt.persistent.window_maximized = Some(true);
-                        }
-                        let _ = resize_tx.try_send(());
-                    } else {
-                        let scale = window.scale_factor().unwrap_or(1.0);
-                        let logical_w = (phys_size.width as f64 / scale).round();
-                        let logical_h = (phys_size.height as f64 / scale).round();
-
-                        if logical_w >= 940.0 && logical_h >= 640.0 {
-                            if let Ok(mut rt) = resize_state.lock() {
-                                rt.persistent.window_width = Some(logical_w);
-                                rt.persistent.window_height = Some(logical_h);
-                                rt.persistent.window_maximized = Some(false);
-                            }
-                            let _ = resize_tx.try_send(());
-                        }
+        .on_window_event(move |window, event| {
+            let _ = (&resize_state, &resize_tx);
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    if let Some(wv) = window.app_handle().get_webview_window("main") {
+                        apply_scaled_main_window_size(&wv);
                     }
                 }
-            }
-            tauri::WindowEvent::CloseRequested { api, .. } => {
-                let should_hide = {
-                    if let Ok(rt) = close_state.lock() {
-                        save_persistent_state(&rt.persistent);
-                        rt.persistent.close_to_tray
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let should_hide = {
+                        if let Ok(rt) = close_state.lock() {
+                            save_persistent_state(&rt.persistent);
+                            rt.persistent.close_to_tray
+                        } else {
+                            true
+                        }
+                    };
+                    if should_hide {
+                        api.prevent_close();
+                        let _ = window.hide();
                     } else {
-                        true
+                        let app_handle = window.app_handle().clone();
+                        if let Ok(mut rt) = close_state.lock() {
+                            stop_singbox_internal(&mut rt);
+                            save_persistent_state(&rt.persistent);
+                        }
+                        app_handle.exit(0);
                     }
-                };
-                if should_hide {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
-                    let app_handle = window.app_handle().clone();
-                    if let Ok(mut rt) = close_state.lock() {
+                }
+                tauri::WindowEvent::Destroyed => {
+                    if let Ok(mut rt) = cleanup_state.lock() {
                         stop_singbox_internal(&mut rt);
                         save_persistent_state(&rt.persistent);
                     }
-                    app_handle.exit(0);
                 }
+                _ => {}
             }
-            tauri::WindowEvent::Destroyed => {
-                if let Ok(mut rt) = cleanup_state.lock() {
-                    stop_singbox_internal(&mut rt);
-                    save_persistent_state(&rt.persistent);
-                }
-            }
-            _ => {}
         })
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Tauri-приложения NeuroVeil VPN");

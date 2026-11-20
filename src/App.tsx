@@ -58,6 +58,11 @@ import {
   RotateCcw,
   ChevronLeft,
   ChevronRight,
+  Crown,
+  CreditCard,
+  Play,
+  LogOut,
+  Box,
 } from "lucide-react";
 import QRCode from "qrcode";
 import appIconLogo from "./assets/app-icon.png";
@@ -73,12 +78,14 @@ import {
   RunningProcessInfo,
   VpnProfile,
   VpnStatus,
+  VpsAdminState,
+  VpsContainerInfo,
   VpsCredentials,
 } from "./types";
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "1059";
+const APP_BUILD = "2001";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -86,6 +93,302 @@ function formatBytes(bytes: number): string {
   const sizes = ["Б", "КБ", "МБ", "ГБ"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+interface ProtocolMeta {
+  id: string;
+  label: string;
+  shortBadge: string;
+  description: string;
+  accent: string;
+  accentTo?: string;
+  bg: string;
+  border: string;
+  text: string;
+  gradient?: string;
+  gradientLine?: string;
+  isHybrid?: boolean;
+}
+
+const PROTOCOL_CATALOG: Record<string, ProtocolMeta> = {
+  vless: {
+    id: "vless",
+    label: "VLESS Reality",
+    shortBadge: "TCP 443 • TLS 1.3",
+    description:
+      "Маскировка под легитимный TLS 1.3 (Chrome uTLS) на TCP 443 без домена. Оптимален против DPI.",
+    accent: "#22d3ee",
+    bg: "rgba(6, 182, 212, 0.14)",
+    border: "rgba(34, 211, 238, 0.45)",
+    text: "#67e8f9",
+  },
+  amneziawg: {
+    id: "amneziawg",
+    label: "Amnezia 3.1",
+    shortBadge: "UDP • HPK + H1–H4",
+    description:
+      "Модифицированный WireGuard с шифрованием заголовков (HPK), случайными H1–H4 и мусорными пакетами Jc.",
+    accent: "#34d399",
+    bg: "rgba(16, 185, 129, 0.14)",
+    border: "rgba(52, 211, 153, 0.45)",
+    text: "#6ee7b7",
+  },
+  awg_quic: {
+    id: "awg_quic",
+    label: "AWG + QUIC Pre-Warm",
+    shortBadge: "ГИБРИД • UDP + QUIC",
+    description:
+      "Гибридный прогрев UDP: за 15 мс до старта AmneziaWG шлёт STUN и QUIC v1 Initial для пробития stateful-фаерволов.",
+    accent: "#38bdf8",
+    accentTo: "#34d399",
+    bg: "rgba(14, 165, 233, 0.16)",
+    border: "rgba(45, 212, 191, 0.58)",
+    text: "#7dd3fc",
+    gradient: "linear-gradient(135deg, rgba(14, 165, 233, 0.30), rgba(16, 185, 129, 0.30))",
+    gradientLine: "linear-gradient(180deg, #38bdf8 0%, #2dd4bf 50%, #34d399 100%)",
+    isHybrid: true,
+  },
+  awg_vless: {
+    id: "awg_vless",
+    label: "Гибрид AWG + Reality",
+    shortBadge: "ГИБРИД • AWG + TCP 443",
+    description:
+      "Двухслойная капсула: трафик AmneziaWG инкапсулируется в TLS 1.3 VLESS Reality (TCP 443) при блокировке UDP.",
+    accent: "#34d399",
+    accentTo: "#e879f9",
+    bg: "rgba(217, 70, 239, 0.16)",
+    border: "rgba(232, 121, 249, 0.58)",
+    text: "#f0abfc",
+    gradient:
+      "linear-gradient(135deg, rgba(16, 185, 129, 0.28), rgba(6, 182, 212, 0.24), rgba(217, 70, 239, 0.34))",
+    gradientLine: "linear-gradient(180deg, #34d399 0%, #22d3ee 50%, #e879f9 100%)",
+    isHybrid: true,
+  },
+  awg2: {
+    id: "awg2",
+    label: "AmneziaWG 2.0",
+    shortBadge: "UDP • Классик AWG",
+    description:
+      "Облегчённая совместимая версия AmneziaWG 2.0 без HPK для клиентов AmneziaVPN старых и мобильных версий.",
+    accent: "#2dd4bf",
+    bg: "rgba(20, 184, 166, 0.14)",
+    border: "rgba(45, 212, 191, 0.45)",
+    text: "#5eead4",
+  },
+  hysteria2: {
+    id: "hysteria2",
+    label: "Hysteria 2",
+    shortBadge: "UDP QUIC • BBR",
+    description:
+      "Скоростной UDP QUIC с обфускацией Salamander и прыжками по портам (Port Hopping) для нестабильных сетей.",
+    accent: "#c084fc",
+    bg: "rgba(168, 85, 247, 0.14)",
+    border: "rgba(192, 132, 252, 0.45)",
+    text: "#d8b4fe",
+  },
+  tuic: {
+    id: "tuic",
+    label: "TUIC v5",
+    shortBadge: "UDP QUIC • 0-RTT",
+    description:
+      "Лёгкий UDP QUIC-протокол с 0-RTT рукопожатием и BBR — минимальный пинг для игр и потокового видео.",
+    accent: "#818cf8",
+    bg: "rgba(99, 102, 241, 0.14)",
+    border: "rgba(129, 140, 248, 0.45)",
+    text: "#a5b4fc",
+  },
+  shadowtls: {
+    id: "shadowtls",
+    label: "ShadowTLS v3",
+    shortBadge: "TCP 8443 • TLS 1.3",
+    description:
+      "Верификация рукопожатия L7 TLS 1.3 с защитой от активного зондирования поверх доверенных SNI-доменов.",
+    accent: "#f472b6",
+    bg: "rgba(236, 72, 153, 0.14)",
+    border: "rgba(244, 114, 182, 0.45)",
+    text: "#f9a8d4",
+  },
+  shadowsocks: {
+    id: "shadowsocks",
+    label: "Shadowsocks 2022",
+    shortBadge: "TCP/UDP • AEAD",
+    description:
+      "Современный стандарт шифрования 2022-blake3-aes-gcm с минимальной нагрузкой на CPU и высокой скоростью.",
+    accent: "#fbbf24",
+    bg: "rgba(245, 158, 11, 0.14)",
+    border: "rgba(251, 191, 36, 0.45)",
+    text: "#fcd34d",
+  },
+  vless_ws: {
+    id: "vless_ws",
+    label: "Cloudflare CDN WS",
+    shortBadge: "WS • CDN Shield",
+    description:
+      "VLESS поверх WebSocket для проксирования трафика через сеть Cloudflare CDN и обхода блокировок по IP.",
+    accent: "#fb923c",
+    bg: "rgba(249, 115, 22, 0.14)",
+    border: "rgba(251, 146, 60, 0.45)",
+    text: "#fdba74",
+  },
+  webrtc: {
+    id: "webrtc",
+    label: "WebRTC Steganography",
+    shortBadge: "gRPC • Media",
+    description:
+      "Стеганография трафика через HTTP/2 gRPC с имитацией медиапотоков звонков (WebRTC) в реальном времени.",
+    accent: "#a3e635",
+    bg: "rgba(132, 204, 22, 0.14)",
+    border: "rgba(163, 230, 53, 0.45)",
+    text: "#bef264",
+  },
+  ssh: {
+    id: "ssh",
+    label: "SSH Tunnel",
+    shortBadge: "TCP 22 • Direct",
+    description:
+      "Прямой зашифрованный SSH-туннель (TCP 22) с SOCKS5/портовым форвардингом без установки сторонних ядер.",
+    accent: "#a78bfa",
+    bg: "rgba(139, 92, 246, 0.14)",
+    border: "rgba(167, 139, 250, 0.45)",
+    text: "#c4b5fd",
+  },
+  wireguard: {
+    id: "wireguard",
+    label: "WireGuard",
+    shortBadge: "UDP • Классик",
+    description:
+      "Классический высокопроизводительный туннель ядра на базе Curve25519 и ChaCha20Poly1305.",
+    accent: "#fb7185",
+    bg: "rgba(244, 63, 94, 0.14)",
+    border: "rgba(251, 113, 133, 0.45)",
+    text: "#fda4af",
+  },
+};
+
+function getProtocolMeta(protocol: string, version?: string | null): ProtocolMeta {
+  const p = (protocol || "").toLowerCase();
+  if (p === "wg") return PROTOCOL_CATALOG.wireguard;
+  if (p === "awg2" || (p === "amneziawg" && version === "2.0")) return PROTOCOL_CATALOG.awg2;
+  if (PROTOCOL_CATALOG[p]) return PROTOCOL_CATALOG[p];
+  return {
+    id: p || "proxy",
+    label: protocol ? protocol.toUpperCase() : "PROXY",
+    shortBadge: "PROXY",
+    description: "Стандартный прокси-протокол.",
+    accent: "#94a3b8",
+    bg: "rgba(100, 116, 139, 0.16)",
+    border: "rgba(148, 163, 184, 0.4)",
+    text: "#cbd5e1",
+  };
+}
+
+const LIGHT_PROTOCOL_COLORS: Record<string, { text: string; border: string; bg: string; gradient?: string }> = {
+  vless: { text: "#0e7490", border: "rgba(14, 116, 144, 0.38)", bg: "rgba(6, 182, 212, 0.14)" },
+  amneziawg: { text: "#047857", border: "rgba(4, 120, 87, 0.38)", bg: "rgba(16, 185, 129, 0.14)" },
+  awg_quic: {
+    text: "#0369a1",
+    border: "rgba(13, 148, 136, 0.45)",
+    bg: "rgba(14, 165, 233, 0.15)",
+    gradient: "linear-gradient(135deg, rgba(14, 165, 233, 0.20), rgba(16, 185, 129, 0.22))",
+  },
+  awg_vless: {
+    text: "#a21caf",
+    border: "rgba(162, 28, 175, 0.42)",
+    bg: "rgba(217, 70, 239, 0.14)",
+    gradient: "linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(6, 182, 212, 0.16), rgba(217, 70, 239, 0.22))",
+  },
+  awg2: { text: "#0f766e", border: "rgba(15, 118, 110, 0.38)", bg: "rgba(20, 184, 166, 0.14)" },
+  hysteria2: { text: "#7e22ce", border: "rgba(126, 34, 206, 0.38)", bg: "rgba(168, 85, 247, 0.14)" },
+  tuic: { text: "#4338ca", border: "rgba(67, 56, 202, 0.38)", bg: "rgba(99, 102, 241, 0.14)" },
+  shadowtls: { text: "#be185d", border: "rgba(190, 24, 93, 0.38)", bg: "rgba(236, 72, 153, 0.14)" },
+  shadowsocks: { text: "#b45309", border: "rgba(180, 83, 9, 0.38)", bg: "rgba(245, 158, 11, 0.15)" },
+  vless_ws: { text: "#c2410c", border: "rgba(194, 65, 12, 0.38)", bg: "rgba(249, 115, 22, 0.14)" },
+  webrtc: { text: "#3f6212", border: "rgba(63, 98, 18, 0.38)", bg: "rgba(132, 204, 22, 0.16)" },
+  ssh: { text: "#6d28d9", border: "rgba(109, 40, 217, 0.38)", bg: "rgba(139, 92, 246, 0.14)" },
+  wireguard: { text: "#be123c", border: "rgba(190, 18, 60, 0.38)", bg: "rgba(244, 63, 94, 0.14)" },
+};
+
+function getProtocolBadgeStyle(meta: ProtocolMeta, lightTheme: boolean): React.CSSProperties {
+  if (!lightTheme) {
+    return {
+      background: meta.isHybrid ? meta.gradient : meta.bg,
+      borderColor: meta.border,
+      color: meta.text,
+    };
+  }
+  const light = LIGHT_PROTOCOL_COLORS[meta.id];
+  if (!light) {
+    return {
+      background: "rgba(100, 116, 139, 0.14)",
+      borderColor: "rgba(71, 85, 105, 0.35)",
+      color: "#334155",
+    };
+  }
+  return {
+    background: meta.isHybrid ? light.gradient || light.bg : light.bg,
+    borderColor: light.border,
+    color: light.text,
+  };
+}
+
+type VpsDeviceProtocolId =
+  | "vless"
+  | "amneziawg"
+  | "awg_quic"
+  | "awg_vless"
+  | "awg2"
+  | "hysteria2"
+  | "tuic"
+  | "shadowtls"
+  | "shadowsocks"
+  | "vless_ws"
+  | "webrtc";
+
+const VPS_DEVICE_PROTOCOLS: VpsDeviceProtocolId[] = [
+  "vless",
+  "amneziawg",
+  "awg_quic",
+  "awg_vless",
+  "awg2",
+  "hysteria2",
+  "tuic",
+  "shadowtls",
+  "shadowsocks",
+  "vless_ws",
+  "webrtc",
+];
+
+function isProtocolAvailableInContainer(
+  protoKey: VpsDeviceProtocolId,
+  container?: { protocols?: string[] }
+): boolean {
+  if (!container) return false;
+  const labels = container.protocols || [];
+  const hasAwg31 = labels.includes("Amnezia 3.1");
+  const hasVless = labels.includes("VLESS Reality");
+  switch (protoKey) {
+    case "vless":
+      return hasVless;
+    case "amneziawg":
+    case "awg_quic":
+      return hasAwg31;
+    case "awg_vless":
+      return hasAwg31 && hasVless;
+    case "awg2":
+      return labels.includes("AWG 2.0");
+    case "hysteria2":
+      return labels.includes("Hysteria 2");
+    case "tuic":
+      return labels.includes("TUIC v5");
+    case "shadowtls":
+      return labels.includes("ShadowTLS v3");
+    case "shadowsocks":
+      return labels.includes("Shadowsocks");
+    case "vless_ws":
+      return labels.includes("VLESS WS");
+    case "webrtc":
+      return labels.includes("WebRTC");
+  }
 }
 
 function NeuralWiresIcon({ className = "w-6 h-6" }: { className?: string }) {
@@ -130,6 +433,27 @@ export default function App() {
     "dashboard" | "vps" | "profiles" | "routing" | "settings" | "about"
   >("dashboard");
 
+  const [popupParams, setPopupParams] = useState<{
+    mode: string | null;
+    profileId: string | null;
+    submode: string | null;
+  }>(() => {
+    const sp = new URLSearchParams(window.location.search);
+    return {
+      mode: sp.get("popup"),
+      profileId: sp.get("profileId"),
+      submode: sp.get("submode"),
+    };
+  });
+  const popupMode = popupParams.mode;
+  const popupParamsRef = useRef(popupParams);
+  useEffect(() => {
+    popupParamsRef.current = popupParams;
+  }, [popupParams]);
+  const loadedQrKeyRef = useRef<string | null>(null);
+  const loadedEditKeyRef = useRef<string | null>(null);
+  const routingLoadedForPidRef = useRef<string | null>(null);
+
   // Sidebar Collapse state (persisted in localStorage)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -167,6 +491,7 @@ export default function App() {
     try {
       localStorage.setItem("neuroveil_window_opacity", String(clamped));
     } catch {}
+    invoke("emit_window_event", { event: "ui-prefs-updated", payload: {} }).catch(() => {});
   };
 
   // Visual Theme State
@@ -219,6 +544,7 @@ export default function App() {
     if (updates.language !== undefined) {
       setLanguage(newLang);
       localStorage.setItem("neuroveil_lang", newLang);
+      invoke("emit_window_event", { event: "ui-prefs-updated", payload: {} }).catch(() => {});
     }
 
     try {
@@ -241,6 +567,7 @@ export default function App() {
   const handleSelectTheme = (themeId: string) => {
     setCurrentThemeId(themeId);
     localStorage.setItem("neuroveil_theme", themeId);
+    invoke("emit_window_event", { event: "ui-prefs-updated", payload: {} }).catch(() => {});
     const themeName = THEMES.find((t) => t.id === themeId)?.name || themeId;
     showNotice("success", `Тема «${themeName}» успешно применена!`);
   };
@@ -407,9 +734,14 @@ export default function App() {
     "[Система] Введите IP, логин и пароль от вашего VPS (Ubuntu / Debian / CentOS) для автоматической установки или очистки.",
   ]);
   const [vpsBusy, setVpsBusy] = useState<"idle" | "testing" | "deploying" | "cleaning">("idle");
-  const [confirmCleanModal, setConfirmCleanModal] = useState(false);
   const [isVpsAdmin, setIsVpsAdmin] = useState(false);
   const [adminLoginLoading, setAdminLoginLoading] = useState(false);
+  const [vpsContainers, setVpsContainers] = useState<VpsContainerInfo[]>([]);
+  const [vpsAdminSubTab, setVpsAdminSubTab] = useState<"containers" | "configs" | "new_key">("containers");
+  const [selectedAdminContainerId, setSelectedAdminContainerId] = useState<string>("");
+  const [configsFilterContainerId, setConfigsFilterContainerId] = useState<string>("all");
+  const [containerBusyId, setContainerBusyId] = useState<string | null>(null);
+  const [confirmDeleteContainerId, setConfirmDeleteContainerId] = useState<string | null>(null);
 
   // App Update Center State (GitHub: lllPredatorlll/NeuroVeil-VPN)
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -521,16 +853,22 @@ export default function App() {
   const [manualDirectProcInput, setManualDirectProcInput] = useState("");
   const [manualProxyProcInput, setManualProxyProcInput] = useState("");
 
-  // Process picker modal state
-  const [procModalTarget, setProcModalTarget] = useState<"proxy" | "direct" | null>(null);
+  // Process picker state (inside popupMode === "processes")
   const [runningProcs, setRunningProcs] = useState<RunningProcessInfo[]>([]);
   const [loadingProcs, setLoadingProcs] = useState(false);
   const [procSearch, setProcSearch] = useState("");
 
-  // Device Manager & QR Modal state
+  // Device Manager & QR Popup state
   const [syncedServerProfiles, setSyncedServerProfiles] = useState<VpnProfile[]>([]);
   const [deviceNameInput, setDeviceNameInput] = useState("");
-  const [deviceProtocol, setDeviceProtocol] = useState<"vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg2">("vless");
+  const [selectedDeviceProtocols, setSelectedDeviceProtocols] = useState<VpsDeviceProtocolId[]>([
+    "vless",
+    "amneziawg",
+  ]);
+  const [lastCreatedKeys, setLastCreatedKeys] = useState<{
+    created: VpnProfile[];
+    skipped: string[];
+  } | null>(null);
   const [creatingDevice, setCreatingDevice] = useState(false);
   const [qrModalProfile, setQrModalProfile] = useState<VpnProfile | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
@@ -541,13 +879,165 @@ export default function App() {
   // Routing Presets state
   const [routingPresets, setRoutingPresets] = useState<RoutingPreset[]>([]);
   const [activePresetId, setActivePresetId] = useState<string | null>(null);
-  const [showSavePresetModal, setShowSavePresetModal] = useState(false);
   const [newPresetName, setNewPresetName] = useState("");
   const [newPresetOutbound, setNewPresetOutbound] = useState<"direct" | "proxy">("direct");
   const [isApplyingPreset, setIsApplyingPreset] = useState(false);
 
+  // Backup & Factory Reset state
+  const [backupBusy, setBackupBusy] = useState<"idle" | "export" | "import">("idle");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [confirmFactoryReset, setConfirmFactoryReset] = useState(false);
 
-  // In-app Config Editor Modal State
+  const handleExportBackup = async () => {
+    setBackupBusy("export");
+    try {
+      const uiPrefs = {
+        theme: currentThemeId,
+        language,
+        window_opacity: windowOpacity,
+      };
+      const savedPath = await invoke<string | null>("export_backup_file", {
+        uiPrefs,
+      });
+      if (savedPath) {
+        const fileName = savedPath.split(/[\\/]/).pop() || savedPath;
+        showNotice("success", `Резервная копия сохранена: ${fileName}`);
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setBackupBusy("idle");
+    }
+  };
+
+  const handleImportBackup = async () => {
+    setBackupBusy("import");
+    try {
+      const res = await invoke<{
+        path: string;
+        state: AppPersistentState;
+        ui_prefs?: { theme?: string; language?: string; window_opacity?: number };
+      } | null>("import_backup_file");
+
+      if (!res) return;
+
+      const restored = res.state;
+      setProfiles(restored.profiles || []);
+      const nextPid =
+        restored.selected_profile_id ||
+        (restored.profiles?.length ? restored.profiles[0].id : "");
+      setSelectedProfileId(nextPid);
+      setRoutingProfileId(nextPid);
+
+      const nextRouting =
+        restored.profiles?.find((p) => p.id === nextPid)?.routing || restored.routing;
+      if (nextRouting) {
+        setRouting({ ...nextRouting, mode: restored.routing?.mode || nextRouting.mode });
+        setDirectDomainsText((nextRouting.direct_domains || []).join("\n"));
+        setProxyDomainsText((nextRouting.proxy_domains || []).join("\n"));
+        setDirectIpsText((nextRouting.direct_ips || []).join("\n"));
+        setProxyIpsText((nextRouting.proxy_ips || []).join("\n"));
+        setDirectProcessesList(nextRouting.direct_processes || []);
+        setProxyProcessesList(nextRouting.proxy_processes || []);
+      }
+
+      if (restored.routing_presets) setRoutingPresets(restored.routing_presets);
+      setActivePresetId(restored.active_preset_id || null);
+      if (restored.autostart !== undefined) setAutostart(restored.autostart);
+      if (restored.start_minimized !== undefined) setStartMinimized(restored.start_minimized);
+      if (restored.close_to_tray !== undefined) setCloseToTray(restored.close_to_tray);
+      if (restored.auto_connect !== undefined) setAutoConnect(restored.auto_connect);
+
+      if (res.ui_prefs) {
+        if (res.ui_prefs.theme) {
+          setCurrentThemeId(res.ui_prefs.theme);
+          localStorage.setItem("neuroveil_theme", res.ui_prefs.theme);
+        }
+        if (res.ui_prefs.language === "ru" || res.ui_prefs.language === "en") {
+          setLanguage(res.ui_prefs.language);
+          localStorage.setItem("neuroveil_lang", res.ui_prefs.language);
+        }
+        if (typeof res.ui_prefs.window_opacity === "number") {
+          const op = Math.max(70, Math.min(100, res.ui_prefs.window_opacity));
+          setWindowOpacity(op);
+          localStorage.setItem("neuroveil_window_opacity", String(op));
+        }
+        try {
+          await invoke("emit_window_event", { event: "ui-prefs-updated" });
+        } catch {}
+      }
+
+      const st = await invoke<VpnStatus>("get_vpn_status");
+      applyStatusUpdate(st);
+      setConfirmFactoryReset(false);
+      showNotice(
+        "success",
+        `Резервная копия восстановлена (туннелей: ${restored.profiles?.length || 0})`
+      );
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setBackupBusy("idle");
+    }
+  };
+
+  const handleFactoryReset = async () => {
+    setResetBusy(true);
+    try {
+      const defState = await invoke<AppPersistentState>("factory_reset_app");
+      setProfiles([]);
+      setSyncedServerProfiles([]);
+      setVpsContainers([]);
+      setIsVpsAdmin(false);
+      setSelectedProfileId("");
+      setRoutingProfileId("");
+      setRouting(defState.routing);
+      setRoutingPresets(defState.routing_presets || []);
+      setActivePresetId(null);
+      setDirectDomainsText("");
+      setProxyDomainsText("");
+      setDirectIpsText("");
+      setProxyIpsText("");
+      setDirectProcessesList([]);
+      setProxyProcessesList([]);
+      setAutostart(false);
+      setStartMinimized(false);
+      setCloseToTray(true);
+      setAutoConnect(false);
+      setVpsCreds((prev) => ({
+        ...prev,
+        host: "",
+        password: "",
+        ssh_proxy: "",
+        cdn_domain: "",
+      }));
+
+      setCurrentThemeId("cyber_midnight");
+      setWindowOpacity(100);
+      setLanguage("ru");
+      try {
+        localStorage.removeItem("neuroveil_theme");
+        localStorage.removeItem("aegis_theme");
+        localStorage.removeItem("neuroveil_window_opacity");
+        localStorage.removeItem("aegis_window_opacity");
+        localStorage.removeItem("neuroveil_lang");
+        localStorage.removeItem("neuroveil_qr_profile");
+        await invoke("emit_window_event", { event: "ui-prefs-updated" });
+      } catch {}
+
+      const st = await invoke<VpnStatus>("get_vpn_status");
+      applyStatusUpdate(st);
+      setConfirmFactoryReset(false);
+      setActiveTab("dashboard");
+      showNotice("success", "Все настройки и данные сброшены до заводских");
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
+  // Config Editor Popup State
   const [editingProfile, setEditingProfile] = useState<VpnProfile | null>(null);
   const [editForm, setEditForm] = useState<Partial<VpnProfile>>({});
   const [editModeRaw, setEditModeRaw] = useState<boolean>(false);
@@ -556,7 +1046,7 @@ export default function App() {
   const [rawTextFormat, setRawTextFormat] = useState<"conf" | "json">("conf");
   const [editSaving, setEditSaving] = useState<boolean>(false);
 
-  const handleOpenEditModal = async (prof: VpnProfile, initialMode: "visual" | "text" = "visual") => {
+  const loadEditProfile = async (prof: VpnProfile, initialMode: "visual" | "text" = "visual") => {
     setEditingProfile(prof);
     setEditForm({ ...prof });
     setEditRawJson(JSON.stringify(prof, null, 2));
@@ -581,6 +1071,18 @@ export default function App() {
       setRawTextFormat("json");
     }
     setEditModeRaw(initialMode === "text");
+  };
+
+  const handleOpenEditModal = async (prof: VpnProfile, initialMode: "visual" | "text" = "visual") => {
+    try {
+      await invoke("open_popup_window", {
+        mode: "edit",
+        profileId: prof.id,
+        submode: initialMode,
+      });
+    } catch (err: any) {
+      showNotice("error", String(err));
+    }
   };
 
   const applyStatusUpdate = (st: VpnStatus) => {
@@ -685,7 +1187,6 @@ export default function App() {
       });
       setProfiles(updatedList);
       showNotice("success", `Конфигурация «${updatedProfile.name}» успешно сохранена!`);
-      setEditingProfile(null);
 
       // If active profile was updated while connected, restart with updated parameters without rotating ListenPort
       if (status.connected && status.active_profile_id === updatedProfile.id) {
@@ -697,6 +1198,9 @@ export default function App() {
           preserveListenPort: true,
         });
         applyStatusUpdate(st);
+      }
+      if (popupParamsRef.current.mode === "edit") {
+        await invoke("app_close");
       }
     } catch (err: any) {
       showNotice("error", "Ошибка сохранения профиля: " + String(err));
@@ -817,7 +1321,9 @@ export default function App() {
       try {
         const appState = await invoke<AppPersistentState>("get_app_state");
         setProfiles(appState.profiles);
+        const curParams = popupParamsRef.current;
         const initialPid =
+          ((curParams.mode === "routing_rules" || curParams.mode === "save_preset") && curParams.profileId) ||
           appState.selected_profile_id ||
           (appState.profiles.length > 0 ? appState.profiles[0].id : "");
         if (initialPid) {
@@ -825,20 +1331,31 @@ export default function App() {
           setRoutingProfileId(initialPid);
         }
         const initialProf = appState.profiles.find((p) => p.id === initialPid);
-        const initialRouting = initialProf?.routing || appState.routing;
-        setRouting(initialRouting);
-        setDirectDomainsText((initialRouting.direct_domains || []).join("\n"));
-        setProxyDomainsText((initialRouting.proxy_domains || []).join("\n"));
-        setDirectIpsText((initialRouting.direct_ips || []).join("\n"));
-        setProxyIpsText((initialRouting.proxy_ips || []).join("\n"));
-        setDirectProcessesList(initialRouting.direct_processes || []);
-        setProxyProcessesList(initialRouting.proxy_processes || []);
+        const baseRouting = initialProf?.routing || appState.routing;
+        const initialRouting: RoutingConfig = {
+          ...baseRouting,
+          mode: appState.routing?.mode || baseRouting.mode,
+        };
+        const shouldSkipRoutingOverwrite =
+          curParams.mode === "routing_rules" && routingLoadedForPidRef.current === initialPid;
+        if (!shouldSkipRoutingOverwrite) {
+          if (curParams.mode === "routing_rules") {
+            routingLoadedForPidRef.current = initialPid || "__default__";
+          }
+          setRouting(initialRouting);
+          setDirectDomainsText((initialRouting.direct_domains || []).join("\n"));
+          setProxyDomainsText((initialRouting.proxy_domains || []).join("\n"));
+          setDirectIpsText((initialRouting.direct_ips || []).join("\n"));
+          setProxyIpsText((initialRouting.proxy_ips || []).join("\n"));
+          setDirectProcessesList(initialRouting.direct_processes || []);
+          setProxyProcessesList(initialRouting.proxy_processes || []);
+        }
 
         if (appState.routing_presets && appState.routing_presets.length > 0) {
           setRoutingPresets(appState.routing_presets);
         }
-        if (appState.active_preset_id) {
-          setActivePresetId(appState.active_preset_id);
+        if (appState.active_preset_id !== undefined) {
+          setActivePresetId(appState.active_preset_id || null);
         }
 
         if (appState.saved_vps) {
@@ -964,19 +1481,145 @@ export default function App() {
       }
     }, 1000);
 
+    const syncPrefsFromStorage = () => {
+      try {
+        const th = localStorage.getItem("neuroveil_theme") || localStorage.getItem("aegis_theme");
+        if (th) setCurrentThemeId(th);
+        const lg = localStorage.getItem("neuroveil_lang") as Language | null;
+        if (lg) setLanguage(lg);
+        const op =
+          localStorage.getItem("neuroveil_window_opacity") ||
+          localStorage.getItem("aegis_window_opacity");
+        if (op) setWindowOpacity(Math.max(70, Math.min(100, parseInt(op, 10))));
+      } catch {}
+    };
+    window.addEventListener("storage", syncPrefsFromStorage);
+
+    const unlistenUiPrefsPromise = listen("ui-prefs-updated", () => {
+      syncPrefsFromStorage();
+    });
+
     const unlistenPromise = listen<string>("vps-log", (event) => {
       setVpsLogs((prev) => [...prev, event.payload]);
     });
 
+    const unlistenStatePromise = listen("state-updated", () => {
+      init();
+    });
+
+    const unlistenPopupParamsPromise = listen<{
+      mode?: string;
+      profileId?: string | null;
+      submode?: string | null;
+    }>("popup-params", (event) => {
+      loadedQrKeyRef.current = null;
+      loadedEditKeyRef.current = null;
+      setPopupParams((prev) => ({
+        mode: event.payload.mode || prev.mode,
+        profileId: event.payload.profileId ?? null,
+        submode: event.payload.submode ?? null,
+      }));
+    });
+
+    const unlistenProcessPickedPromise = listen<{
+      target?: "proxy" | "direct";
+      item?: string;
+    }>("process-picked", (event) => {
+      if (popupParamsRef.current.mode === "routing_rules" && event.payload?.item) {
+        const targetMode = event.payload.target === "direct" ? "direct" : "proxy";
+        addProcessItemRef.current(targetMode, event.payload.item);
+      }
+    });
+
+    const unlistenConfirmCleanPromise = listen("confirm-clean-vps", () => {
+      if (popupParamsRef.current.mode === "vps") {
+        void handleCleanVpsRef.current();
+      }
+    });
+
     return () => {
       clearInterval(interval);
+      window.removeEventListener("storage", syncPrefsFromStorage);
+      unlistenUiPrefsPromise.then((unlisten) => unlisten());
       unlistenPromise.then((unlisten) => unlisten());
+      unlistenStatePromise.then((unlisten) => unlisten());
+      unlistenPopupParamsPromise.then((unlisten) => unlisten());
+      unlistenProcessPickedPromise.then((unlisten) => unlisten());
+      unlistenConfirmCleanPromise.then((unlisten) => unlisten());
     };
   }, []);
 
   useEffect(() => {
     vpsLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [vpsLogs]);
+
+  useEffect(() => {
+    if (popupMode === "logs") {
+      coreLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [popupMode, status.logs.length]);
+
+  useEffect(() => {
+    if (popupParams.mode !== "qr") return;
+    const key = popupParams.profileId || "__first__";
+    if (loadedQrKeyRef.current === key) return;
+    let target = profiles.find((p) => p.id === popupParams.profileId);
+    if (!target) {
+      try {
+        const raw = localStorage.getItem("neuroveil_qr_profile");
+        if (raw) {
+          const parsed = JSON.parse(raw) as VpnProfile;
+          if (!popupParams.profileId || parsed.id === popupParams.profileId) {
+            target = parsed;
+          }
+        }
+      } catch {}
+    }
+    if (!target && profiles.length > 0 && !popupParams.profileId) {
+      target = profiles[0];
+    }
+    if (target) {
+      loadedQrKeyRef.current = key;
+      void loadQrForProfile(target);
+    }
+  }, [popupParams.mode, popupParams.profileId, profiles]);
+
+  useEffect(() => {
+    if (popupParams.mode !== "edit" || profiles.length === 0) return;
+    const sub = popupParams.submode === "text" ? "text" : "visual";
+    const key = `${popupParams.profileId || "__first__"}:${sub}`;
+    if (loadedEditKeyRef.current === key) return;
+    const target = profiles.find((p) => p.id === popupParams.profileId) || profiles[0];
+    if (target) {
+      loadedEditKeyRef.current = key;
+      void loadEditProfile(target, sub);
+    }
+  }, [popupParams.mode, popupParams.profileId, popupParams.submode, profiles]);
+
+  useEffect(() => {
+    if (popupParams.mode !== "processes") return;
+    void loadRunningProcesses();
+  }, [popupParams.mode, popupParams.submode]);
+
+  useEffect(() => {
+    if (popupParams.mode !== "routing_rules" && popupParams.mode !== "save_preset") return;
+    if (!popupParams.profileId || profiles.length === 0) return;
+    if (routingLoadedForPidRef.current === popupParams.profileId) return;
+    const prof = profiles.find((p) => p.id === popupParams.profileId);
+    if (prof) {
+      routingLoadedForPidRef.current = prof.id;
+      setRoutingProfileId(prof.id);
+      if (prof.routing) {
+        setRouting(prof.routing);
+        setDirectDomainsText((prof.routing.direct_domains || []).join("\n"));
+        setProxyDomainsText((prof.routing.proxy_domains || []).join("\n"));
+        setDirectIpsText((prof.routing.direct_ips || []).join("\n"));
+        setProxyIpsText((prof.routing.proxy_ips || []).join("\n"));
+        setDirectProcessesList(prof.routing.direct_processes || []);
+        setProxyProcessesList(prof.routing.proxy_processes || []);
+      }
+    }
+  }, [popupParams.mode, popupParams.profileId, profiles]);
 
   // Profiles display logic:
   // PC dashboard and routing tabs only show profiles designated for this PC
@@ -1002,6 +1645,11 @@ export default function App() {
     profiles[0] ||
     null;
 
+  const hasTunnelsOrVps =
+    effectiveDashboardProfiles.length > 0 ||
+    Boolean(vpsCreds.host && vpsCreds.host.trim().length > 0) ||
+    isVpsAdmin;
+
   const handlePinProfileOnPc = async (profileId: string) => {
     const prof =
       syncedServerProfiles.find((p) => p.id === profileId) ||
@@ -1023,7 +1671,7 @@ export default function App() {
     setRoutingProfileId(profileId);
     const target = profiles.find((p) => p.id === profileId);
     if (target) {
-      const profRouting = target.routing || routing;
+      const profRouting = { ...(target.routing || routing), mode: routing.mode };
       setRouting(profRouting);
       setDirectDomainsText((profRouting.direct_domains || []).join("\n"));
       setProxyDomainsText((profRouting.proxy_domains || []).join("\n"));
@@ -1038,7 +1686,7 @@ export default function App() {
     setSelectedProfileId(profileId);
     setRoutingProfileId(profileId);
     const target = profiles.find((p) => p.id === profileId);
-    const targetRouting = target?.routing || routing;
+    const targetRouting = { ...(target?.routing || routing), mode: routing.mode };
     setRouting(targetRouting);
     setDirectDomainsText((targetRouting.direct_domains || []).join("\n"));
     setProxyDomainsText((targetRouting.proxy_domains || []).join("\n"));
@@ -1089,6 +1737,16 @@ export default function App() {
 
   const handleQuickSwitchMode = async (newMode: "tun" | "system_proxy") => {
     setRouting((r) => ({ ...r, mode: newMode }));
+    setProfiles((prev) =>
+      prev.map((p) =>
+        p.routing ? { ...p, routing: { ...p.routing, mode: newMode } } : p
+      )
+    );
+    try {
+      await invoke("set_network_mode", { mode: newMode });
+    } catch (err: any) {
+      console.error("Failed to save network mode:", err);
+    }
     if (status.connected && !connecting && selectedProfile) {
       setConnecting(true);
       try {
@@ -1109,6 +1767,11 @@ export default function App() {
       } finally {
         setConnecting(false);
       }
+    } else {
+      showNotice(
+        "info",
+        `Режим сети установлен: ${newMode === "tun" ? "TUN (Весь ПК)" : "System Proxy"}`
+      );
     }
   };
 
@@ -1231,7 +1894,7 @@ export default function App() {
         const profRouting = selectedProfile.routing || routing;
         const st = await invoke<VpnStatus>("connect_vpn", {
           profileId: selectedProfile.id,
-          mode: profRouting.mode,
+          mode: routing.mode || profRouting.mode,
           splitTunneling: profRouting.split_tunneling,
           preserveListenPort: true,
         });
@@ -1260,7 +1923,7 @@ export default function App() {
       const profRouting = targetProf?.routing || routing;
       const st = await invoke<VpnStatus>("reconnect_vpn", {
         profileId: targetId,
-        mode: profRouting.mode,
+        mode: routing.mode || profRouting.mode,
         splitTunneling: profRouting.split_tunneling,
       });
       applyStatusUpdate(st);
@@ -1304,7 +1967,7 @@ export default function App() {
         const profRouting = targetProf?.routing || routing;
         const st = await invoke<VpnStatus>("reconnect_vpn", {
           profileId: targetId,
-          mode: profRouting.mode,
+          mode: routing.mode || profRouting.mode,
           splitTunneling: profRouting.split_tunneling,
         });
         applyStatusUpdate(st);
@@ -1502,7 +2165,6 @@ export default function App() {
   };
 
   const handleCleanVps = async () => {
-    setConfirmCleanModal(false);
     if (!vpsCreds.host.trim() || !vpsCreds.password) {
       showNotice("error", "Укажите IP-адрес сервера и пароль SSH для очистки");
       return;
@@ -1518,6 +2180,8 @@ export default function App() {
       setVpsBusy("idle");
     }
   };
+  const handleCleanVpsRef = useRef(handleCleanVps);
+  handleCleanVpsRef.current = handleCleanVps;
 
   const handleImportUri = async () => {
     if (!uriInput.trim()) return;
@@ -1745,7 +2409,7 @@ export default function App() {
     showNotice("info", "Ссылка профиля скопирована в буфер обмена");
   };
 
-  const handleOpenQrModal = async (profile: VpnProfile) => {
+  const loadQrForProfile = async (profile: VpnProfile) => {
     try {
       const dataUrl = await QRCode.toDataURL(profile.uri, {
         width: 280,
@@ -1759,6 +2423,20 @@ export default function App() {
       setQrModalProfile(profile);
     } catch (err: any) {
       showNotice("error", `Ошибка генерации QR-кода: ${String(err)}`);
+    }
+  };
+
+  const handleOpenQrModal = async (profile: VpnProfile) => {
+    try {
+      try {
+        localStorage.setItem("neuroveil_qr_profile", JSON.stringify(profile));
+      } catch {}
+      await invoke("open_popup_window", {
+        mode: "qr",
+        profileId: profile.id,
+      });
+    } catch (err: any) {
+      showNotice("error", String(err));
     }
   };
 
@@ -1776,27 +2454,48 @@ export default function App() {
     }
   };
 
-  const handleLoginVpsAdmin = async () => {
+  const handleLoginVpsAdmin = async (silent = false) => {
     if (!vpsCreds.host.trim() || !vpsCreds.password.trim()) {
       showNotice("error", "Введите IP-адрес сервера и пароль SSH (root)");
       return;
     }
     setAdminLoginLoading(true);
     try {
-      const serverProfiles = await invoke<VpnProfile[]>("login_vps_admin", {
+      const adminState = await invoke<VpsAdminState>("get_vps_admin_state", {
         creds: vpsCreds,
       });
       const appState = await invoke<AppPersistentState>("get_app_state");
       setProfiles(appState.profiles);
-      setSyncedServerProfiles(serverProfiles);
+      setVpsContainers(adminState.containers);
+      setSyncedServerProfiles(adminState.profiles);
+      if (adminState.containers.length > 0) {
+        const nextCid =
+          selectedAdminContainerId && adminState.containers.some((c) => c.id === selectedAdminContainerId)
+            ? selectedAdminContainerId
+            : adminState.containers[0].id;
+        setSelectedAdminContainerId(nextCid);
+        const activeCont = adminState.containers.find((c) => c.id === nextCid);
+        if (activeCont) {
+          const avail = VPS_DEVICE_PROTOCOLS.filter((p) =>
+            isProtocolAvailableInContainer(p, activeCont)
+          );
+          if (avail.length > 0 && !selectedAdminContainerId) {
+            setSelectedDeviceProtocols(avail);
+          }
+        }
+      } else {
+        setSelectedAdminContainerId("");
+      }
       if (appState.profiles.length > 0 && !selectedProfileId) {
         setSelectedProfileId(appState.profiles[0].id);
       }
       setIsVpsAdmin(true);
-      showNotice(
-        "success",
-        `Авторизация успешна! С сервера подтянуто устройств: ${serverProfiles.length}`
-      );
+      if (!silent) {
+        showNotice(
+          "success",
+          `Авторизация успешна! Контейнеров: ${adminState.containers.length}, ключей: ${adminState.profiles.length}`
+        );
+      }
     } catch (err: any) {
       showNotice("error", `Ошибка авторизации на VPS: ${String(err)}`);
     } finally {
@@ -1806,14 +2505,65 @@ export default function App() {
 
   const handleLogoutVpsAdmin = () => {
     setIsVpsAdmin(false);
+    setVpsContainers([]);
     setSyncedServerProfiles([]);
+    setSelectedAdminContainerId("");
+    setConfigsFilterContainerId("all");
+    setConfirmDeleteContainerId(null);
+    setLastCreatedKeys(null);
     setVpsCreds((prev) => ({ ...prev, password: "" }));
     showNotice("info", "Вы вышли из режима управления VPS");
+  };
+
+  const handleManageContainer = async (
+    containerId: string,
+    action: "start" | "stop" | "restart" | "delete"
+  ) => {
+    if (!vpsCreds.host.trim() || !vpsCreds.password.trim()) {
+      showNotice("error", "Введите IP-адрес сервера и пароль SSH (root)");
+      return;
+    }
+    setContainerBusyId(containerId);
+    try {
+      const msg = await invoke<string>("manage_vps_container_cmd", {
+        creds: vpsCreds,
+        containerId,
+        action,
+      });
+      setConfirmDeleteContainerId(null);
+      if (action === "delete" && configsFilterContainerId === containerId) {
+        setConfigsFilterContainerId("all");
+      }
+      showNotice("success", msg);
+      await handleLoginVpsAdmin(true);
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setContainerBusyId(null);
+    }
+  };
+
+  const toggleDeviceProtocol = (protoKey: VpsDeviceProtocolId) => {
+    setSelectedDeviceProtocols((prev) =>
+      prev.includes(protoKey) ? prev.filter((p) => p !== protoKey) : [...prev, protoKey]
+    );
+  };
+
+  const selectContainerAvailableProtocols = (containerId?: string) => {
+    const targetId = containerId ?? selectedAdminContainerId;
+    const cont = vpsContainers.find((c) => c.id === targetId);
+    if (!cont) return;
+    const avail = VPS_DEVICE_PROTOCOLS.filter((p) => isProtocolAvailableInContainer(p, cont));
+    setSelectedDeviceProtocols(avail);
   };
 
   const handleCreateDeviceKey = async () => {
     if (!deviceNameInput.trim()) {
       showNotice("error", "Введите название устройства или имя друга");
+      return;
+    }
+    if (selectedDeviceProtocols.length === 0) {
+      showNotice("error", "Выберите хотя бы один протокол для выпуска ключа");
       return;
     }
     if (!vpsCreds.host.trim()) {
@@ -1832,17 +2582,35 @@ export default function App() {
     }
     setCreatingDevice(true);
     try {
-      const created = await invoke<VpnProfile>("create_device_key", {
+      const res = await invoke<{ created: VpnProfile[]; skipped: string[] }>("create_device_keys", {
         creds: vpsCreds,
         deviceName: deviceNameInput.trim(),
-        protocol: deviceProtocol,
+        protocols: selectedDeviceProtocols,
+        containerId: selectedAdminContainerId || null,
       });
-      const appState = await invoke<AppPersistentState>("get_app_state");
-      setProfiles(appState.profiles);
-      setSyncedServerProfiles((prev) => [...prev, created]);
-      setDeviceNameInput("");
-      showNotice("success", `Ключ для <${created.name}> успешно создан на VPS!`);
-      await handleOpenQrModal(created);
+      setLastCreatedKeys(res);
+      if (res.created.length > 0) {
+        setDeviceNameInput("");
+        await handleLoginVpsAdmin(true);
+        if (res.created.length === 1 && res.skipped.length === 0) {
+          showNotice("success", `Ключ для <${res.created[0].name}> успешно создан на VPS!`);
+          await handleOpenQrModal(res.created[0]);
+        } else {
+          const skipSuffix =
+            res.skipped.length > 0 ? ` Пропущено: ${res.skipped.length}` : "";
+          showNotice(
+            res.skipped.length > 0 ? "info" : "success",
+            `Создано ключей: ${res.created.length}.${skipSuffix}`
+          );
+        }
+      } else {
+        showNotice(
+          "error",
+          res.skipped.length > 0
+            ? res.skipped.join(" ")
+            : "Не удалось создать ни одного ключа для выбранных протоколов"
+        );
+      }
     } catch (err: any) {
       showNotice("error", String(err));
     } finally {
@@ -1927,6 +2695,9 @@ export default function App() {
     void syncAndApplyRoutingImmediately(nextRouting);
   };
 
+  const addProcessItemRef = useRef(addProcessItem);
+  addProcessItemRef.current = addProcessItem;
+
   const removeProcessItem = (target: "proxy" | "direct", value: string) => {
     const nextProxy =
       target === "proxy"
@@ -1970,8 +2741,7 @@ export default function App() {
     }
   };
 
-  const handleOpenProcessModal = async (target: "proxy" | "direct") => {
-    setProcModalTarget(target);
+  const loadRunningProcesses = async () => {
     setProcSearch("");
     setLoadingProcs(true);
     try {
@@ -1981,6 +2751,18 @@ export default function App() {
       showNotice("error", String(err));
     } finally {
       setLoadingProcs(false);
+    }
+  };
+
+  const handleOpenProcessModal = async (target: "proxy" | "direct") => {
+    try {
+      await invoke("open_popup_window", {
+        mode: "processes",
+        profileId: routingProfileId || popupParamsRef.current.profileId || selectedProfileId || null,
+        submode: target,
+      });
+    } catch (err: any) {
+      showNotice("error", String(err));
     }
   };
 
@@ -2072,11 +2854,17 @@ export default function App() {
       return;
     }
 
+    const effectiveOutbound =
+      (popupParamsRef.current.submode as "direct" | "proxy" | null) ||
+      routing.default_outbound ||
+      newPresetOutbound ||
+      "direct";
+
     const newPreset: RoutingPreset = {
       id: `custom-preset-${Date.now()}`,
       name: trimmed,
       description: `Пользовательский набор (${proxyProcessesList.length} через VPN, ${directProcessesList.length} мимо VPN)`,
-      default_outbound: routing.default_outbound || newPresetOutbound || "direct",
+      default_outbound: effectiveOutbound,
       proxy_processes: [...proxyProcessesList],
       direct_processes: [...directProcessesList],
       is_builtin: false,
@@ -2088,7 +2876,6 @@ export default function App() {
       });
       setRoutingPresets(updatedList);
       setActivePresetId(newPreset.id);
-      setShowSavePresetModal(false);
       setNewPresetName("");
 
       const targetPid = routingProfileId || selectedProfileId || profiles[0]?.id;
@@ -2117,6 +2904,9 @@ export default function App() {
           profileId: targetPid || null,
         });
         showNotice("success", `Предустановка «${newPreset.name}» успешно создана`);
+      }
+      if (popupParamsRef.current.mode === "save_preset") {
+        await invoke("app_close");
       }
     } catch (err: any) {
       showNotice("error", `Ошибка сохранения предустановки: ${String(err)}`);
@@ -2240,74 +3030,3321 @@ export default function App() {
 
 
   const renderProtocolBadge = (protocol: string, version?: string | null) => {
-    const p = (protocol || "").toLowerCase();
-    let label = "PROXY";
-    let colorClass = "bg-slate-800 text-slate-100 border-slate-600/80";
-    let dotClass = "bg-slate-400";
-
-    if (p === "wireguard" || p === "wg") {
-      label = "WireGuard";
-      colorClass = "bg-rose-950/80 text-rose-300 border-rose-500/40 shadow-sm";
-      dotClass = "bg-rose-400";
-    } else if (p === "awg2" || (p === "amneziawg" && version === "2.0")) {
-      label = "AWG 2.0";
-      colorClass = "bg-teal-950/80 text-teal-300 border-teal-500/40 shadow-sm";
-      dotClass = "bg-teal-400";
-    } else if (p === "awg_quic") {
-      label = "AWG + QUIC";
-      colorClass = "bg-sky-950/80 text-sky-300 border-sky-500/40 shadow-sm";
-      dotClass = "bg-sky-400";
-    } else if (p === "awg_vless") {
-      label = "AWG + Reality";
-      colorClass = "bg-fuchsia-950/80 text-fuchsia-300 border-fuchsia-500/40 shadow-sm";
-      dotClass = "bg-fuchsia-400";
-    } else if (p === "amneziawg") {
-      label = "Amnezia 3.1";
-      colorClass = "bg-emerald-950/80 text-emerald-300 border-emerald-500/40 shadow-sm";
-      dotClass = "bg-emerald-400";
-    } else if (p === "vless") {
-      label = "VLESS Reality";
-      colorClass = "bg-cyan-950/80 text-cyan-300 border-cyan-500/40 shadow-sm";
-      dotClass = "bg-cyan-400";
-    } else if (p === "hysteria2") {
-      label = "Hysteria 2";
-      colorClass = "bg-purple-950/80 text-purple-300 border-purple-500/40 shadow-sm";
-      dotClass = "bg-purple-400";
-    } else if (p === "tuic") {
-      label = "TUIC v5";
-      colorClass = "bg-indigo-950/80 text-indigo-300 border-indigo-500/40 shadow-sm";
-      dotClass = "bg-indigo-400";
-    } else if (p === "shadowsocks") {
-      label = "Shadowsocks";
-      colorClass = "bg-amber-950/80 text-amber-300 border-amber-500/40 shadow-sm";
-      dotClass = "bg-amber-400";
-    } else if (p === "ssh") {
-      label = "SSH Tunnel";
-      colorClass = "bg-violet-950/80 text-violet-300 border-violet-500/40 shadow-sm";
-      dotClass = "bg-violet-400";
-    } else if (p === "shadowtls") {
-      label = "ShadowTLS v3";
-      colorClass = "bg-pink-950/80 text-pink-300 border-pink-500/40 shadow-sm";
-      dotClass = "bg-pink-400";
-    } else if (p === "vless_ws") {
-      label = "Cloudflare WS";
-      colorClass = "bg-orange-950/80 text-orange-300 border-orange-500/40 shadow-sm";
-      dotClass = "bg-orange-400";
-    } else if (p === "webrtc") {
-      label = "WebRTC Стелс";
-      colorClass = "bg-lime-950/80 text-lime-300 border-lime-500/40 shadow-sm";
-      dotClass = "bg-lime-400";
-    }
+    const meta = getProtocolMeta(protocol, version);
+    const shortLabel =
+      meta.id === "awg2"
+        ? "AWG 2.0"
+        : meta.id === "awg_quic"
+        ? "AWG + QUIC"
+        : meta.id === "awg_vless"
+        ? "AWG + Reality"
+        : meta.id === "vless_ws"
+        ? "Cloudflare WS"
+        : meta.id === "webrtc"
+        ? "WebRTC Стелс"
+        : meta.id === "shadowsocks"
+        ? "Shadowsocks"
+        : meta.label;
 
     return (
       <span
-        className={`px-2.5 py-1 rounded-lg border font-mono text-[10px] font-bold tracking-wider uppercase inline-flex items-center gap-1.5 shrink-0 ${colorClass}`}
+        style={getProtocolBadgeStyle(meta, isLightTheme)}
+        className="px-2.5 py-1 rounded-lg border font-mono text-[10px] font-bold tracking-wider uppercase inline-flex items-center gap-1.5 shrink-0 shadow-sm"
       >
-        <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
-        {label}
+        <span
+          style={{
+            background: meta.isHybrid ? meta.gradientLine : meta.accent,
+          }}
+          className="w-1.5 h-1.5 rounded-full shrink-0"
+        />
+        {shortLabel}
       </span>
     );
   };
+
+  const allPopupModes = [
+    "file",
+    "key",
+    "vps",
+    "vps_admin",
+    "logs",
+    "qr",
+    "edit",
+    "routing_rules",
+    "processes",
+    "save_preset",
+    "confirm_clean",
+  ];
+
+  if (popupMode && allPopupModes.includes(popupMode)) {
+    const isPopupMaximizable =
+      popupMode === "vps" ||
+      popupMode === "vps_admin" ||
+      popupMode === "logs" ||
+      popupMode === "edit" ||
+      popupMode === "routing_rules" ||
+      popupMode === "processes";
+    const popupRulesTarget = popupParams.submode === "direct" ? "direct" : "proxy";
+    const popupProcTarget = popupParams.submode === "direct" ? "direct" : "proxy";
+    const popupPresetOutbound =
+      (popupParams.submode === "proxy" ? "proxy" : popupParams.submode === "direct" ? "direct" : null) ||
+      routing.default_outbound ||
+      "direct";
+
+    const popupHeaderTitle =
+      popupMode === "file"
+        ? "Добавить из файла"
+        : popupMode === "key"
+        ? "Вставить ключ или создать туннель"
+        : popupMode === "vps"
+        ? "Добавить VPS — Автодеплой по SSH"
+        : popupMode === "vps_admin"
+        ? "Управление VPS — Контейнеры и ключи"
+        : popupMode === "logs"
+        ? "Журнал ядра sing-box"
+        : popupMode === "qr"
+        ? `QR-код: ${qrModalProfile?.name || "Подключение смартфона"}`
+        : popupMode === "edit"
+        ? `Редактирование: ${editingProfile?.name || "Конфигурация"}`
+        : popupMode === "routing_rules"
+        ? popupRulesTarget === "proxy"
+          ? "Только выбранное через VPN (Белый список)"
+          : "Весь трафик через VPN (Черный список)"
+        : popupMode === "processes"
+        ? "Выбор из запущенных процессов"
+        : popupMode === "save_preset"
+        ? "Новая предустановка маршрутов"
+        : "Подтвердите очистку сервера";
+
+    return (
+      <div
+        data-theme={currentTheme.id}
+        style={{
+          ...cssVarsStyle,
+          opacity: windowOpacity / 100,
+        }}
+        className="flex flex-col h-screen w-screen overflow-hidden text-slate-100 select-none bg-[#090d16] border border-cyan-500/40 rounded-xl shadow-2xl relative"
+      >
+        {/* Draggable Top Titlebar for Floating Popup Window */}
+        <header className="h-9 w-full flex items-center justify-between px-3 pt-0.5 shrink-0 select-none cursor-default z-30 bg-transparent">
+          <div
+            className="flex-1 h-full flex items-center gap-2 min-w-0 cursor-default"
+            onMouseDown={handleMouseDownDrag}
+            onDoubleClick={isPopupMaximizable ? handleDoubleClickMaximize : undefined}
+            data-tauri-drag-region
+          >
+            <img
+              src={appIconLogo}
+              alt="NeuroVeil"
+              className="w-4 h-4 rounded object-cover pointer-events-none shrink-0"
+            />
+            <span className="text-xs font-bold tracking-tight text-white pointer-events-none truncate">
+              {popupHeaderTitle}
+            </span>
+          </div>
+
+          <div
+            className="flex items-center space-x-1 shrink-0 -mr-1 z-40 relative"
+            data-tauri-drag-region="false"
+            onMouseDown={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              data-tauri-drag-region="false"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  await invoke("app_minimize");
+                } catch {}
+              }}
+              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              title="Свернуть"
+            >
+              <Minus className="w-3.5 h-3.5 pointer-events-none" />
+            </button>
+            {isPopupMaximizable && (
+              <button
+                type="button"
+                data-tauri-drag-region="false"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await invoke("app_toggle_maximize");
+                  } catch {}
+                }}
+                className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+                title="Развернуть"
+              >
+                <Square className="w-3 h-3 pointer-events-none" />
+              </button>
+            )}
+            <button
+              type="button"
+              data-tauri-drag-region="false"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={async (e) => {
+                e.stopPropagation();
+                try {
+                  await invoke("app_close");
+                } catch {}
+              }}
+              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
+              title="Закрыть окно"
+            >
+              <X className="w-3.5 h-3.5 pointer-events-none" />
+            </button>
+          </div>
+        </header>
+
+        {/* Toast Banner inside Popup Window */}
+        {toast && (
+          <div
+            className={`toast-notice absolute top-11 left-2.5 right-2.5 z-[70] flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl shadow-2xl border text-xs font-semibold transition-all backdrop-blur-md ${
+              toast.type === "success"
+                ? "bg-emerald-700/95 border-emerald-400 text-white shadow-emerald-500/30"
+                : toast.type === "error"
+                ? "bg-rose-700/95 border-rose-400 text-white shadow-rose-500/30"
+                : "bg-slate-900/95 border-cyan-400 text-cyan-100 shadow-cyan-500/30"
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              {toast.type === "success" && <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />}
+              {toast.type === "error" && <XCircle className="w-4 h-4 text-rose-200 shrink-0" />}
+              {toast.type === "info" && <Sparkles className="w-4 h-4 text-cyan-300 shrink-0" />}
+              <span className="text-white font-medium break-words">{toast.text}</span>
+            </div>
+            <button
+              onClick={() => setToast(null)}
+              className="text-white/70 hover:text-white transition p-0.5 shrink-0"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* POPUP 1: ДОБАВИТЬ ИЗ ФАЙЛА */}
+        {popupMode === "file" && (
+          <div className="flex-1 flex flex-col justify-between p-5 overflow-y-auto">
+            <div className="space-y-4">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center text-cyan-400 shrink-0 shadow-lg shadow-cyan-500/10">
+                  <FolderOpen className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white">Импорт конфигурации из файла</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Поддерживаются файлы <b>.conf</b> (AmneziaWG / WireGuard), <b>.json</b> (sing-box) и <b>.txt</b> с ключами.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-3">
+                <p className="text-xs text-slate-300 leading-relaxed">
+                  Нажмите кнопку ниже, чтобы выбрать файл конфигурации на вашем компьютере. После импорта туннель автоматически появится в главном окне приложения.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={handlePickConfigFile}
+                  className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition cursor-pointer keep-white"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  <span>Выбрать файл (.conf / .json / .txt)</span>
+                </button>
+              </div>
+
+              {profiles.length > 0 && (
+                <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span className="text-xs text-emerald-200 truncate">
+                      Добавлено туннелей в приложении: <b>{profiles.length}</b>
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-slate-800/80">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 2: ВСТАВИТЬ КЛЮЧ */}
+        {popupMode === "key" && (
+          <div className="flex-1 flex flex-col justify-between p-5 overflow-y-auto space-y-4">
+            <div className="space-y-3.5">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-2xl bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shrink-0 shadow-lg shadow-indigo-500/10">
+                  <Key className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-sm font-bold text-white">Вставить ключ или текст конфига</h2>
+                  <p className="text-[11px] text-slate-400">
+                    Поддерживаются ключи <code>vless://</code>, <code>awg://</code>, <code>hy2://</code>, <code>ss://</code>, <code>tuic://</code> или текст <code>[Interface]</code>
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <textarea
+                  rows={5}
+                  placeholder="Вставьте сюда ссылку-ключ (vless://..., awg://..., hy2://..., ss://..., tuic://...) или полный текст .conf / .json"
+                  value={uriInput}
+                  onChange={(e) => setUriInput(e.target.value)}
+                  className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-cyan-200 focus:border-cyan-500 focus:outline-none select-text resize-none"
+                />
+
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const clip = await navigator.clipboard.readText();
+                        if (clip) setUriInput(clip.trim());
+                      } catch {}
+                    }}
+                    className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+                  >
+                    Вставить из буфера
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleImportUri}
+                    className="flex-1 py-2 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-500/20 transition cursor-pointer keep-white"
+                  >
+                    Импортировать ключ
+                  </button>
+                </div>
+              </div>
+
+              {/* Optional manual creation toggle inside Key popup */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowNewProfileForm(!showNewProfileForm)}
+                  className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 flex items-center gap-1.5 transition cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{showNewProfileForm ? "Скрыть ручной ввод параметров" : "Или ввести параметры сервера вручную"}</span>
+                </button>
+
+                {showNewProfileForm && (
+                  <div className="mt-2.5 p-3 rounded-xl bg-[#111827] border border-cyan-500/40 space-y-2.5">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="col-span-2 space-y-1.5">
+                        <label className="block text-[10px] text-slate-400">Выберите протокол</label>
+                        <div className="grid grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1 custom-scrollbar">
+                          {(
+                            [
+                              "vless",
+                              "amneziawg",
+                              "awg_quic",
+                              "awg_vless",
+                              "awg2",
+                              "hysteria2",
+                              "tuic",
+                              "shadowtls",
+                              "shadowsocks",
+                              "vless_ws",
+                              "webrtc",
+                              "ssh",
+                            ] as const
+                          ).map((protoKey) => {
+                            const meta = getProtocolMeta(protoKey);
+                            const isSelected = newProfile.protocol === protoKey;
+                            return (
+                              <button
+                                key={protoKey}
+                                type="button"
+                                onClick={() => {
+                                  const isAwg31 =
+                                    protoKey === "amneziawg" ||
+                                    protoKey === "awg_quic" ||
+                                    protoKey === "awg_vless";
+                                  const isAwg20 = protoKey === "awg2";
+                                  setNewProfile({
+                                    ...newProfile,
+                                    protocol: protoKey as any,
+                                    port:
+                                      protoKey === "ssh"
+                                        ? 22
+                                        : protoKey === "vless"
+                                        ? 443
+                                        : protoKey === "tuic"
+                                        ? 9443
+                                        : protoKey === "shadowsocks"
+                                        ? 8388
+                                        : protoKey === "vless_ws"
+                                        ? 2096
+                                        : protoKey === "webrtc"
+                                        ? 3478
+                                        : isAwg31 || isAwg20
+                                        ? getRandomInt(21000, 55000)
+                                        : 8443,
+                                  });
+                                }}
+                                style={{
+                                  background: isSelected
+                                    ? "var(--bg-card, #111827)"
+                                    : "var(--bg-card-alt, #0b101d)",
+                                  borderColor: isSelected
+                                    ? isLightTheme
+                                      ? LIGHT_PROTOCOL_COLORS[meta.id]?.border || meta.border
+                                      : meta.border
+                                    : "var(--border-card, rgba(51, 65, 85, 0.55))",
+                                }}
+                                className="relative overflow-hidden p-2 rounded-xl border text-left transition cursor-pointer flex flex-col gap-1"
+                              >
+                                <span
+                                  style={{
+                                    background: meta.isHybrid ? meta.gradientLine : meta.accent,
+                                  }}
+                                  className="absolute left-0 top-0 bottom-0 w-1"
+                                />
+                                <div className="flex items-center justify-between gap-1 pl-1.5">
+                                  <span className="text-[11px] font-bold text-white truncate flex items-center gap-1.5">
+                                    <span
+                                      style={{
+                                        background: meta.isHybrid ? meta.gradientLine : meta.accent,
+                                      }}
+                                      className="w-2 h-2 rounded-full shrink-0"
+                                    />
+                                    <span className="truncate">{meta.label}</span>
+                                  </span>
+                                  <span
+                                    style={getProtocolBadgeStyle(meta, isLightTheme)}
+                                    className="text-[8.5px] px-1.5 py-0.5 rounded border font-mono font-bold shrink-0"
+                                  >
+                                    {meta.isHybrid ? "ГИБРИД" : meta.shortBadge.split("•")[0].trim()}
+                                  </span>
+                                </div>
+                                <p className="protocol-card-desc text-[9.5px] leading-snug pl-1.5 line-clamp-2">
+                                  {meta.description}
+                                </p>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">Название</label>
+                        <input
+                          type="text"
+                          placeholder="Мой туннель"
+                          value={newProfile.name}
+                          onChange={(e) => setNewProfile({ ...newProfile, name: e.target.value })}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">IP / Сервер</label>
+                        <input
+                          type="text"
+                          placeholder="185.x.x.x"
+                          value={newProfile.server}
+                          onChange={(e) => setNewProfile({ ...newProfile, server: e.target.value })}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">Порт</label>
+                        <input
+                          type="number"
+                          value={newProfile.port}
+                          onChange={(e) => setNewProfile({ ...newProfile, port: Number(e.target.value) || 443 })}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                          {newProfile.protocol === "ssh" ? "Логин SSH" : "SNI / Домен"}
+                        </label>
+                        <input
+                          type="text"
+                          value={newProfile.sni}
+                          onChange={(e) => setNewProfile({ ...newProfile, sni: e.target.value })}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white"
+                        />
+                      </div>
+                      <div className="col-span-2">
+                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                          Пароль / UUID / Приватный ключ
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Пароль, UUID или Base64 PrivateKey"
+                          value={newProfile.password}
+                          onChange={(e) =>
+                            setNewProfile({
+                              ...newProfile,
+                              password: e.target.value,
+                              awg_private_key: e.target.value,
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleSaveManualProfile}
+                        className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-bold text-white cursor-pointer"
+                      >
+                        Сохранить туннель
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-slate-800/80">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 3: ДОБАВИТЬ VPS (АВТОДЕПЛОЙ ПО SSH) */}
+        {popupMode === "vps" && (
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col justify-between min-h-0 space-y-4">
+            <div className="space-y-4">
+              {/* Card 1: Server SSH Parameters */}
+              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                    <Server className="w-3.5 h-3.5 text-cyan-400" />
+                    1. Параметры сервера VPS (SSH)
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={handleTestMainServer}
+                    disabled={mainCheckStatus.busy || vpsBusy !== "idle"}
+                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-[11px] font-semibold text-amber-300 disabled:opacity-50 transition flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Wifi className="w-3 h-3 text-amber-400" />
+                    {mainCheckStatus.busy ? "Проверка..." : "Проверить доступность"}
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="col-span-2">
+                    <label className="block text-xs text-slate-400 mb-1">IP-адрес или домен VPS</label>
+                    <input
+                      type="text"
+                      placeholder="Например: 185.22.14.99"
+                      value={vpsCreds.host}
+                      onChange={(e) => setVpsCreds({ ...vpsCreds, host: e.target.value })}
+                      className="w-full px-3 py-1.5 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">SSH Порт</label>
+                    <input
+                      type="number"
+                      value={vpsCreds.ssh_port}
+                      onChange={(e) =>
+                        setVpsCreds({ ...vpsCreds, ssh_port: Number(e.target.value) || 22 })
+                      }
+                      className="w-full px-3 py-1.5 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Логин SSH</label>
+                    <input
+                      type="text"
+                      value={vpsCreds.username}
+                      onChange={(e) => setVpsCreds({ ...vpsCreds, username: e.target.value })}
+                      className="w-full px-3 py-1.5 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Пароль root / SSH</label>
+                    <div className="relative">
+                      <input
+                        type={showVpsPassword ? "text" : "password"}
+                        placeholder="••••••••••••"
+                        value={vpsCreds.password}
+                        onChange={(e) => setVpsCreds({ ...vpsCreds, password: e.target.value })}
+                        className="w-full pl-3 pr-8 py-1.5 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowVpsPassword(!showVpsPassword)}
+                        className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-200"
+                      >
+                        {showVpsPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {mainCheckStatus.result && (
+                  <div className="flex items-center gap-2 p-2 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-[11px]">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate"><b>VPS доступен:</b> {mainCheckStatus.result}</span>
+                  </div>
+                )}
+                {mainCheckStatus.error && (
+                  <div className="flex items-center gap-2 p-2 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px]">
+                    <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <span className="truncate"><b>VPS недоступен:</b> {mainCheckStatus.error}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={handleTestSsh}
+                    disabled={vpsBusy !== "idle"}
+                    className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-400 hover:to-yellow-500 disabled:opacity-50 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer keep-white"
+                  >
+                    <Wifi className="w-3.5 h-3.5" />
+                    {vpsBusy === "testing" ? "Проверка..." : "Проверить SSH"}
+                  </button>
+
+                  <button
+                    onClick={handleDeployVps}
+                    disabled={vpsBusy !== "idle"}
+                    className="flex-1 py-2 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-50 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer keep-white"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    {vpsBusy === "deploying" ? "Развертывание на VPS..." : "Развернуть VPN на сервере"}
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      invoke("open_popup_window", {
+                        mode: "confirm_clean",
+                        submode: vpsCreds.host.trim() || "VPS",
+                      })
+                    }
+                    disabled={vpsBusy !== "idle"}
+                    className="px-3 py-2 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 disabled:opacity-50 text-xs font-semibold text-rose-300 flex items-center justify-center gap-1.5 cursor-pointer"
+                    title="Очистить сервер"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Очистить</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Card 2: Protocol Selection */}
+              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+                    <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                    2. Протоколы для автоматической установки
+                  </h3>
+                  <span className="text-[10px] text-slate-400">
+                    Гибриды отмечены градиентом
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {(
+                    [
+                      { key: "vless", field: "deploy_vless", defaultChecked: true },
+                      { key: "amneziawg", field: "deploy_awg", defaultChecked: true },
+                      { key: "awg_quic", field: "deploy_awg_quic", defaultChecked: true },
+                      { key: "awg_vless", field: "deploy_awg_vless", defaultChecked: true },
+                      { key: "awg2", field: "deploy_awg2", defaultChecked: false },
+                      { key: "hysteria2", field: "deploy_hy2", defaultChecked: true },
+                      { key: "tuic", field: "deploy_tuic", defaultChecked: false },
+                      { key: "shadowtls", field: "deploy_shadowtls", defaultChecked: true },
+                      { key: "shadowsocks", field: "deploy_ss", defaultChecked: false },
+                      { key: "vless_ws", field: "deploy_vless_ws", defaultChecked: true },
+                      { key: "webrtc", field: "deploy_webrtc", defaultChecked: true },
+                      { key: "ssh", field: "deploy_ssh", defaultChecked: true },
+                    ] as const
+                  ).map((item) => {
+                    const meta = getProtocolMeta(item.key);
+                    const checked = Boolean((vpsCreds as any)[item.field] ?? item.defaultChecked);
+                    return (
+                      <label
+                        key={item.key}
+                        style={{
+                          background: "var(--bg-card-alt, #0b101d)",
+                          borderColor: checked
+                            ? "var(--color-accent-border, rgba(100, 116, 139, 0.65))"
+                            : "var(--border-card, rgba(51, 65, 85, 0.55))",
+                        }}
+                        className="relative overflow-hidden flex items-start gap-2.5 p-2.5 pl-3.5 rounded-xl border cursor-pointer transition hover:border-slate-600"
+                      >
+                        <span
+                          style={{
+                            background: meta.isHybrid ? meta.gradientLine : meta.accent,
+                          }}
+                          className="absolute left-0 top-0 bottom-0 w-1"
+                        />
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) =>
+                            setVpsCreds({ ...vpsCreds, [item.field]: e.target.checked } as VpsCredentials)
+                          }
+                          className="mt-0.5 shrink-0"
+                        />
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                              <span
+                                style={{
+                                  background: meta.isHybrid ? meta.gradientLine : meta.accent,
+                                }}
+                                className="w-2 h-2 rounded-full shrink-0"
+                              />
+                              <span className="truncate">{meta.label}</span>
+                            </span>
+                            <span
+                              style={getProtocolBadgeStyle(meta, isLightTheme)}
+                              className="text-[9px] px-1.5 py-0.5 rounded border font-mono font-bold shrink-0"
+                            >
+                              {meta.shortBadge}
+                            </span>
+                          </div>
+                          <p className="protocol-card-desc text-[10.5px] leading-snug">
+                            {meta.description}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Live SSH Deployment Terminal */}
+            <div className="p-3.5 rounded-2xl bg-[#0d1322] border border-slate-800/90 space-y-2 shrink-0 w-full">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-400 flex items-center gap-2">
+                  <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+                  Терминал выполнения SSH и журнал развертывания
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVpsLogs([])}
+                  className="text-[11px] text-slate-500 hover:text-slate-300 transition cursor-pointer"
+                >
+                  Очистить
+                </button>
+              </div>
+              <div className="h-32 overflow-y-auto font-mono text-[11px] bg-[#060911] p-2.5 rounded-xl border border-slate-800/80 space-y-1 select-text">
+                {vpsLogs.length === 0 ? (
+                  <div className="text-slate-600">Терминал готов к выполнению команд...</div>
+                ) : (
+                  vpsLogs.map((log, index) => (
+                    <div
+                      key={index}
+                      className={`leading-relaxed break-all ${
+                        log.includes("ОШИБКА")
+                          ? "text-rose-400 font-semibold"
+                          : log.includes("Готово!") || log.includes("успешно") || log.includes("CLEAN_OK")
+                          ? "text-emerald-400 font-semibold"
+                          : log.includes("===")
+                          ? "text-cyan-300 font-semibold"
+                          : "text-slate-300"
+                      }`}
+                    >
+                      {log}
+                    </div>
+                  ))
+                )}
+                <div ref={vpsLogEndRef} />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 4: ЖУРНАЛ ЯДРА SING-BOX */}
+        {popupMode === "logs" && (
+          <div className="flex-1 flex flex-col overflow-hidden bg-[#0b101d]">
+            <div className="px-4 py-2.5 bg-[#111827] border-b border-slate-800 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 text-xs text-slate-300">
+                <Terminal className="w-4 h-4 text-cyan-400" />
+                <span>
+                  Состояние ядра:{" "}
+                  <b className={status.connected ? "text-emerald-400" : "text-slate-300"}>
+                    {status.connected ? "Активно" : "Остановлено"}
+                  </b>{" "}
+                  {status.singbox_version ? `(${status.singbox_version})` : ""}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportCoreLogs}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 flex items-center gap-1 text-[11px] text-cyan-300 font-semibold transition cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Экспорт
+                </button>
+                <button
+                  type="button"
+                  onClick={() => invoke("clear_core_logs")}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 hover:text-white transition cursor-pointer"
+                >
+                  Очистить
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto font-mono text-[11px] text-slate-300 bg-[#070a12] p-3.5 space-y-1 select-text custom-scrollbar">
+              {status.logs.length === 0 ? (
+                <div className="text-slate-600">Логи пусты...</div>
+              ) : (
+                status.logs.map((line, idx) => (
+                  <div key={idx} className="leading-relaxed break-all">
+                    {line}
+                  </div>
+                ))
+              )}
+              <div ref={coreLogEndRef} />
+            </div>
+            <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 5: QR-КОД И ПОДКЛЮЧЕНИЕ СМАРТФОНА */}
+        {popupMode === "qr" && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {!qrModalProfile ? (
+              <div className="flex-1 flex items-center justify-center p-6 text-xs text-slate-400">
+                Загрузка QR-кода конфигурации...
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar">
+                <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                      <Smartphone className="w-4 h-4 text-cyan-400 shrink-0" />
+                      <span>Подключение смартфона: {qrModalProfile.name}</span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Сервер: {qrModalProfile.server}:{qrModalProfile.port} (
+                      {qrModalProfile.protocol === "ssh"
+                        ? "SSH Tunnel"
+                        : qrModalProfile.protocol === "vless"
+                        ? "VLESS Reality"
+                        : qrModalProfile.protocol === "vless_ws"
+                        ? "VLESS CDN Shield"
+                        : qrModalProfile.protocol === "webrtc"
+                        ? "WebRTC Media"
+                        : qrModalProfile.protocol === "shadowtls"
+                        ? "ShadowTLS v3"
+                        : qrModalProfile.protocol === "tuic"
+                        ? "TUIC v5"
+                        : qrModalProfile.protocol === "shadowsocks"
+                        ? "Shadowsocks"
+                        : qrModalProfile.protocol === "awg2"
+                        ? "AmneziaWG 2.0"
+                        : qrModalProfile.protocol === "awg_quic"
+                        ? "AWG + QUIC Pre-Warm"
+                        : qrModalProfile.protocol === "awg_vless"
+                        ? "Hybrid AWG + Reality"
+                        : qrModalProfile.protocol === "amneziawg"
+                        ? "Amnezia 3.1"
+                        : qrModalProfile.protocol === "wireguard"
+                        ? "WireGuard"
+                        : "Hysteria 2"}
+                      )
+                    </p>
+                  </div>
+                </div>
+
+                {profiles.some(
+                  (p) =>
+                    p.server === qrModalProfile.server &&
+                    p.protocol !== qrModalProfile.protocol
+                ) && (
+                  <div className="flex flex-wrap items-center justify-between p-2.5 rounded-xl bg-[#0b101d] border border-purple-500/30 gap-2">
+                    <span className="text-xs text-slate-300">
+                      {qrModalProfile.protocol === "hysteria2"
+                        ? "Для Hiddify / Shadowsocks на телефоне можно переключить:"
+                        : "Другие протоколы для этого сервера:"}
+                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {profiles
+                        .filter(
+                          (p) =>
+                            p.server === qrModalProfile.server &&
+                            p.protocol !== qrModalProfile.protocol
+                        )
+                        .map((alt) => (
+                          <button
+                            key={alt.id}
+                            type="button"
+                            onClick={() => loadQrForProfile(alt)}
+                            className="px-2.5 py-1 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 text-xs font-semibold text-purple-200 cursor-pointer"
+                          >
+                            {alt.protocol === "ssh"
+                              ? "SSH Tunnel"
+                              : alt.protocol === "vless"
+                              ? "VLESS Reality"
+                              : alt.protocol === "vless_ws"
+                              ? "VLESS CDN"
+                              : alt.protocol === "webrtc"
+                              ? "WebRTC"
+                              : alt.protocol === "shadowtls"
+                              ? "ShadowTLS v3"
+                              : alt.protocol === "hysteria2"
+                              ? "Hysteria 2"
+                              : alt.protocol === "tuic"
+                              ? "TUIC v5"
+                              : alt.protocol === "awg2"
+                              ? "AWG 2.0"
+                              : alt.protocol === "amneziawg"
+                              ? "Amnezia 3.1"
+                              : alt.protocol === "wireguard"
+                              ? "WireGuard"
+                              : "Shadowsocks"}
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-col items-center justify-center py-1">
+                  <div className="p-3 bg-white rounded-2xl shadow-xl">
+                    <img
+                      src={qrDataUrl}
+                      alt="VPN QR Code"
+                      className="w-48 h-48 block"
+                    />
+                  </div>
+                </div>
+
+                <div
+                  className={`grid ${
+                    qrModalProfile.protocol === "amneziawg" ||
+                    qrModalProfile.protocol === "awg2" ||
+                    qrModalProfile.protocol === "wireguard"
+                      ? "grid-cols-3"
+                      : "grid-cols-2"
+                  } gap-2`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => handleCopyUri(qrModalProfile)}
+                    className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-4 h-4 shrink-0" />
+                    <span className="truncate">
+                      Ссылка{" "}
+                      {qrModalProfile.protocol === "ssh"
+                        ? "ssh://"
+                        : qrModalProfile.protocol === "vless" ||
+                          qrModalProfile.protocol === "vless_ws" ||
+                          qrModalProfile.protocol === "webrtc"
+                        ? "vless://"
+                        : qrModalProfile.protocol === "shadowtls"
+                        ? "shadowtls://"
+                        : qrModalProfile.protocol === "tuic"
+                        ? "tuic://"
+                        : qrModalProfile.protocol === "shadowsocks"
+                        ? "ss://"
+                        : qrModalProfile.protocol === "awg2"
+                        ? "awg2://"
+                        : qrModalProfile.protocol === "amneziawg" ||
+                          qrModalProfile.protocol === "wireguard"
+                        ? "awg://"
+                        : "hysteria2://"}
+                    </span>
+                  </button>
+                  {(qrModalProfile.protocol === "amneziawg" ||
+                    qrModalProfile.protocol === "awg2" ||
+                    qrModalProfile.protocol === "wireguard") && (
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadAwgConf(qrModalProfile)}
+                      className="py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer keep-white"
+                    >
+                      <FileDown className="w-4 h-4 shrink-0" />
+                      <span className="truncate">.conf (Amnezia)</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleExportJson(qrModalProfile)}
+                    className="py-2 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer keep-white"
+                  >
+                    <FileDown className="w-4 h-4 shrink-0" />
+                    <span className="truncate">Скачать .json</span>
+                  </button>
+                </div>
+
+                <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-[11px] text-amber-100 space-y-1.5">
+                  <div className="font-bold text-amber-300">
+                    Почему в Hiddify пишет «Тайм-аут» и «Неизвестный IP»? Как исправить за 15 секунд:
+                  </div>
+                  <div>
+                    1. <b>Используйте протокол TUIC v5 (порт 9443)</b>: в мобильном Hiddify есть баг парсера ссылок Hysteria 2 с паролем обфускации <code>obfs=salamander</code>.
+                  </div>
+                  <div>
+                    2. В Hiddify откройте <b>Параметры конфигурации</b> → <b>Регион</b> → <b>«Другой (other)»</b> и включите <b>«Разрешить небезопасные (Allow Insecure)»</b>.
+                  </div>
+                  <div>
+                    3. <b>Или используйте официальное приложение <code>sing-box</code>, Shadowsocks / v2rayNG / NekoBox</b> или скачанный <code>.json</code>.
+                  </div>
+                </div>
+              </div>
+            )}
+            <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 6: РЕДАКТИРОВАНИЕ КОНФИГУРАЦИИ */}
+        {popupMode === "edit" && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            {!editingProfile ? (
+              <div className="flex-1 flex items-center justify-center p-6 text-xs text-slate-400">
+                Загрузка параметров конфигурации...
+              </div>
+            ) : (
+              <>
+                <div className="px-4 py-3 border-b border-slate-800 bg-[#0b101d] flex items-center justify-between gap-2 shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 shrink-0">
+                      <Edit3 className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="text-sm font-bold text-white truncate">
+                        {editingProfile.name}
+                      </h3>
+                      <p className="text-[11px] text-slate-400 truncate">
+                        Протокол:{" "}
+                        {editingProfile.protocol === "awg2"
+                          ? "AMNEZIAWG 2.0"
+                          : editingProfile.protocol === "awg_quic"
+                          ? "AWG + QUIC PRE-WARM"
+                          : editingProfile.protocol === "awg_vless"
+                          ? "ГИБРИД AWG + REALITY"
+                          : editingProfile.protocol === "amneziawg"
+                          ? "AMNEZIA 3.1"
+                          : editingProfile.protocol.toUpperCase()}{" "}
+                        • ID: {editingProfile.id}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!editModeRaw) {
+                        const isAwgOrWg =
+                          editingProfile.protocol === "amneziawg" ||
+                          editingProfile.protocol === "awg_quic" ||
+                          editingProfile.protocol === "awg_vless" ||
+                          editingProfile.protocol === "awg2" ||
+                          editingProfile.protocol === "wireguard";
+                        if (isAwgOrWg) {
+                          try {
+                            const conf = await invoke<string>("export_awg_conf", {
+                              profileId: editingProfile.id,
+                              profile: { ...editingProfile, ...editForm },
+                            });
+                            setEditRawConf(conf);
+                          } catch {}
+                        }
+                        setEditRawJson(JSON.stringify({ ...editingProfile, ...editForm }, null, 2));
+                      }
+                      setEditModeRaw(!editModeRaw);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 text-xs font-semibold text-cyan-300 border border-cyan-500/40 flex items-center gap-1.5 transition shrink-0 cursor-pointer"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    {editModeRaw ? "Визуальный редактор" : "Редактировать текст конфига"}
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar select-text">
+                  {editModeRaw ? (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs text-slate-300 font-bold">Текстовый редактор конфигурации:</span>
+                          {(editingProfile.protocol === "amneziawg" ||
+                            editingProfile.protocol === "awg_quic" ||
+                            editingProfile.protocol === "awg_vless" ||
+                            editingProfile.protocol === "awg2" ||
+                            editingProfile.protocol === "wireguard") && (
+                            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-800 border border-slate-700">
+                              <button
+                                type="button"
+                                onClick={() => setRawTextFormat("conf")}
+                                className={`px-2 py-0.5 rounded text-[11px] font-semibold transition cursor-pointer ${
+                                  rawTextFormat === "conf" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
+                                }`}
+                              >
+                                .conf (WireGuard / Amnezia)
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setRawTextFormat("json")}
+                                className={`px-2 py-0.5 rounded text-[11px] font-semibold transition cursor-pointer ${
+                                  rawTextFormat === "json" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
+                                }`}
+                              >
+                                JSON (Sing-box)
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        <span className="text-[11px] text-slate-400">
+                          {rawTextFormat === "conf" ? "Синтаксис .conf [Interface] / [Peer]" : "Синтаксис JSON"}
+                        </span>
+                      </div>
+
+                      {rawTextFormat === "conf" ? (
+                        <textarea
+                          rows={16}
+                          value={editRawConf}
+                          onChange={(e) => setEditRawConf(e.target.value)}
+                          placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;ListenPort = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."
+                          className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-emerald-300 focus:outline-none focus:border-cyan-500 leading-relaxed"
+                        />
+                      ) : (
+                        <textarea
+                          rows={16}
+                          value={editRawJson}
+                          onChange={(e) => setEditRawJson(e.target.value)}
+                          className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500 leading-relaxed"
+                        />
+                      )}
+                      <p className="text-[11px] text-slate-400">
+                        💡 Вы можете напрямую отредактировать или вставить текст конфигурации. При сохранении параметры будут проверены и применены.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3.5">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">Название профиля</label>
+                          <input
+                            type="text"
+                            value={editForm.name || ""}
+                            onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                            className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">Сервер / IP</label>
+                          <input
+                            type="text"
+                            value={editForm.server || ""}
+                            onChange={(e) => setEditForm({ ...editForm, server: e.target.value })}
+                            className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">Порт (сервера)</label>
+                          <input
+                            type="number"
+                            value={editForm.port || 0}
+                            onChange={(e) => setEditForm({ ...editForm, port: parseInt(e.target.value, 10) || 0 })}
+                            className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-slate-400 mb-1">Порт прослушивания (Listen Port)</label>
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              value={editForm.listen_port ?? ""}
+                              placeholder="Случайный / не задан"
+                              onChange={(e) =>
+                                setEditForm({
+                                  ...editForm,
+                                  listen_port: e.target.value ? parseInt(e.target.value, 10) || null : null,
+                                })
+                              }
+                              className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setEditForm({
+                                  ...editForm,
+                                  listen_port: getRandomInt(10000, 64999),
+                                })
+                              }
+                              className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-cyan-300 shrink-0 transition cursor-pointer"
+                              title="Выбрать случайный порт прослушивания"
+                            >
+                              🎲
+                            </button>
+                          </div>
+                        </div>
+                        {(editingProfile.protocol === "amneziawg" ||
+                          editingProfile.protocol === "awg_quic" ||
+                          editingProfile.protocol === "awg_vless" ||
+                          editingProfile.protocol === "awg2" ||
+                          editingProfile.protocol === "wireguard") && (
+                          <div className="col-span-2">
+                            <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-[#0b101d] border border-slate-800 hover:border-cyan-500/40 cursor-pointer transition">
+                              <input
+                                type="checkbox"
+                                checked={editForm.auto_rotate_listen_port ?? true}
+                                onChange={(e) =>
+                                  setEditForm({
+                                    ...editForm,
+                                    auto_rotate_listen_port: e.target.checked,
+                                  })
+                                }
+                                className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
+                              />
+                              <div>
+                                <div className="text-xs font-semibold text-slate-200">
+                                  Менять порт прослушивания (ListenPort) при переподключении
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  При нажатии кнопки «Переподключиться» выбирается новый свободный UDP-порт; основная кнопка подключения сохраняет текущий порт
+                                </div>
+                              </div>
+                            </label>
+                          </div>
+                        )}
+                        <div
+                          className={
+                            editingProfile.protocol !== "amneziawg" &&
+                            editingProfile.protocol !== "awg_quic" &&
+                            editingProfile.protocol !== "awg_vless" &&
+                            editingProfile.protocol !== "awg2" &&
+                            editingProfile.protocol !== "wireguard"
+                              ? "col-span-1"
+                              : "col-span-2"
+                          }
+                        >
+                          <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
+                          <input
+                            type="text"
+                            value={editForm.sni || ""}
+                            onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
+                            className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                          />
+                        </div>
+                        {editingProfile.protocol !== "amneziawg" &&
+                          editingProfile.protocol !== "awg_quic" &&
+                          editingProfile.protocol !== "awg_vless" &&
+                          editingProfile.protocol !== "awg2" &&
+                          editingProfile.protocol !== "wireguard" && (
+                            <div className={editingProfile.protocol === "tuic" ? "col-span-1" : "col-span-2"}>
+                              <label className="block text-xs text-slate-400 mb-1">
+                                {editingProfile.protocol === "vless" ||
+                                editingProfile.protocol === "vless_ws" ||
+                                editingProfile.protocol === "webrtc"
+                                  ? "UUID пользователя"
+                                  : "Пароль / Секретный ключ"}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.password || editForm.uuid || ""}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  if (
+                                    editingProfile.protocol === "vless" ||
+                                    editingProfile.protocol === "vless_ws" ||
+                                    editingProfile.protocol === "webrtc"
+                                  ) {
+                                    setEditForm({ ...editForm, password: val, uuid: val });
+                                  } else {
+                                    setEditForm({ ...editForm, password: val });
+                                  }
+                                }}
+                                className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          )}
+                        {editingProfile.protocol === "tuic" && (
+                          <div className="col-span-2">
+                            <label className="block text-xs text-slate-400 mb-1">TUIC UUID</label>
+                            <input
+                              type="text"
+                              value={editForm.uuid || ""}
+                              onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
+                              className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                            />
+                          </div>
+                        )}
+                      </div>
+
+                      {editingProfile.protocol === "awg_vless" && (
+                        <div className="p-3.5 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/35 space-y-2.5">
+                          <div className="text-xs font-bold text-fuchsia-300">
+                            Параметры капсулы VLESS Reality Detour (TCP 443):
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Порт VLESS Reality (TCP)</label>
+                              <input
+                                type="number"
+                                value={editForm.vless_port ?? 443}
+                                onChange={(e) => setEditForm({ ...editForm, vless_port: parseInt(e.target.value, 10) || 443 })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">UUID VLESS</label>
+                              <input
+                                type="text"
+                                value={editForm.uuid || ""}
+                                placeholder="UUID пользователя VLESS"
+                                onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Reality Public Key</label>
+                              <input
+                                type="text"
+                                value={editForm.reality_public_key || ""}
+                                placeholder="Public Key Reality"
+                                onChange={(e) => setEditForm({ ...editForm, reality_public_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Reality Short ID (sid)</label>
+                              <input
+                                type="text"
+                                value={editForm.reality_short_id || ""}
+                                placeholder="0123456789abcdef"
+                                onChange={(e) => setEditForm({ ...editForm, reality_short_id: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {(editingProfile.protocol === "amneziawg" ||
+                        editingProfile.protocol === "awg_quic" ||
+                        editingProfile.protocol === "awg_vless") && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <div>
+                              <div className="text-xs font-bold text-emerald-400">
+                                Параметры Amnezia 3.1 (Header Protection + 32-bit H1-H4):
+                              </div>
+                              <span className="text-[10px] text-slate-400">
+                                Стек обфускации, 32-битные заголовки H1-H4, динамические сдвиги S1-S4 ≥ 12 и Port Hunting
+                              </span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const r = generateRandomAwg31Params();
+                                setEditForm({ ...editForm, ...r });
+                                showNotice("success", "Параметры Amnezia 3.1 (включая 32-битные H1-H4) рандомизированы!");
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition shrink-0 cursor-pointer"
+                            >
+                              🎲 Рандомизировать 3.1
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                AWG Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_private_key || editForm.password || ""}
+                                placeholder="Вставьте PrivateKey из .conf"
+                                onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                AWG Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_public_key || ""}
+                                placeholder="Вставьте PublicKey сервера"
+                                onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_local_address || ""}
+                                placeholder="10.8.0.2/32"
+                                onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">HeaderProtectionKey (Base64 32 байта)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_header_protection_key || ""}
+                                placeholder="Base64 32 байта"
+                                onChange={(e) => setEditForm({ ...editForm, awg_header_protection_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div className="col-span-2">
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_preshared_key || ""}
+                                placeholder="Опциональный pre-shared key"
+                                onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div className="col-span-2">
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Диапазон перебора портов (Port Hunting Range)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_hop_ports || ""}
+                                placeholder="20000:65000"
+                                onChange={(e) => setEditForm({ ...editForm, awg_hop_ports: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div className="col-span-2 grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="block text-[10px] text-slate-400">Jc (Мусорные пакеты)</label>
+                                <input
+                                  type="number"
+                                  value={editForm.awg_jc ?? 5}
+                                  onChange={(e) => setEditForm({ ...editForm, awg_jc: parseInt(e.target.value, 10) || 5 })}
+                                  className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-slate-400">Jmin (Мин. размер)</label>
+                                <input
+                                  type="number"
+                                  value={editForm.awg_jmin ?? 10}
+                                  onChange={(e) => setEditForm({ ...editForm, awg_jmin: parseInt(e.target.value, 10) || 10 })}
+                                  className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-[10px] text-slate-400">Jmax (Макс. размер)</label>
+                                <input
+                                  type="number"
+                                  value={editForm.awg_jmax ?? 50}
+                                  onChange={(e) => setEditForm({ ...editForm, awg_jmax: parseInt(e.target.value, 10) || 50 })}
+                                  className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                />
+                              </div>
+                            </div>
+
+                            <div className="col-span-2">
+                              <label className="block text-[10px] text-slate-400 mb-1">Сдвиги пакетов S1 - S4 (Amnezia 3.1: каждый ≥ 12 байт)</label>
+                              <div className="grid grid-cols-4 gap-2">
+                                <div>
+                                  <input
+                                    type="number"
+                                    placeholder="S1"
+                                    value={editForm.awg_s1 ?? 12}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_s1: parseInt(e.target.value, 10) || 12 })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">S1</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="number"
+                                    placeholder="S2"
+                                    value={editForm.awg_s2 ?? 12}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_s2: parseInt(e.target.value, 10) || 12 })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">S2</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="number"
+                                    placeholder="S3"
+                                    value={editForm.awg_s3 ?? 12}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_s3: parseInt(e.target.value, 10) || 12 })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">S3</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="number"
+                                    placeholder="S4"
+                                    value={editForm.awg_s4 ?? 12}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_s4: parseInt(e.target.value, 10) || 12 })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">S4</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="col-span-2">
+                              <label className="block text-[10px] text-slate-400 mb-1">Заголовки H1 - H4 (1, 2, 3, 4)</label>
+                              <div className="grid grid-cols-4 gap-2">
+                                <div>
+                                  <input
+                                    type="text"
+                                    placeholder="H1"
+                                    value={editForm.awg_h1 ?? "1"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_h1: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">H1</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="text"
+                                    placeholder="H2"
+                                    value={editForm.awg_h2 ?? "2"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_h2: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">H2</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="text"
+                                    placeholder="H3"
+                                    value={editForm.awg_h3 ?? "3"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_h3: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">H3</span>
+                                </div>
+                                <div>
+                                  <input
+                                    type="text"
+                                    placeholder="H4"
+                                    value={editForm.awg_h4 ?? "4"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_h4: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
+                                  />
+                                  <span className="text-[9px] text-slate-500 block text-center mt-0.5">H4</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="col-span-2 pt-1 border-t border-slate-800">
+                              <label className="block text-[10px] text-slate-400 mb-1">Таймеры и параметры рукопожатия Amnezia 3.1</label>
+                              <div className="grid grid-cols-3 gap-2">
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">RekeyAfterTime</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_rekey_after_time || "100-120"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_rekey_after_time: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">RekeyTimeout</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_rekey_timeout || "3-7"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_rekey_timeout: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">RejectAfterTime</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_reject_after_time || "150-180"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_reject_after_time: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">KeepaliveTimeout</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_keepalive_timeout || "5-15"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_keepalive_timeout: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">MaxHandshakeAttempts</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_max_handshake_attempts || "15-20"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_max_handshake_attempts: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-[9px] text-slate-500 block mb-0.5">PersistentKeepalive</span>
+                                  <input
+                                    type="text"
+                                    value={editForm.awg_persistent_keepalive || "25-35"}
+                                    onChange={(e) => setEditForm({ ...editForm, awg_persistent_keepalive: e.target.value })}
+                                    className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "awg2" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+                          <div>
+                            <div className="text-xs font-bold text-teal-400">Параметры AmneziaWG 2.0:</div>
+                            <span className="text-[10px] text-slate-400">
+                              Чистая конфигурация (PrivateKey, Address, DNS 1.1.1.1, MTU 1420, PublicKey, PresharedKey, Endpoint)
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                AWG Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_private_key || editForm.password || ""}
+                                placeholder="Вставьте PrivateKey из .conf"
+                                onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                AWG Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_public_key || ""}
+                                placeholder="Вставьте PublicKey сервера"
+                                onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_local_address || ""}
+                                placeholder="10.8.1.2/24"
+                                onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_preshared_key || ""}
+                                placeholder="Опциональный pre-shared key"
+                                onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "wireguard" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
+                          <div>
+                            <div className="text-xs font-bold text-rose-400">Параметры стандартного WireGuard:</div>
+                            <span className="text-[10px] text-slate-400">Чистый протокол WireGuard (без обфускации AWG)</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_private_key || editForm.password || ""}
+                                placeholder="Вставьте PrivateKey из .conf"
+                                onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_public_key || ""}
+                                placeholder="Вставьте PublicKey сервера"
+                                onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_local_address || ""}
+                                placeholder="10.8.0.2/32"
+                                onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_preshared_key || ""}
+                                placeholder="Опциональный pre-shared key"
+                                onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div className="col-span-2">
+                              <label className="block text-[11px] text-slate-400 mb-0.5">PersistentKeepalive (секунды)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_persistent_keepalive || "25"}
+                                placeholder="25"
+                                onChange={(e) => setEditForm({ ...editForm, awg_persistent_keepalive: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "hysteria2" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                          <div className="text-xs font-bold text-cyan-400">Параметры Hysteria 2:</div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Пароль обфускации Salamander</label>
+                              <input
+                                type="text"
+                                value={editForm.obfs_password || ""}
+                                onChange={(e) => setEditForm({ ...editForm, obfs_password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Port Hopping Range</label>
+                              <input
+                                type="text"
+                                value={editForm.hop_ports || ""}
+                                placeholder="20000:65000"
+                                onChange={(e) => setEditForm({ ...editForm, hop_ports: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "shadowtls" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                          <div className="text-xs font-bold text-pink-400">Параметры ShadowTLS v3:</div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Пароль ShadowTLS рукопожатия</label>
+                              <input
+                                type="text"
+                                value={editForm.shadowtls_password || ""}
+                                onChange={(e) => setEditForm({ ...editForm, shadowtls_password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Паразитный SNI (Apple / Microsoft)</label>
+                              <input
+                                type="text"
+                                value={editForm.shadowtls_sni || ""}
+                                placeholder="gateway.icloud.com"
+                                onChange={(e) => setEditForm({ ...editForm, shadowtls_sni: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "vless_ws" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                          <div className="text-xs font-bold text-orange-400">Параметры VLESS + WebSocket (CDN Shield):</div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">WebSocket Path</label>
+                              <input
+                                type="text"
+                                value={editForm.ws_path || ""}
+                                placeholder="/ws-tunnel"
+                                onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">CDN Domain / Host header (опционально)</label>
+                              <input
+                                type="text"
+                                value={editForm.cdn_host || ""}
+                                placeholder="worker.example.workers.dev"
+                                onChange={(e) => setEditForm({ ...editForm, cdn_host: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "webrtc" && (
+                        <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+                          <div className="text-xs font-bold text-lime-400">Параметры WebRTC Steganography:</div>
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">gRPC Service / Media stream</label>
+                              <input
+                                type="text"
+                                value={editForm.ws_path || "webrtc-media"}
+                                placeholder="webrtc-media"
+                                onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">SNI (Маскировочный хост)</label>
+                              <input
+                                type="text"
+                                value={editForm.sni || ""}
+                                placeholder="zoom.us или meet.google.com"
+                                onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end gap-2.5 px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => invoke("app_close")}
+                    className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition cursor-pointer"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveEditedProfile}
+                    disabled={editSaving}
+                    className="px-5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-cyan-600/30 transition flex items-center gap-2 cursor-pointer keep-white"
+                  >
+                    {editSaving ? "Сохранение..." : "Сохранить изменения"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* POPUP 7: НАСТРОЙКА ПРАВИЛ РАЗДЕЛЬНОГО ТУННЕЛИРОВАНИЯ */}
+        {popupMode === "routing_rules" && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-800 bg-[#0b101d] shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                    popupRulesTarget === "proxy"
+                      ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-300"
+                      : "bg-emerald-500/20 border border-emerald-500/40 text-emerald-300"
+                  }`}
+                >
+                  {popupRulesTarget === "proxy" ? (
+                    <Shield className="w-4 h-4" />
+                  ) : (
+                    <Zap className="w-4 h-4" />
+                  )}
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-xs font-bold text-white truncate">
+                    {popupRulesTarget === "proxy"
+                      ? "Настройка: Только выбранное через VPN (Белый список)"
+                      : "Настройка: Весь трафик через VPN (Черный список)"}
+                  </h3>
+                  <p className="text-[10px] text-slate-400 truncate">
+                    {popupRulesTarget === "proxy"
+                      ? "Приложения, процессы, домены и IP, идущие ЧЕРЕЗ VPN"
+                      : "Приложения, процессы, домены и IP, идущие МИМО VPN (напрямую)"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar select-text">
+              {popupRulesTarget === "proxy" ? (
+                <>
+                  <div className="p-3 rounded-xl bg-[#080d19] border border-cyan-500/25 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                        <Cpu className="w-3.5 h-3.5" />
+                        Приложения, процессы и папки ({proxyProcessesList.length})
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handlePickExeFile("proxy")}
+                        className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <FileCode className="w-3 h-3" /> + Файл (.exe)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePickFolder("proxy")}
+                        className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <FolderOpen className="w-3 h-3" /> + Папка
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenProcessModal("proxy")}
+                        className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Cpu className="w-3 h-3" /> + Из запущенных
+                      </button>
+                    </div>
+
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        placeholder="Имя процесса (Discord.exe) или путь к папке..."
+                        value={manualProxyProcInput}
+                        onChange={(e) => setManualProxyProcInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            addProcessItem("proxy", manualProxyProcInput);
+                            setManualProxyProcInput("");
+                          }
+                        }}
+                        className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addProcessItem("proxy", manualProxyProcInput);
+                          setManualProxyProcInput("");
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 cursor-pointer shrink-0"
+                      >
+                        Добавить
+                      </button>
+                    </div>
+
+                    <div className="h-36 overflow-y-auto rounded-lg bg-[#050811] border border-slate-800/80 p-1.5 space-y-1">
+                      {proxyProcessesList.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-3">
+                          Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов.
+                        </div>
+                      ) : (
+                        proxyProcessesList.map((item, idx) => {
+                          const isPath = item.includes("\\") || item.includes("/");
+                          const isExe = item.toLowerCase().endsWith(".exe");
+                          return (
+                            <div
+                              key={idx}
+                              className="flex items-center justify-between px-2 py-1 rounded bg-[#0e1628] border border-slate-800 text-xs"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
+                                {isPath && !isExe ? (
+                                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                ) : isPath ? (
+                                  <FileCode className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                                ) : (
+                                  <Cpu className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                )}
+                                <div className="truncate font-mono text-[11px] text-slate-200" title={item}>
+                                  {item}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeProcessItem("proxy", item)}
+                                className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0 cursor-pointer"
+                                title="Удалить"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#080d19] border border-cyan-500/25 space-y-1.5">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5" />
+                      <span>Домены ЧЕРЕЗ VPN (по одному на строку)</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={proxyDomainsText}
+                      placeholder="youtube.com&#10;discord.com&#10;openai.com"
+                      onChange={(e) => setProxyDomainsText(e.target.value)}
+                      className="w-full p-2.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#080d19] border border-cyan-500/25 space-y-1.5">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>IP-адреса и подсети CIDR ЧЕРЕЗ VPN</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={proxyIpsText}
+                      placeholder="1.1.1.1&#10;8.8.8.8&#10;149.154.160.0/20"
+                      onChange={(e) => setProxyIpsText(e.target.value)}
+                      className="w-full p-2.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="p-3 rounded-xl bg-[#061111] border border-emerald-500/25 space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                        <Cpu className="w-3.5 h-3.5" />
+                        Приложения, процессы и папки МИМО VPN ({directProcessesList.length})
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handlePickExeFile("direct")}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <FileCode className="w-3 h-3" /> + Файл (.exe)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePickFolder("direct")}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <FolderOpen className="w-3 h-3" /> + Папка
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenProcessModal("direct")}
+                        className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Cpu className="w-3 h-3" /> + Из запущенных
+                      </button>
+                    </div>
+
+                    <div className="flex gap-1.5">
+                      <input
+                        type="text"
+                        placeholder="Имя процесса (cs2.exe) или путь к папке..."
+                        value={manualDirectProcInput}
+                        onChange={(e) => setManualDirectProcInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            addProcessItem("direct", manualDirectProcInput);
+                            setManualDirectProcInput("");
+                          }
+                        }}
+                        className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addProcessItem("direct", manualDirectProcInput);
+                          setManualDirectProcInput("");
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 cursor-pointer shrink-0"
+                      >
+                        Добавить
+                      </button>
+                    </div>
+
+                    <div className="h-36 overflow-y-auto rounded-lg bg-[#040b0b] border border-slate-800/80 p-1.5 space-y-1">
+                      {directProcessesList.length === 0 ? (
+                        <div className="h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-3">
+                          Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов.
+                        </div>
+                      ) : (
+                        directProcessesList.map((item, idx) => {
+                          const isPath = item.includes("\\") || item.includes("/");
+                          const isExe = item.toLowerCase().endsWith(".exe");
+                          return (
+                            <div
+                              key={idx}
+                              className="flex items-center justify-between px-2 py-1 rounded bg-[#091818] border border-slate-800 text-xs"
+                            >
+                              <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-2">
+                                {isPath && !isExe ? (
+                                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                                ) : isPath ? (
+                                  <FileCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                ) : (
+                                  <Cpu className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                                )}
+                                <div className="truncate font-mono text-[11px] text-slate-200" title={item}>
+                                  {item}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => removeProcessItem("direct", item)}
+                                className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0 cursor-pointer"
+                                title="Удалить"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#061111] border border-emerald-500/25 space-y-1.5">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5" />
+                      <span>Домены МИМО VPN (по одному на строку)</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={directDomainsText}
+                      placeholder=".ru&#10;vk.com&#10;yandex.ru"
+                      onChange={(e) => setDirectDomainsText(e.target.value)}
+                      className="w-full p-2.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#061111] border border-emerald-500/25 space-y-1.5">
+                    <label className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>IP-адреса и подсети CIDR МИМО VPN</span>
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={directIpsText}
+                      placeholder="192.168.0.0/16&#10;10.0.0.0/8"
+                      onChange={(e) => setDirectIpsText(e.target.value)}
+                      className="w-full p-2.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-emerald-500 focus:outline-none"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] shrink-0">
+              <span className="text-[10px] text-slate-400">
+                Изменения применяются к текущему профилю
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => invoke("app_close")}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 cursor-pointer"
+                >
+                  Закрыть
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await handleSaveRouting();
+                    await invoke("app_close");
+                  }}
+                  className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-md shadow-cyan-600/20 cursor-pointer keep-white"
+                >
+                  Сохранить и закрыть
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 8: ВЫБОР ИЗ ЗАПУЩЕННЫХ ПРОЦЕССОВ */}
+        {popupMode === "processes" && (
+          <div className="flex-1 flex flex-col overflow-hidden p-4 space-y-3">
+            <div className="flex items-center justify-between pb-2.5 border-b border-slate-800 shrink-0">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-cyan-400" />
+                  Выбор из запущенных процессов и их папок
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Добавление в список:{" "}
+                  <b className={popupProcTarget === "proxy" ? "text-cyan-300" : "text-emerald-300"}>
+                    {popupProcTarget === "proxy" ? "ЧЕРЕЗ VPN" : "МИМО VPN (Напрямую)"}
+                  </b>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadRunningProcesses}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
+              >
+                Обновить
+              </button>
+            </div>
+
+            <div className="relative shrink-0">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+              <input
+                type="text"
+                placeholder="Поиск по имени процесса или пути (например discord, steam, chrome)..."
+                value={procSearch}
+                onChange={(e) => setProcSearch(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+              />
+            </div>
+
+            <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+              {loadingProcs ? (
+                <div className="py-12 text-center text-xs text-slate-400">
+                  Сканирование запущенных процессов...
+                </div>
+              ) : (
+                runningProcs
+                  .filter(
+                    (p) =>
+                      p.name.toLowerCase().includes(procSearch.toLowerCase()) ||
+                      p.path.toLowerCase().includes(procSearch.toLowerCase())
+                  )
+                  .map((proc, i) => {
+                    const folderPath = proc.path.includes("\\")
+                      ? proc.path.substring(0, proc.path.lastIndexOf("\\"))
+                      : "";
+                    return (
+                      <div
+                        key={i}
+                        className="p-2.5 rounded-xl bg-[#0b101d] border border-slate-800/80 flex items-center justify-between gap-3 hover:border-slate-700"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white">{proc.name}</div>
+                          <div className="text-[10px] text-slate-400 font-mono truncate" title={proc.path}>
+                            {proc.path}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await invoke("emit_window_event", {
+                                event: "process-picked",
+                                payload: { target: popupProcTarget, item: proc.name },
+                              });
+                              showNotice("info", `Добавлен процесс: ${proc.name}`);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 cursor-pointer"
+                          >
+                            + Имя ({proc.name})
+                          </button>
+                          {folderPath && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await invoke("emit_window_event", {
+                                  event: "process-picked",
+                                  payload: { target: popupProcTarget, item: folderPath },
+                                });
+                                showNotice("info", `Добавлена вся папка: ${folderPath}`);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-[11px] font-semibold text-amber-300 cursor-pointer"
+                              title={`Добавить всю папку: ${folderPath}`}
+                            >
+                              + Папку целиком
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-slate-800 flex justify-end shrink-0">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 9: НОВАЯ ПРЕДУСТАНОВКА МАРШРУТОВ */}
+        {popupMode === "save_preset" && (
+          <div className="flex-1 flex flex-col justify-between p-5 overflow-y-auto space-y-4">
+            <div className="space-y-3.5">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center text-cyan-400 shrink-0">
+                  <Bookmark className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Новая предустановка маршрутов</h3>
+                  <p className="text-[11px] text-slate-400">
+                    Сохранение текущих списков в отдельный пресет
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Текущие списки программ будут сохранены в отдельную предустановку, которую можно будет переключать в один клик прямо во время работы VPN.
+              </p>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-200">Название предустановки:</label>
+                <input
+                  type="text"
+                  placeholder="например: Для работы, Стриминг, Игры + Discord"
+                  value={newPresetName}
+                  onChange={(e) => setNewPresetName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSaveAsNewPreset();
+                  }}
+                  autoFocus
+                  className="w-full px-3.5 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 select-text"
+                />
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#0b101d] border border-slate-800 space-y-2">
+                <div className="text-xs font-semibold text-slate-300">Сохраняемые списки:</div>
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span className="text-cyan-300">Через VPN:</span>
+                  <span className="font-mono text-white font-bold">{proxyProcessesList.length} программ / папок</span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-400">
+                  <span className="text-emerald-300">Мимо VPN:</span>
+                  <span className="font-mono text-white font-bold">{directProcessesList.length} программ / папок</span>
+                </div>
+                <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800">
+                  <span>Режим маршрутизации:</span>
+                  <span className="text-white font-semibold">
+                    {popupPresetOutbound === "direct"
+                      ? "Только выбранные через VPN"
+                      : "Весь трафик ПК через VPN"}
+                  </span>
+                </div>
+              </div>
+
+              {status.connected && (
+                <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 flex items-center gap-2">
+                  <Zap className="w-4 h-4 shrink-0" />
+                  <span>Будет мгновенно применено на лету к активному VPN без разрыва связи!</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAsNewPreset}
+                disabled={!newPresetName.trim()}
+                className="px-4 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-600/20 disabled:opacity-50 transition cursor-pointer keep-white"
+              >
+                Сохранить пресет
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 10: ПОДТВЕРЖДЕНИЕ ОЧИСТКИ СЕРВЕРА */}
+        {popupMode === "confirm_clean" && (
+          <div className="flex-1 flex flex-col justify-between p-5 space-y-3">
+            <div className="space-y-3">
+              <div className="flex items-center gap-2.5 text-rose-400">
+                <AlertTriangle className="w-5 h-5 shrink-0" />
+                <h3 className="text-sm font-bold text-white">Подтвердите очистку сервера</h3>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Удалить <b>sing-box</b>, все ключи и сертификаты с сервера{" "}
+                <b>{popupParams.submode || vpsCreds.host || "VPS"}</b>?
+              </p>
+            </div>
+            <div className="flex justify-end gap-2.5 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => invoke("app_close")}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 cursor-pointer"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await invoke("emit_window_event", {
+                    event: "confirm-clean-vps",
+                    payload: {},
+                  });
+                  await invoke("app_close");
+                }}
+                className="px-4 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white cursor-pointer keep-white"
+              >
+                Да, очистить
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 11: УПРАВЛЕНИЕ VPS (КОНТЕЙНЕРЫ, КОНФИГУРАЦИИ И НОВЫЕ КЛЮЧИ) */}
+        {popupMode === "vps_admin" && (
+          <div className="flex-1 flex flex-col overflow-hidden p-4 space-y-3 custom-scrollbar">
+            {!isVpsAdmin ? (
+              <div className="flex-1 flex items-center justify-center overflow-y-auto">
+                <div className="w-full max-w-md p-5 rounded-2xl bg-[#111827] border space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-cyan-500/15 border border-cyan-500/35 flex items-center justify-center text-cyan-400 shrink-0">
+                      <ShieldCheck className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white">
+                        Авторизация на VPS-сервере
+                      </h3>
+                      <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Войдите по SSH для управления контейнерами, существующими ключами и создания новых конфигов.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2.5">
+                    <div className="col-span-2">
+                      <label className="block text-[11px] text-slate-400 mb-1">IP-адрес сервера</label>
+                      <input
+                        type="text"
+                        placeholder="185.x.x.x"
+                        value={vpsCreds.host}
+                        onChange={(e) => setVpsCreds({ ...vpsCreds, host: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Порт SSH</label>
+                      <input
+                        type="number"
+                        value={vpsCreds.ssh_port}
+                        onChange={(e) =>
+                          setVpsCreds({ ...vpsCreds, ssh_port: Number(e.target.value) || 22 })
+                        }
+                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Логин SSH</label>
+                      <input
+                        type="text"
+                        value={vpsCreds.username}
+                        onChange={(e) => setVpsCreds({ ...vpsCreds, username: e.target.value })}
+                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">Пароль root / SSH</label>
+                      <div className="relative">
+                        <input
+                          type={showVpsPassword ? "text" : "password"}
+                          placeholder="••••••••••••"
+                          value={vpsCreds.password}
+                          onChange={(e) => setVpsCreds({ ...vpsCreds, password: e.target.value })}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !adminLoginLoading) {
+                              void handleLoginVpsAdmin();
+                            }
+                          }}
+                          autoFocus
+                          className="w-full pl-3 pr-8 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowVpsPassword(!showVpsPassword)}
+                          className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200 cursor-pointer"
+                        >
+                          {showVpsPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => void handleLoginVpsAdmin()}
+                      disabled={adminLoginLoading}
+                      className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition cursor-pointer keep-white"
+                    >
+                      {adminLoginLoading ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Lock className="w-4 h-4" />
+                      )}
+                      <span>{adminLoginLoading ? "Подключение по SSH..." : "Войти в управление VPS"}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <>
+                {/* Connected VPS Banner */}
+                <div className="p-3 rounded-2xl bg-[#111827] border flex flex-wrap items-center justify-between gap-2 shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center text-emerald-400 shrink-0">
+                      <Server className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white flex items-center gap-2 truncate">
+                        <span>
+                          {vpsCreds.username || "root"}@{vpsCreds.host}:{vpsCreds.ssh_port}
+                        </span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                          SSH Активен
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Контейнеров: <b className="text-slate-200">{vpsContainers.length}</b> • Конфигураций:{" "}
+                        <b className="text-slate-200">{syncedServerProfiles.length}</b>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                      className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                      title="Развернуть новый изолированный контейнер на этом или другом VPS"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Новый контейнер</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleLoginVpsAdmin()}
+                      disabled={adminLoginLoading}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                      title="Обновить состояние контейнеров и ключей с VPS"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${adminLoginLoading ? "animate-spin" : ""}`} />
+                      <span>Обновить</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleLogoutVpsAdmin}
+                      className="px-2.5 py-1.5 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 text-[11px] font-semibold text-rose-300 flex items-center gap-1 transition cursor-pointer"
+                      title="Завершить сессию администрирования"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Выйти</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Subtabs */}
+                <div className="grid grid-cols-3 gap-2 p-1 rounded-xl bg-[#0d1322] border shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setVpsAdminSubTab("containers")}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      vpsAdminSubTab === "containers"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/35 shadow-sm"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <Box className="w-3.5 h-3.5" />
+                    <span>Контейнеры ({vpsContainers.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVpsAdminSubTab("configs")}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      vpsAdminSubTab === "configs"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/35 shadow-sm"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <Key className="w-3.5 h-3.5" />
+                    <span>Конфигурации ({syncedServerProfiles.length})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVpsAdminSubTab("new_key")}
+                    className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+                      vpsAdminSubTab === "new_key"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/35 shadow-sm"
+                        : "text-slate-400 hover:text-white"
+                    }`}
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>Новый ключ</span>
+                  </button>
+                </div>
+
+                {/* Subtab Content */}
+                <div className="flex-1 overflow-y-auto space-y-2.5 pr-1 custom-scrollbar min-h-0">
+                  {/* SUBTAB 1: CONTAINERS */}
+                  {vpsAdminSubTab === "containers" && (
+                    <>
+                      {vpsContainers.length === 0 ? (
+                        <div className="p-6 rounded-2xl bg-[#111827] border text-center space-y-3">
+                          <Box className="w-8 h-8 text-slate-500 mx-auto" />
+                          <div>
+                            <div className="text-xs font-bold text-white">На сервере пока нет контейнеров VPN</div>
+                            <p className="text-[11px] text-slate-400 mt-1">
+                              Разверните первый контейнер в окне «Добавить VPS» — каждый повторный деплой автоматически создаст новый изолированный контейнер со свободными портами.
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                            className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-xs font-bold text-white cursor-pointer keep-white"
+                          >
+                            Развернуть мульти-контейнер на VPS
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-center justify-between gap-2 px-1">
+                            <span className="text-[11px] text-slate-400">
+                              Изолированные контейнеры со своими портами и набором протоколов
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-[11px] font-bold text-white flex items-center gap-1.5 shrink-0 transition cursor-pointer keep-white shadow-sm shadow-emerald-600/20"
+                              title="Развернуть новый изолированный мульти-протокольный контейнер на этом VPS"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Новый мульти-контейнер</span>
+                            </button>
+                          </div>
+                          {vpsContainers.map((c) => {
+                            const isBusy = containerBusyId === c.id;
+                            const isRunning = c.status === "running";
+                            const confirmingDelete = confirmDeleteContainerId === c.id;
+                            return (
+                              <div
+                                key={c.id}
+                                className="p-3.5 rounded-2xl bg-[#111827] border space-y-2.5"
+                              >
+                                <div className="flex flex-wrap items-start justify-between gap-2">
+                                  <div className="min-w-0 space-y-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-xs font-bold text-white">{c.name}</span>
+                                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border">
+                                        {c.id}
+                                      </span>
+                                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30 uppercase">
+                                        {c.runtime}
+                                      </span>
+                                      <span
+                                        className={`text-[10px] px-2 py-0.5 rounded-full font-semibold flex items-center gap-1 border ${
+                                          isRunning
+                                            ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/35"
+                                            : "bg-slate-800 text-slate-400"
+                                        }`}
+                                      >
+                                        <span
+                                          className={`w-1.5 h-1.5 rounded-full ${
+                                            isRunning ? "bg-emerald-400" : "bg-slate-500"
+                                          }`}
+                                        />
+                                        {isRunning ? "Запущен" : "Остановлен"}
+                                      </span>
+                                    </div>
+                                    <div className="text-[11px] text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                      <span>
+                                        Ключей: <b className="text-slate-200">{c.client_count}</b>
+                                      </span>
+                                      {c.ports.length > 0 && (
+                                        <span className="font-mono">
+                                          Порты: <b className="text-cyan-300">{c.ports.join(", ")}</b>
+                                        </span>
+                                      )}
+                                      {c.created_at && <span>Создан: {c.created_at}</span>}
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      onClick={() =>
+                                        void handleManageContainer(c.id, isRunning ? "stop" : "start")
+                                      }
+                                      className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 ${
+                                        isRunning
+                                          ? "bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/30 text-amber-300"
+                                          : "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30 text-emerald-300"
+                                      }`}
+                                    >
+                                      {isRunning ? (
+                                        <>
+                                          <Square className="w-3 h-3" />
+                                          <span>Стоп</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Play className="w-3 h-3" />
+                                          <span>Старт</span>
+                                        </>
+                                      )}
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      onClick={() => void handleManageContainer(c.id, "restart")}
+                                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                      title="Перезапустить контейнер"
+                                    >
+                                      <RotateCcw className={`w-3 h-3 ${isBusy ? "animate-spin" : ""}`} />
+                                      <span>Рестарт</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedAdminContainerId(c.id);
+                                        selectContainerAvailableProtocols(c.id);
+                                        setVpsAdminSubTab("new_key");
+                                      }}
+                                      className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                      title="Выпустить ключи в этом контейнере"
+                                    >
+                                      <UserPlus className="w-3 h-3" />
+                                      <span>+ Ключ</span>
+                                    </button>
+
+                                  {confirmingDelete ? (
+                                    <div className="flex items-center gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={isBusy}
+                                        onClick={() => void handleManageContainer(c.id, "delete")}
+                                        className="px-2.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-[11px] font-bold text-white cursor-pointer disabled:opacity-50 keep-white"
+                                      >
+                                        Подтвердить
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={isBusy}
+                                        onClick={() => setConfirmDeleteContainerId(null)}
+                                        className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 cursor-pointer"
+                                      >
+                                        Отмена
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      disabled={isBusy}
+                                      onClick={() => setConfirmDeleteContainerId(c.id)}
+                                      className="px-2.5 py-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 text-[11px] font-semibold text-rose-300 flex items-center gap-1 transition cursor-pointer disabled:opacity-50"
+                                      title="Удалить контейнер с VPS и убрать связанные профили"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>Удалить</span>
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              {c.protocols.length > 0 && (
+                                <div className="flex flex-wrap gap-1.5 pt-1">
+                                  {c.protocols.map((proto, idx) => (
+                                    <span
+                                      key={idx}
+                                      className="px-2 py-0.5 rounded-md bg-[#0b101d] border text-[10px] font-mono text-slate-300"
+                                    >
+                                      {proto}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {/* SUBTAB 2: CONFIGS / CLIENT KEYS */}
+                  {vpsAdminSubTab === "configs" && (
+                    <div className="space-y-2.5">
+                      {vpsContainers.length > 1 && (
+                        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 custom-scrollbar">
+                          <button
+                            type="button"
+                            onClick={() => setConfigsFilterContainerId("all")}
+                            className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
+                              configsFilterContainerId === "all"
+                                ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
+                                : "bg-[#0d1322] text-slate-400 hover:text-white"
+                            }`}
+                          >
+                            Все ({syncedServerProfiles.length})
+                          </button>
+                          {vpsContainers.map((c) => {
+                            const count = syncedServerProfiles.filter((p) => p.container_id === c.id).length;
+                            return (
+                              <button
+                                key={c.id}
+                                type="button"
+                                onClick={() => setConfigsFilterContainerId(c.id)}
+                                className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold shrink-0 cursor-pointer transition ${
+                                  configsFilterContainerId === c.id
+                                    ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-200"
+                                    : "bg-[#0d1322] text-slate-400 hover:text-white"
+                                }`}
+                              >
+                                {c.name} ({count})
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {syncedServerProfiles.filter(
+                        (p) =>
+                          configsFilterContainerId === "all" ||
+                          p.container_id === configsFilterContainerId
+                      ).length === 0 ? (
+                        <div className="p-6 rounded-2xl bg-[#111827] border text-center text-xs text-slate-400">
+                          Конфигурации не найдены. Создайте новый ключ во вкладке «Новый ключ» или разверните контейнер.
+                        </div>
+                      ) : (
+                        syncedServerProfiles
+                          .filter(
+                            (p) =>
+                              configsFilterContainerId === "all" ||
+                              p.container_id === configsFilterContainerId
+                          )
+                          .map((p) => {
+                            const isAwgConfSupported =
+                              p.protocol === "amneziawg" ||
+                              p.protocol === "awg2" ||
+                              p.protocol === "awg_quic" ||
+                              p.protocol === "awg_vless" ||
+                              p.protocol === "wireguard";
+                            const isPinnedOnPc = profiles.some(
+                              (lp) =>
+                                lp.pinned_on_pc !== false &&
+                                (lp.id === p.id ||
+                                  (lp.server === p.server &&
+                                    lp.port === p.port &&
+                                    lp.protocol === p.protocol &&
+                                    lp.password === p.password))
+                            );
+                            const containerLabel = vpsContainers.find((c) => c.id === p.container_id)?.name;
+
+                            return (
+                              <div
+                                key={p.id}
+                                className="p-3 rounded-2xl bg-[#111827] border flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                              >
+                                <div className="min-w-0 space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    {renderProtocolBadge(p.protocol, p.awg_version)}
+                                    <span className="text-xs font-bold text-white truncate">{p.name}</span>
+                                    {containerLabel && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border font-mono">
+                                        {containerLabel}
+                                      </span>
+                                    )}
+                                    {isPinnedOnPc && (
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                                        На этом ПК
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="text-[11px] text-slate-400 font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                                    <span>
+                                      {p.server}:{p.port}
+                                    </span>
+                                    {p.awg_local_address && <span>IP: {p.awg_local_address}</span>}
+                                    <span>
+                                      Трафик: ↑ {formatBytes(p.total_up_bytes || 0)} / ↓{" "}
+                                      {formatBytes(p.total_down_bytes || 0)}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyUri(p)}
+                                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                    title="Скопировать ссылку-ключ"
+                                  >
+                                    {copiedId === p.id ? (
+                                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                    ) : (
+                                      <Copy className="w-3.5 h-3.5" />
+                                    )}
+                                    <span>URI</span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleOpenQrModal(p)}
+                                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-purple-300 flex items-center gap-1 transition cursor-pointer"
+                                    title="Показать QR-код для телефона"
+                                  >
+                                    <QrCode className="w-3.5 h-3.5" />
+                                    <span>QR</span>
+                                  </button>
+
+                                  {isAwgConfSupported && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDownloadAwgConf(p)}
+                                      className="px-2 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                                      title="Скачать .conf файл"
+                                    >
+                                      <FileDown className="w-3.5 h-3.5" />
+                                      <span>.conf</span>
+                                    </button>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleExportJson(p)}
+                                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 flex items-center gap-1 transition cursor-pointer"
+                                    title="Сохранить .json конфиг"
+                                  >
+                                    <FileCode className="w-3.5 h-3.5" />
+                                    <span>.json</span>
+                                  </button>
+
+                                  {!isPinnedOnPc && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handlePinProfileOnPc(p.id)}
+                                      className="px-2 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                                      title="Добавить этот ключ в список подключений на этом ПК"
+                                    >
+                                      <Monitor className="w-3.5 h-3.5" />
+                                      <span>На ПК</span>
+                                    </button>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteProfile(p.id, true)}
+                                    className="p-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 text-rose-300 transition cursor-pointer"
+                                    title="Удалить ключ с VPS"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })
+                      )}
+                    </div>
+                  )}
+
+                  {/* SUBTAB 3: CREATE NEW DEVICE KEY (MULTI-PROTOCOL) */}
+                  {vpsAdminSubTab === "new_key" && (() => {
+                    const activeContainer = vpsContainers.find(
+                      (c) => c.id === selectedAdminContainerId
+                    );
+                    const availableCount = activeContainer
+                      ? VPS_DEVICE_PROTOCOLS.filter((pk) =>
+                          isProtocolAvailableInContainer(pk, activeContainer)
+                        ).length
+                      : 0;
+                    const copyAllCreatedUris = async () => {
+                      if (!lastCreatedKeys || lastCreatedKeys.created.length === 0) return;
+                      const text = lastCreatedKeys.created
+                        .map((p) => `${p.name}: ${p.uri}`)
+                        .filter((line) => line.trim().length > 0)
+                        .join("\n");
+                      try {
+                        await navigator.clipboard.writeText(text);
+                        showNotice(
+                          "success",
+                          `Скопировано ссылок: ${lastCreatedKeys.created.length}`
+                        );
+                      } catch {
+                        showNotice("error", "Не удалось скопировать ссылки в буфер обмена");
+                      }
+                    };
+
+                    return (
+                      <div className="space-y-3">
+                        <div className="p-4 rounded-2xl bg-[#111827] border space-y-3.5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shrink-0">
+                              <UserPlus className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <h3 className="text-xs font-bold text-white">
+                                Выпуск клиентских мульти-ключей на VPS
+                              </h3>
+                              <p className="text-[11px] text-slate-400">
+                                Отметьте один или сразу несколько протоколов (включая гибриды) — все ключи создадутся за один проход внутри выбранного контейнера.
+                              </p>
+                            </div>
+                          </div>
+
+                          {vpsContainers.length > 0 && (
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-1">
+                                Целевой контейнер
+                              </label>
+                              <select
+                                value={selectedAdminContainerId}
+                                onChange={(e) => {
+                                  const nextId = e.target.value;
+                                  setSelectedAdminContainerId(nextId);
+                                  selectContainerAvailableProtocols(nextId);
+                                }}
+                                className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none"
+                              >
+                                {vpsContainers.map((c) => (
+                                  <option key={c.id} value={c.id}>
+                                    {c.name} ({c.id}) — {c.protocols.join(", ") || c.runtime}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
+                          <div className="space-y-3">
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-1">
+                                Название устройства / клиента
+                              </label>
+                              <input
+                                type="text"
+                                placeholder="Например: iPhone, Планшет, Друг Алексей"
+                                value={deviceNameInput}
+                                onChange={(e) => setDeviceNameInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && !creatingDevice) {
+                                    void handleCreateDeviceKey();
+                                  }
+                                }}
+                                className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
+                              />
+                            </div>
+
+                            <div>
+                              <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                                <label className="text-[11px] text-slate-400">
+                                  Протоколы ключей (выбрано:{" "}
+                                  <b className="text-cyan-300">{selectedDeviceProtocols.length}</b>)
+                                </label>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {activeContainer && availableCount > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => selectContainerAvailableProtocols()}
+                                      className="px-2 py-0.5 rounded-md bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[10px] font-semibold text-cyan-300 cursor-pointer transition"
+                                    >
+                                      Доступные ({availableCount})
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setSelectedDeviceProtocols([...VPS_DEVICE_PROTOCOLS])
+                                    }
+                                    className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 border text-[10px] font-semibold text-slate-300 cursor-pointer transition"
+                                  >
+                                    Все ({VPS_DEVICE_PROTOCOLS.length})
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setSelectedDeviceProtocols([])}
+                                    className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 border text-[10px] font-semibold text-slate-400 cursor-pointer transition"
+                                  >
+                                    Сбросить
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                {VPS_DEVICE_PROTOCOLS.map((protoKey) => {
+                                  const meta = getProtocolMeta(protoKey);
+                                  const isSelected = selectedDeviceProtocols.includes(protoKey);
+                                  const isAvailable = isProtocolAvailableInContainer(
+                                    protoKey,
+                                    activeContainer
+                                  );
+                                  return (
+                                    <button
+                                      key={protoKey}
+                                      type="button"
+                                      onClick={() => toggleDeviceProtocol(protoKey)}
+                                      style={{
+                                        background: isSelected
+                                          ? "var(--bg-card, #111827)"
+                                          : "var(--bg-card-alt, #0b101d)",
+                                        borderColor: isSelected
+                                          ? isLightTheme
+                                            ? LIGHT_PROTOCOL_COLORS[meta.id]?.border || meta.border
+                                            : meta.border
+                                          : "var(--border-card, rgba(51, 65, 85, 0.55))",
+                                      }}
+                                      className={`relative overflow-hidden p-2.5 pl-3.5 rounded-xl border text-left transition cursor-pointer flex flex-col gap-1 ${
+                                        activeContainer && !isAvailable && !isSelected
+                                          ? "opacity-65 hover:opacity-100"
+                                          : ""
+                                      }`}
+                                    >
+                                      <span
+                                        style={{
+                                          background: meta.isHybrid ? meta.gradientLine : meta.accent,
+                                        }}
+                                        className="absolute left-0 top-0 bottom-0 w-1"
+                                      />
+                                      <div className="flex items-center justify-between gap-1.5">
+                                        <span className="text-xs font-bold text-white flex items-center gap-1.5 min-w-0">
+                                          <span
+                                            className={`w-3.5 h-3.5 rounded border flex items-center justify-center shrink-0 transition ${
+                                              isSelected
+                                                ? "bg-cyan-500 border-cyan-400 text-white keep-white"
+                                                : "border-slate-600 bg-transparent"
+                                            }`}
+                                          >
+                                            {isSelected && <Check className="w-2.5 h-2.5" />}
+                                          </span>
+                                          <span
+                                            style={{
+                                              background: meta.isHybrid
+                                                ? meta.gradientLine
+                                                : meta.accent,
+                                            }}
+                                            className="w-2 h-2 rounded-full shrink-0"
+                                          />
+                                          <span className="truncate">{meta.label}</span>
+                                        </span>
+                                        <span
+                                          style={getProtocolBadgeStyle(meta, isLightTheme)}
+                                          className="text-[9px] px-1.5 py-0.5 rounded border font-mono font-bold shrink-0"
+                                        >
+                                          {meta.shortBadge}
+                                        </span>
+                                      </div>
+                                      <p className="protocol-card-desc text-[10.5px] leading-snug">
+                                        {meta.description}
+                                      </p>
+                                      {activeContainer && (
+                                        <div className="flex items-center justify-end">
+                                          <span
+                                            className={`text-[9px] font-mono px-1.5 py-0.2 rounded ${
+                                              isAvailable
+                                                ? "text-emerald-400"
+                                                : "text-slate-500"
+                                            }`}
+                                          >
+                                            {isAvailable
+                                              ? "● активен в контейнере"
+                                              : "○ нет в контейнере"}
+                                          </span>
+                                        </div>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => void handleCreateDeviceKey()}
+                            disabled={
+                              creatingDevice ||
+                              vpsContainers.length === 0 ||
+                              selectedDeviceProtocols.length === 0
+                            }
+                            className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition cursor-pointer keep-white"
+                          >
+                            {creatingDevice ? (
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <QrCode className="w-4 h-4" />
+                            )}
+                            <span>
+                              {creatingDevice
+                                ? `Генерация ключей (${selectedDeviceProtocols.length}) и перезапуск контейнера...`
+                                : selectedDeviceProtocols.length > 1
+                                ? `Создать мульти-ключи (${selectedDeviceProtocols.length})`
+                                : "Создать ключ и показать QR"}
+                            </span>
+                          </button>
+                        </div>
+
+                        {lastCreatedKeys &&
+                          (lastCreatedKeys.created.length > 0 ||
+                            lastCreatedKeys.skipped.length > 0) && (
+                            <div className="p-3.5 rounded-2xl bg-[#111827] border space-y-2.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                                  <span>
+                                    Созданные ключи ({lastCreatedKeys.created.length})
+                                  </span>
+                                </span>
+                                {lastCreatedKeys.created.length > 1 && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void copyAllCreatedUris()}
+                                    className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 cursor-pointer transition"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    <span>Скопировать все ссылки</span>
+                                  </button>
+                                )}
+                              </div>
+
+                              {lastCreatedKeys.created.length > 0 && (
+                                <div className="space-y-2">
+                                  {lastCreatedKeys.created.map((p) => {
+                                    const isAwgConfSupported =
+                                      p.protocol === "amneziawg" ||
+                                      p.protocol === "awg2" ||
+                                      p.protocol === "awg_quic" ||
+                                      p.protocol === "awg_vless" ||
+                                      p.protocol === "wireguard";
+                                    return (
+                                      <div
+                                        key={p.id}
+                                        className="p-2.5 rounded-xl bg-[#0b101d] border flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                                      >
+                                        <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                                          {renderProtocolBadge(p.protocol, p.awg_version)}
+                                          <span className="text-xs font-bold text-white truncate">
+                                            {p.name}
+                                          </span>
+                                          <span className="text-[10px] font-mono text-slate-400">
+                                            {p.server}:{p.port}
+                                          </span>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => handleCopyUri(p)}
+                                            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 cursor-pointer transition"
+                                          >
+                                            {copiedId === p.id ? (
+                                              <Check className="w-3 h-3 text-emerald-400" />
+                                            ) : (
+                                              <Copy className="w-3 h-3" />
+                                            )}
+                                            <span>URI</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => void handleOpenQrModal(p)}
+                                            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-purple-300 flex items-center gap-1 cursor-pointer transition"
+                                          >
+                                            <QrCode className="w-3 h-3" />
+                                            <span>QR</span>
+                                          </button>
+                                          {isAwgConfSupported && (
+                                            <button
+                                              type="button"
+                                              onClick={() => void handleDownloadAwgConf(p)}
+                                              className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 cursor-pointer transition"
+                                            >
+                                              <FileDown className="w-3 h-3" />
+                                              <span>.conf</span>
+                                            </button>
+                                          )}
+                                          <button
+                                            type="button"
+                                            onClick={() => void handleExportJson(p)}
+                                            className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-300 flex items-center gap-1 cursor-pointer transition"
+                                          >
+                                            <FileCode className="w-3 h-3" />
+                                            <span>.json</span>
+                                          </button>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+
+                              {lastCreatedKeys.skipped.length > 0 && (
+                                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] text-amber-300 space-y-1">
+                                  <div className="font-bold">Пропущенные протоколы:</div>
+                                  {lastCreatedKeys.skipped.map((reason, idx) => (
+                                    <div key={idx}>• {reason}</div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div
@@ -2320,325 +6357,275 @@ export default function App() {
         isLightTheme ? "text-slate-900" : "text-slate-100"
       } select-none bg-[#090d16] transition-opacity duration-150 relative`}
     >
-      {/* Sidebar - collapsible (w-64 vs w-[68px]) */}
+      {/* Compact Left Sidebar - AmneziaVPN v2.0 Style Vertical Icon Column */}
       <aside
         style={{ borderRightColor: "var(--color-accent-border)" }}
-        className={`${
-          sidebarCollapsed ? "w-[68px] px-2" : "w-64 px-3.5"
-        } bg-[#0d1322] border-r flex flex-col justify-between py-2.5 shrink-0 transition-all duration-200 z-20`}
+        className="w-[60px] px-1.5 bg-[#0d1322] border-r flex flex-col justify-between py-2.5 shrink-0 z-30 select-none"
       >
-        <div>
-          {/* Brand Header & Collapse Toggle */}
-          {sidebarCollapsed ? (
-            <div className="flex flex-col items-center gap-2 mb-4">
-              <div
-                onMouseDown={handleMouseDownDrag}
-                onDoubleClick={handleDoubleClickMaximize}
-                data-tauri-drag-region
-                className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 cursor-default"
-                title="NeuroVeil VPN"
-              >
-                <img
-                  src={appIconLogo}
-                  alt="NeuroVeil VPN"
-                  className="w-full h-full object-cover rounded-lg pointer-events-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 transition cursor-pointer"
-                title="Развернуть меню разделов"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between gap-2 px-1 py-1 mb-4 select-none">
-              <div
-                onMouseDown={handleMouseDownDrag}
-                onDoubleClick={handleDoubleClickMaximize}
-                data-tauri-drag-region
-                className="flex items-center gap-2.5 min-w-0 flex-1 cursor-default"
-              >
-                <div className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0">
-                  <img
-                    src={appIconLogo}
-                    alt="NeuroVeil VPN"
-                    className="w-full h-full object-cover rounded-lg pointer-events-none"
-                  />
-                </div>
-                <div className="pointer-events-none min-w-0">
-                  <div className="flex items-center gap-1.5">
-                    <h1 className="font-bold text-sm tracking-tight text-white leading-none truncate">
-                      NeuroVeil VPN
-                    </h1>
-                  </div>
-                  <span className="text-[9px] px-1.5 py-0.2 rounded font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 mt-1 inline-block">
-                    v{APP_VERSION}
-                  </span>
-                </div>
-              </div>
+        <div className="flex flex-col items-center gap-2">
+          {/* App Brand Icon (Draggable) */}
+          <div
+            onMouseDown={handleMouseDownDrag}
+            data-tauri-drag-region
+            onClick={() => {
+              setActiveTab("dashboard");
+            }}
+            className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 cursor-pointer hover:border-cyan-400 transition"
+            title="NeuroVeil VPN 2.0 — Главная"
+          >
+            <img
+              src={appIconLogo}
+              alt="NeuroVeil VPN"
+              className="w-full h-full object-cover rounded-lg pointer-events-none"
+            />
+          </div>
 
-              <button
-                type="button"
-                onClick={toggleSidebar}
-                className="p-1.5 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800/80 transition cursor-pointer shrink-0"
-                title="Свернуть меню (оставить только иконки)"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-            </div>
-          )}
+          <div className="w-7 h-px bg-slate-800/90 my-0.5" />
 
-          {/* Nav Links with Seamless Sliding Tab Connector */}
-          <nav className="relative flex flex-col gap-1.5">
-            {/* Sliding Active Tab Indicator merging into Main Panel */}
+          {/* Compact Vertical Icon Buttons Column (6 sections) */}
+          <nav className="relative flex flex-col items-center gap-1.5 w-full">
+            {/* Seamless Sliding Active Tab Connector (merges into Main Window) */}
             <div
               style={{
                 transform: `translateY(${
                   Math.max(
                     0,
-                    ["dashboard", "routing", "vps", "profiles", "settings", "about"].indexOf(
+                    ["dashboard", "profiles", "routing", "vps", "settings", "about"].indexOf(
                       activeTab
                     )
-                  ) * 48
+                  ) * 46
                 }px)`,
                 transition: "transform 340ms cubic-bezier(0.22, 1, 0.36, 1)",
-                background:
-                  "linear-gradient(90deg, var(--nav-grad-from) 0%, var(--bg-app) 76%, var(--bg-app) 100%)",
-                borderTop: "1px solid var(--color-accent-border)",
-                borderLeft: "1px solid var(--color-accent-border)",
-                borderBottom: "1px solid var(--color-accent-border)",
               }}
-              className={`pointer-events-none absolute top-0 left-0 ${
-                sidebarCollapsed ? "-right-[9px]" : "-right-[15px]"
-              } h-[42px] rounded-l-2xl z-0`}
+              className="pointer-events-none absolute top-0 left-0 -right-[7px] h-10 z-0"
             >
-              {/* Top-Right Concave Curve */}
+              {/* Seamless background fill */}
+              <div
+                style={{ backgroundColor: "var(--bg-app)" }}
+                className="absolute inset-0 rounded-l-xl"
+              />
+
+              {/* Left C-border only (stops before 14px concave corners to avoid horizontal lines) */}
+              <div
+                style={{
+                  borderTopColor: "var(--color-accent-border)",
+                  borderBottomColor: "var(--color-accent-border)",
+                  borderLeftColor: "var(--color-accent-border)",
+                }}
+                className="absolute top-0 bottom-0 left-0 right-[14px] rounded-l-xl border-y border-l"
+              />
+
+              {/* Top-right concave curve */}
               <svg
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-                className="absolute -top-[14px] right-0 block overflow-visible pointer-events-none"
+                className="pointer-events-none absolute right-0 -top-[14px] w-[14px] h-[15px] overflow-visible"
+                viewBox="0 0 14 15"
+                fill="none"
               >
                 <path
-                  d="M 14 0 L 14 14 L 0 14 L 0 13.5 A 13.5 13.5 0 0 0 13.5 0 Z"
+                  d="M14 0v15H-0.5v-.5H0C7.456 14.5 13.5 8.456 13.5 1V0H14Z"
                   fill="var(--bg-app)"
                 />
                 <path
-                  d="M 13.5 0 A 13.5 13.5 0 0 1 0 13.5"
-                  fill="none"
+                  d="M-0.5 14.5H0C7.456 14.5 13.5 8.456 13.5 1V0"
                   stroke="var(--color-accent-border)"
-                  strokeWidth="1.2"
+                  strokeWidth="1"
                 />
               </svg>
 
-              {/* Bottom-Right Concave Curve */}
+              {/* Bottom-right concave curve */}
               <svg
-                width="14"
-                height="14"
-                viewBox="0 0 14 14"
-                className="absolute -bottom-[14px] right-0 block overflow-visible pointer-events-none"
+                className="pointer-events-none absolute right-0 -bottom-[14px] w-[14px] h-[15px] overflow-visible"
+                viewBox="0 0 14 15"
+                fill="none"
               >
                 <path
-                  d="M 0 0 L 14 0 L 14 14 L 13.5 14 A 13.5 13.5 0 0 0 0 0.5 Z"
+                  d="M14 15V0H-0.5v.5H0C7.456.5 13.5 6.544 13.5 14v1h.5Z"
                   fill="var(--bg-app)"
                 />
                 <path
-                  d="M 0 0.5 A 13.5 13.5 0 0 1 13.5 14"
-                  fill="none"
+                  d="M-0.5 0.5H0C7.456.5 13.5 6.544 13.5 14v1"
                   stroke="var(--color-accent-border)"
-                  strokeWidth="1.2"
+                  strokeWidth="1"
                 />
               </svg>
             </div>
 
+            {/* 1. Подключение (Главная страница) */}
             <button
-              onClick={() => setActiveTab("dashboard")}
-              title={sidebarCollapsed ? t.navDashboard : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
+              type="button"
+              onClick={() => {
+                setActiveTab("dashboard");
+              }}
+              title="Подключение (Главная страница)"
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
                 activeTab === "dashboard"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+                  ? "text-cyan-300"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
               }`}
             >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Power className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navDashboard}</span>}
-              </span>
-              {!sidebarCollapsed && (
-                <span
-                  className={`w-2 h-2 rounded-full ${
-                    status.connected
-                      ? status.is_handshaking
-                        ? "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-ping"
-                        : "bg-emerald-400 shadow-[0_0_8px_#34d399]"
-                      : "bg-slate-600"
-                  }`}
-                />
-              )}
+              <Power className="w-4 h-4 shrink-0" />
+              <span
+                className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ${
+                  status.connected
+                    ? status.is_handshaking
+                      ? "bg-amber-400 shadow-[0_0_6px_#fbbf24] animate-ping"
+                      : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                    : "bg-slate-600"
+                }`}
+              />
             </button>
 
+            {/* 2. Настройка конфигураций (Неактивна, если нет добавленных туннелей или VPS) */}
             <button
-              onClick={() => setActiveTab("routing")}
-              title={sidebarCollapsed ? t.navRouting : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "routing"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              type="button"
+              disabled={!hasTunnelsOrVps}
+              onClick={() => {
+                if (!hasTunnelsOrVps) return;
+                setActiveTab("profiles");
+              }}
+              title={
+                hasTunnelsOrVps
+                  ? `Настройка конфигураций (${profiles.length})`
+                  : "Настройка конфигураций (Сначала добавьте туннель или VPS)"
+              }
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
+                !hasTunnelsOrVps
+                  ? "text-slate-600 opacity-35 cursor-not-allowed"
+                  : activeTab === "profiles"
+                  ? "text-cyan-300 cursor-pointer"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
               }`}
             >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Globe className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navRouting}</span>}
-              </span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab("vps")}
-              title={sidebarCollapsed ? `${t.navVps} (SSH)` : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "vps"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
-              }`}
-            >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Server className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navVps}</span>}
-              </span>
-              {!sidebarCollapsed && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                  SSH
-                </span>
-              )}
-            </button>
-
-            <button
-              onClick={() => setActiveTab("profiles")}
-              title={sidebarCollapsed ? `${t.navProfiles} (${profiles.length})` : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "profiles"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
-              }`}
-            >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Smartphone className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navProfiles}</span>}
-              </span>
-              {!sidebarCollapsed && (
-                <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400">
+              <Layers className="w-4 h-4 shrink-0" />
+              {profiles.length > 0 && (
+                <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-cyan-600 text-[9px] font-bold text-white flex items-center justify-center border border-[#0d1322]">
                   {profiles.length}
                 </span>
               )}
             </button>
 
+            {/* 3. Раздельное туннелирование (Неактивна, если нет добавленных туннелей или VPS) */}
             <button
-              onClick={() => setActiveTab("settings")}
-              title={sidebarCollapsed ? t.navSettings : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "settings"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              type="button"
+              disabled={!hasTunnelsOrVps}
+              onClick={() => {
+                if (!hasTunnelsOrVps) return;
+                if (selectedProfileId) switchRoutingProfile(selectedProfileId);
+                setActiveTab("routing");
+              }}
+              title={
+                hasTunnelsOrVps
+                  ? "Раздельное туннелирование"
+                  : "Раздельное туннелирование (Сначала добавьте туннель или VPS)"
+              }
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
+                !hasTunnelsOrVps
+                  ? "text-slate-600 opacity-35 cursor-not-allowed"
+                  : activeTab === "routing"
+                  ? "text-cyan-300 cursor-pointer"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
               }`}
             >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Settings className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navSettings}</span>}
+              <Globe className="w-4 h-4 shrink-0" />
+              {hasTunnelsOrVps &&
+                (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) && (
+                  <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
+                )}
+            </button>
+
+            {/* 4. Добавление и Автодеплой (Добавление конфиг-файлов, ключей и Автодеплой VPS) */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("vps");
+              }}
+              title="Добавление конфигураций и Автодеплой VPS"
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                activeTab === "vps"
+                  ? "text-cyan-300"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+              }`}
+            >
+              <Server className="w-4 h-4 shrink-0" />
+              <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-cyan-600 text-white flex items-center justify-center border border-[#0d1322]">
+                <Plus className="w-2.5 h-2.5" />
               </span>
             </button>
 
+            {/* 5. Настройки */}
             <button
-              onClick={() => setActiveTab("about")}
-              title={sidebarCollapsed ? t.navAbout : undefined}
-              className={`relative z-10 w-full h-[42px] flex items-center ${
-                sidebarCollapsed ? "justify-center px-0" : "justify-between px-3.5"
-              } rounded-xl text-sm font-medium transition-colors duration-200 cursor-pointer ${
-                activeTab === "about"
-                  ? "text-cyan-300 font-semibold"
-                  : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+              type="button"
+              onClick={() => {
+                setActiveTab("settings");
+              }}
+              title={t.navSettings}
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                activeTab === "settings"
+                  ? "text-cyan-300"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
               }`}
             >
-              <span className={`flex items-center ${sidebarCollapsed ? "justify-center" : "gap-3"}`}>
-                <Info className="w-4 h-4 shrink-0" />
-                {!sidebarCollapsed && <span>{t.navAbout}</span>}
-              </span>
+              <Settings className="w-4 h-4 shrink-0" />
+            </button>
+
+            {/* 6. О приложении */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("about");
+              }}
+              title={t.navAbout}
+              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                activeTab === "about"
+                  ? "text-cyan-300"
+                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+              }`}
+            >
+              <Info className="w-4 h-4 shrink-0" />
+              {updateInfo?.has_update && (
+                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+              )}
             </button>
           </nav>
         </div>
 
-        {/* Bottom Core Status Card */}
-        {!sidebarCollapsed ? (
-          <div className="p-3 rounded-xl bg-[#131c31]/80 border border-slate-800 space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-400">Ядро sing-box:</span>
-              <span
-                className={`font-medium flex items-center gap-1 ${
-                  status.singbox_installed ? "text-emerald-400" : "text-amber-400"
-                }`}
-              >
-                {status.singbox_installed ? (
-                  <>
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Готово
-                  </>
-                ) : (
-                  <>
-                    <AlertTriangle className="w-3.5 h-3.5" /> Не скачано
-                  </>
-                )}
-              </span>
-            </div>
-            <div className="text-[11px] text-slate-500 truncate" title={status.singbox_version}>
-              {status.singbox_version}
-            </div>
-            {!status.singbox_installed && (
-              <button
-                onClick={handleDownloadCore}
-                disabled={downloadingCore}
-                className="w-full py-1.5 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-semibold text-white transition flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Download className="w-3.5 h-3.5" />
-                {downloadingCore ? "Загрузка..." : "Скачать sing-box"}
-              </button>
-            )}
-          </div>
-        ) : (
-          <div
-            className="p-2.5 rounded-xl bg-[#131c31]/80 border border-slate-800 flex items-center justify-center cursor-default"
-            title={`Ядро sing-box: ${status.singbox_installed ? "Готово (" + (status.singbox_version || "") + ")" : "Не скачано"}`}
+        {/* Bottom Core Status Indicator */}
+        <div className="flex flex-col items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              if (!status.singbox_installed) {
+                handleDownloadCore();
+              } else {
+                invoke("open_popup_window", { mode: "logs" });
+              }
+            }}
+            className="w-10 h-10 rounded-xl bg-[#131c31]/80 border border-slate-800 hover:border-slate-700 flex flex-col items-center justify-center cursor-pointer transition"
+            title={`Ядро sing-box: ${
+              status.singbox_installed
+                ? "Готово (" + (status.singbox_version || "") + ") — Нажмите для просмотра логов"
+                : "Не скачано — Нажмите для загрузки"
+            }`}
           >
             <span
-              className={`w-3 h-3 rounded-full ${
+              className={`w-2.5 h-2.5 rounded-full ${
                 status.singbox_installed
                   ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
                   : "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-pulse"
               }`}
             />
-          </div>
-        )}
+            <span className="text-[8px] font-mono text-slate-400 mt-1">v2.0</span>
+          </button>
+        </div>
       </aside>
 
-      {/* Main Content Area */}
+      {/* Main Content Area (Compact AmneziaVPN Window Layout) */}
       <main className="flex-1 flex flex-col h-full overflow-hidden relative bg-[#090d16]">
-        {/* Seamless Draggable Header - NO borders, NO divider lines */}
-        <header className="h-9 w-full flex items-center justify-end px-3 pt-1 shrink-0 select-none cursor-default z-30">
-          {/* Draggable space spanning the entire width */}
+        {/* Seamless Transparent Drag Bar + Window Controls */}
+        <header className="h-7 w-full flex items-center justify-end px-2.5 pt-1 shrink-0 select-none cursor-default z-30 bg-transparent">
           <div
-            className="flex-1 h-full"
+            className="flex-1 h-full min-w-0 cursor-default"
             onMouseDown={handleMouseDownDrag}
-            onDoubleClick={handleDoubleClickMaximize}
             data-tauri-drag-region
           />
 
@@ -2662,27 +6649,10 @@ export default function App() {
                   console.error("Minimize error:", err);
                 }
               }}
-              className="w-8 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
               title={t.minimize}
             >
               <Minus className="w-3.5 h-3.5 pointer-events-none" />
-            </button>
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await invoke("app_toggle_maximize");
-                } catch (err) {
-                  console.error("Maximize error:", err);
-                }
-              }}
-              className="w-8 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
-              title={t.maximize}
-            >
-              <Square className="w-3 h-3 pointer-events-none" />
             </button>
             <button
               type="button"
@@ -2696,7 +6666,7 @@ export default function App() {
                   console.error("Close error:", err);
                 }
               }}
-              className="w-8 h-7 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
+              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
               title={t.close}
             >
               <X className="w-3.5 h-3.5 pointer-events-none" />
@@ -2704,10 +6674,10 @@ export default function App() {
           </div>
         </header>
 
-        {/* Toast Banner - High Contrast Theme-Safe */}
+        {/* Toast Banner - Compact & High Contrast */}
         {toast && (
           <div
-            className={`toast-notice absolute top-4 right-6 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl shadow-2xl border text-sm font-semibold transition-all backdrop-blur-md ${
+            className={`toast-notice absolute top-11 left-2.5 right-2.5 z-[70] flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl shadow-2xl border text-xs font-semibold transition-all backdrop-blur-md ${
               toast.type === "success"
                 ? "bg-emerald-700/95 border-emerald-400 text-white shadow-emerald-500/30"
                 : toast.type === "error"
@@ -2715,2052 +6685,689 @@ export default function App() {
                 : "bg-slate-900/95 border-cyan-400 text-cyan-100 shadow-cyan-500/30"
             }`}
           >
-            {toast.type === "success" && <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />}
-            {toast.type === "error" && <XCircle className="w-4 h-4 text-rose-200 shrink-0" />}
-            {toast.type === "info" && <Sparkles className="w-4 h-4 text-cyan-300 shrink-0" />}
-            <span className="text-white font-medium">{toast.text}</span>
+            <div className="flex items-center gap-2 min-w-0">
+              {toast.type === "success" && <CheckCircle2 className="w-4 h-4 text-emerald-200 shrink-0" />}
+              {toast.type === "error" && <XCircle className="w-4 h-4 text-rose-200 shrink-0" />}
+              {toast.type === "info" && <Sparkles className="w-4 h-4 text-cyan-300 shrink-0" />}
+              <span className="text-white font-medium break-words">{toast.text}</span>
+            </div>
             <button
               onClick={() => setToast(null)}
-              className="ml-2 text-white/70 hover:text-white transition p-0.5"
+              className="text-white/70 hover:text-white transition p-0.5 shrink-0"
             >
               <X className="w-3.5 h-3.5" />
             </button>
           </div>
         )}
 
-        {/* TAB 1: DASHBOARD */}
+        {/* ========================================================================= */}
+        {/* MAIN PAGE (ПОДКЛЮЧЕНИЕ): EMPTY STATE (LOGO + TITLE) OR CONNECTION VIEW    */}
+        {/* ========================================================================= */}
         {activeTab === "dashboard" && (
-          <div className="flex-1 overflow-y-auto p-3.5 sm:p-5 lg:p-6 flex flex-col justify-between h-full min-h-0 space-y-4 sm:space-y-5 lg:space-y-6 animate-tab-enter">
-            <div className="space-y-4 sm:space-y-5 lg:space-y-6">
-              {/* Warning if sing-box binary is missing */}
-              {!status.singbox_installed && (
-                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <AlertTriangle className="w-6 h-6 text-amber-400 shrink-0" />
-                    <div>
-                      <h3 className="text-sm font-semibold text-amber-200">
-                        Для запуска VPN требуется ядро sing-box.exe
-                      </h3>
-                      <p className="text-xs text-amber-300/80">
-                        Нажмите кнопку справа, чтобы клиент автоматически скачал последнюю официальную сборку sing-box для Windows с GitHub.
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    onClick={handleDownloadCore}
-                    disabled={downloadingCore}
-                    className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-semibold text-xs shrink-0 transition flex items-center gap-2"
-                  >
-                    <Download className="w-4 h-4" />
-                    {downloadingCore ? "Скачивание..." : "Скачать ядро (1 клик)"}
-                  </button>
-                </div>
+          !hasTunnelsOrVps ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-6 text-center select-none relative overflow-hidden">
+            {/* Subtle background glow behind the logo */}
+            <div className="w-56 h-56 rounded-full bg-cyan-500/10 blur-3xl absolute pointer-events-none" />
+
+            <div className="relative z-10 flex flex-col items-center max-w-[300px]">
+              <div className="w-28 h-28 rounded-3xl overflow-hidden bg-[#0d1424] border-2 border-cyan-500/40 p-2.5 shadow-2xl shadow-cyan-500/15 mb-5 flex items-center justify-center">
+                <img
+                  src={appIconLogo}
+                  alt="NeuroVeil VPN"
+                  className="w-full h-full object-contain rounded-2xl pointer-events-none"
+                />
+              </div>
+
+              <h1 className="text-2xl font-extrabold tracking-tight text-white">
+                NeuroVeil VPN
+              </h1>
+              <div className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-[11px] font-mono font-bold text-cyan-300">
+                <span>Версия 2.0</span>
+              </div>
+
+              <p className="text-xs text-slate-400 mt-4 leading-relaxed">
+                Нет добавленных туннелей или VPS. Добавьте готовый файл конфигурации, ключ или разверните свой сервер в разделе <b className="text-slate-200">«Добавление и Автодеплой»</b>.
+              </p>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab("vps")}
+                className="mt-6 w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2 transition cursor-pointer keep-white"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Добавить туннель или VPS</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+        <div className="flex-1 flex flex-col p-3.5 gap-3 overflow-hidden h-full min-h-0">
+          {/* Missing Core Warning Banner (if sing-box is not downloaded yet) */}
+          {!status.singbox_installed && (
+            <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="text-[11px] font-semibold text-amber-200 truncate">
+                  Требуется ядро sing-box.exe
+                </span>
+              </div>
+              <button
+                onClick={handleDownloadCore}
+                disabled={downloadingCore}
+                className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-[11px] shrink-0 transition flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3 h-3" />
+                {downloadingCore ? "..." : "Скачать"}
+              </button>
+            </div>
+          )}
+
+          {/* 1. POWER / CONNECT BUTTON CARD */}
+          <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0 shadow-md">
+            <button
+              onClick={handleToggleConnect}
+              disabled={(connecting && !autoPortHunting) || reconnectCooldown}
+              className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
+                status.connected
+                  ? status.is_handshaking
+                    ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25"
+                    : "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25"
+                  : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 hover:from-cyan-900/40 hover:to-indigo-900/40 text-white border-slate-700 hover:border-cyan-500/50"
+              }`}
+            >
+              {status.connected && (
+                <div
+                  className={`absolute inset-0 ${
+                    status.is_handshaking ? "bg-amber-400/15" : "bg-emerald-400/10"
+                  } animate-pulse pointer-events-none`}
+                />
               )}
 
-              <div className="p-3.5 sm:p-4 rounded-2xl bg-[#111827] border border-slate-800/90 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch relative overflow-hidden">
-                {/* Left Column: Power Button, Reconnect & Speed Meter */}
-                <div className="col-span-1 lg:col-span-5 flex flex-col justify-between gap-2.5 lg:pr-4 lg:border-r lg:border-slate-800/80">
-                  {/* Modern Main Action Button - Stretches to match server list height */}
-                  <button
-                    onClick={handleToggleConnect}
-                    disabled={(connecting && !autoPortHunting) || reconnectCooldown}
-                    className={`w-full flex-1 min-h-[132px] py-3.5 rounded-xl px-4 flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white ${
-                      status.connected
-                        ? status.is_handshaking
-                          ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25 ring-1 ring-amber-500/30"
-                          : "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25 ring-1 ring-emerald-500/20"
-                        : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 hover:from-cyan-900/40 hover:to-indigo-900/40 text-white border-slate-700 hover:border-cyan-500/50"
-                    }`}
-                  >
-                    {status.connected && (
-                      <div
-                        className={`absolute inset-0 ${
-                          status.is_handshaking ? "bg-amber-400/15" : "bg-emerald-400/10"
-                        } animate-pulse pointer-events-none`}
-                      />
-                    )}
-
-                    <div className="flex items-center gap-3.5 relative z-10 w-full justify-between">
-                      <div className="flex items-center gap-3.5 min-w-0">
-                        <div
-                          className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
-                            status.connected
-                              ? status.is_handshaking
-                                ? "bg-amber-500 text-white shadow-amber-700/50"
-                                : "bg-emerald-500 text-white shadow-emerald-700/50"
-                              : "bg-slate-700/80 group-hover:bg-cyan-500 text-white"
-                          }`}
-                        >
-                          {connecting || autoPortHunting ? (
-                            <RefreshCw className="w-6 h-6 animate-spin text-cyan-300" />
-                          ) : status.connected ? (
-                            status.is_handshaking ? (
-                              <Activity className="w-6 h-6 animate-pulse text-amber-100" />
-                            ) : (
-                              <ShieldCheck className="w-6 h-6" />
-                            )
-                          ) : (
-                            <Shield className="w-6 h-6" />
-                          )}
-                        </div>
-                        <div className="text-left min-w-0">
-                          <div className="text-xs font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
-                            {autoPortHunting
-                              ? `Автоподбор порта (#${autoPortAttempt})`
-                              : connecting
-                              ? "Подождите..."
-                              : reconnectCooldown
-                              ? "Защитная пауза WireGuard"
-                              : status.connected
-                              ? status.is_handshaking
-                                ? "Рукопожатие WireGuard"
-                                : status.active_profile_name || "VPN Подключен"
-                              : "VPN Выключен"}
-                          </div>
-                          <div className="text-lg sm:text-xl font-extrabold tracking-wide text-white leading-tight truncate mt-1">
-                            {connecting && !autoPortHunting
-                              ? "ИНИЦИАЛИЗАЦИЯ..."
-                              : reconnectCooldown
-                              ? "ПАУЗА..."
-                              : status.connected
-                              ? status.is_handshaking
-                                ? "ОТКЛЮЧИТЬ"
-                                : "ОТКЛЮЧИТЬ"
-                              : "ПОДКЛЮЧИТЬСЯ"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 flex items-center gap-1.5 pl-2">
-                        <span
-                          className={`w-3 h-3 rounded-full ${
-                            status.connected
-                              ? status.is_handshaking
-                                ? "bg-amber-300 animate-ping"
-                                : "bg-emerald-300 shadow-[0_0_8px_#34d399]"
-                              : "bg-slate-500"
-                          }`}
-                        />
-                      </div>
-                    </div>
-                  </button>
-
-                  {(status.connected || autoPortHunting) && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={handleReconnect}
-                        disabled={connecting || reconnectCooldown || autoPortHunting}
-                        className="w-full py-1.5 px-2.5 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-xs font-semibold text-cyan-300 flex items-center justify-between gap-1.5 transition cursor-pointer disabled:opacity-50 min-w-0"
-                        title="Переподключить туннель и один раз сменить локальный UDP порт прослушивания (ListenPort)"
-                      >
-                        <span className="flex items-center gap-1.5 min-w-0">
-                          <RotateCcw className={`w-3.5 h-3.5 shrink-0 ${connecting && !autoPortHunting ? "animate-spin" : ""}`} />
-                          <span className="truncate">Переподкл.</span>
-                        </span>
-                        {status.active_listen_port && (
-                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 shrink-0">
-                            :{status.active_listen_port}
-                          </span>
-                        )}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={handleAutoPortHunt}
-                        disabled={reconnectCooldown && !autoPortHunting}
-                        className={`w-full py-1.5 px-2.5 rounded-xl border text-xs font-semibold flex items-center justify-between gap-1.5 transition cursor-pointer disabled:opacity-50 min-w-0 ${
-                          autoPortHunting
-                            ? "bg-amber-500/20 hover:bg-rose-500/25 border-amber-400/60 text-amber-200 animate-pulse"
-                            : "bg-[#0b101d] hover:bg-slate-800/90 border-emerald-500/35 hover:border-emerald-400/60 text-emerald-300"
-                        }`}
-                        title={
-                          autoPortHunting
-                            ? "Нажмите, чтобы остановить автоматический перебор портов"
-                            : "Автоматически перебирать порты (ListenPort), пока не установится подключение"
-                        }
-                      >
-                        <span className="flex items-center gap-1.5 min-w-0">
-                          <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${autoPortHunting ? "animate-spin text-amber-300" : "text-emerald-400"}`} />
-                          <span className="truncate">
-                            {autoPortHunting ? `Стоп (#${autoPortAttempt})` : "Автоподбор"}
-                          </span>
-                        </span>
-                        {autoPortHunting && status.active_listen_port && (
-                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 shrink-0">
-                            :{status.active_listen_port}
-                          </span>
-                        )}
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Compact Live Speed Meter */}
-                  <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800/80">
-                    <div className="px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
-                      <Download className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[9px] text-slate-400 leading-none">Входящий</div>
-                        <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
-                          {formatBytes(status.down_speed)}/с
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-800/70 flex items-center gap-1.5 min-w-0">
-                      <Upload className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                      <div className="min-w-0">
-                        <div className="text-[9px] text-slate-400 leading-none">Исходящий</div>
-                        <div className="text-[11px] font-bold text-white whitespace-nowrap font-mono mt-0.5">
-                          {formatBytes(status.up_speed)}/с
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Right Column: Server & Protocol Selector (fits 4 tunnels comfortably) */}
-                <div className="col-span-1 lg:col-span-7 flex flex-col justify-between space-y-2.5 min-w-0 pt-2 lg:pt-0 border-t lg:border-t-0 border-slate-800/80">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5 shrink-0">
-                      <Layers className="w-3.5 h-3.5 text-cyan-400" />
-                      Выбранный сервер и протокол
-                    </span>
-                    <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-                      <button
-                        onClick={() => setActiveTab("profiles")}
-                        className="text-xs text-slate-400 hover:text-slate-200 font-medium transition cursor-pointer"
-                      >
-                        Управление ({effectiveDashboardProfiles.length})
-                      </button>
-                      <button
-                        onClick={() => setActiveTab("vps")}
-                        className="text-xs text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 cursor-pointer"
-                      >
-                        <Plus className="w-3.5 h-3.5" /> Добавить VPS
-                      </button>
-                    </div>
-                  </div>
-
-                  {!selectedProfile ? (
-                    <div className="flex-1 min-h-[228px] flex flex-col justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2">
-                      <p className="text-xs text-slate-400">
-                        Нет сохраненных профилей.
-                      </p>
-                      <div className="flex justify-center gap-2">
-                        <button
-                          onClick={() => setActiveTab("vps")}
-                          className="px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition"
-                        >
-                          Автодеплой
-                        </button>
-                        <button
-                          onClick={() => setActiveTab("profiles")}
-                          className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 transition"
-                        >
-                          Вручную
-                        </button>
-                      </div>
-                    </div>
+              <div className="flex items-center gap-3 relative z-10 min-w-0">
+                <div
+                  className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner ${
+                    status.connected
+                      ? status.is_handshaking
+                        ? "bg-amber-500 text-white shadow-amber-700/50"
+                        : "bg-emerald-500 text-white shadow-emerald-700/50"
+                      : "bg-slate-700/80 group-hover:bg-cyan-500 text-white"
+                  }`}
+                >
+                  {connecting || autoPortHunting ? (
+                    <RefreshCw className="w-6 h-6 animate-spin text-cyan-300" />
+                  ) : status.connected ? (
+                    status.is_handshaking ? (
+                      <Activity className="w-6 h-6 animate-pulse text-amber-100" />
+                    ) : (
+                      <ShieldCheck className="w-6 h-6" />
+                    )
                   ) : (
-                    <div className="min-h-[228px] max-h-[234px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar flex-1">
-                      {effectiveDashboardProfiles.map((p) => {
-                        const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
-                        const isLiveConnected = status.connected && status.active_profile_id === p.id;
-                        const shownListenPort =
-                          isLiveConnected && status.active_listen_port
-                            ? status.active_listen_port
-                            : p.listen_port;
-
-                        return (
-                          <div
-                            key={p.id}
-                            onClick={() => handleQuickSwitchProfile(p.id)}
-                            className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2.5 group ${
-                              isCurrentSelected
-                                ? "bg-cyan-500/10 border-cyan-500/60 shadow-sm ring-1 ring-cyan-500/30"
-                                : "bg-[#0b101d] border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              {renderProtocolBadge(p.protocol, p.awg_version)}
-
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
-                                  <span className="truncate">{p.name}</span>
-                                  {isLiveConnected && (
-                                    <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse font-mono font-medium shrink-0">
-                                      В эфире
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
-                                  <span>
-                                    {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
-                                  </span>
-                                  {(p.protocol === "amneziawg" || p.protocol === "awg_quic" || p.protocol === "awg2" || p.protocol === "wireguard") && shownListenPort && (
-                                    <span
-                                      className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 font-mono shrink-0"
-                                      title="Локальный порт прослушивания (ListenPort)"
-                                    >
-                                      Listen:{shownListenPort}
-                                    </span>
-                                  )}
-                                  <span
-                                    className="text-[9px] px-1 py-0.2 rounded bg-slate-900/90 text-cyan-300/90 border border-slate-700/80 font-mono hidden sm:inline-block shrink-0"
-                                    title={`Трафик: Отдано ${formatBytes(p.total_up_bytes || 0)}, Скачано ${formatBytes(p.total_down_bytes || 0)}`}
-                                  >
-                                    ↓{formatBytes(p.total_down_bytes || 0)} • ↑{formatBytes(p.total_up_bytes || 0)}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex items-center gap-2 shrink-0">
-                              {p.ping_ms != null ? (
-                                <span className="text-[10px] font-mono text-emerald-400 font-semibold">
-                                  {p.ping_ms} мс
-                                </span>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handlePingProfile(p.id);
-                                  }}
-                                  disabled={pingingId === p.id}
-                                  className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-slate-200 transition"
-                                >
-                                  {pingingId === p.id ? "..." : "Пинг"}
-                                </button>
-                              )}
-
-                              <div
-                                className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
-                                  isCurrentSelected
-                                    ? isLiveConnected
-                                      ? "border-emerald-400 bg-emerald-500"
-                                      : "border-cyan-400 bg-cyan-500"
-                                    : "border-slate-600 bg-transparent group-hover:border-slate-500"
-                                }`}
-                              >
-                                {isCurrentSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <Power className="w-6 h-6" />
                   )}
                 </div>
-              </div>
 
-              {/* ROUTING PRESETS QUICK SELECTOR (Dashboard) */}
-              <div className="p-4 rounded-2xl bg-[#111827] border border-cyan-500/30 shadow-[0_0_20px_-10px_rgba(6,182,212,0.15)] space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-400">
-                      <Bookmark className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
-                        <span>Предустановки маршрутизации</span>
-                        {status.connected && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 font-semibold animate-pulse">
-                            <Zap className="w-3 h-3" /> На лету ⚡
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-[11px] text-slate-400">
-                        Переключайте списки программ в 1 клик без смены конфигов и разрыва соединения
-                      </p>
-                    </div>
+                <div className="text-left min-w-0">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-300 group-hover:text-cyan-200 truncate">
+                    {autoPortHunting
+                      ? `Автоподбор порта (#${autoPortAttempt})`
+                      : connecting
+                      ? "Подождите..."
+                      : reconnectCooldown
+                      ? "Защитная пауза WireGuard"
+                      : status.connected
+                      ? status.is_handshaking
+                        ? "Рукопожатие туннеля..."
+                        : status.active_profile_name || "Туннель активен"
+                      : selectedProfile
+                      ? selectedProfile.name
+                      : "Туннель не выбран"}
                   </div>
-
-                  <div className="flex items-center gap-2">
-                    {status.connected && (
-                      <button
-                        type="button"
-                        onClick={handleApplyOnTheFly}
-                        disabled={isApplyingPreset}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition cursor-pointer"
-                        title="Применить текущие списки программ к работающему VPN"
-                      >
-                        <Zap className={`w-3.5 h-3.5 ${isApplyingPreset ? "animate-spin" : ""}`} />
-                        <span>Применить к VPN ⚡</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (selectedProfileId) switchRoutingProfile(selectedProfileId);
-                        setActiveTab("routing");
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1.5 transition cursor-pointer"
-                    >
-                      <span>Настройка правил →</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* Preset Chips */}
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  {routingPresets.map((pr) => {
-                    const isActive = activePresetId === pr.id;
-                    const totalCount =
-                      (pr.proxy_processes || []).length +
-                      (pr.direct_processes || []).length;
-                    return (
-                      <div
-                        key={pr.id}
-                        onClick={() => handleSelectPreset(pr)}
-                        className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
-                          isActive
-                            ? "bg-gradient-to-r from-cyan-600/25 to-indigo-600/25 border-cyan-400 text-white shadow-md shadow-cyan-500/20"
-                            : "bg-[#0b101d] border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white"
-                        }`}
-                      >
-                        {isActive ? (
-                          <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_#22d3ee] animate-pulse" />
-                        ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-600 group-hover:bg-slate-400" />
-                        )}
-                        {pr.id.includes("games") ? (
-                          <Gamepad2 className="w-3.5 h-3.5 text-emerald-400" />
-                        ) : pr.id.includes("discord") ? (
-                          <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
-                        ) : pr.id.includes("browser") ? (
-                          <Globe className="w-3.5 h-3.5 text-cyan-400" />
-                        ) : pr.id.includes("media") ? (
-                          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                        ) : (
-                          <Zap className="w-3.5 h-3.5 text-violet-400" />
-                        )}
-                        <span className="font-semibold">{pr.name}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 text-slate-400 border border-slate-800">
-                          {pr.default_outbound === "direct"
-                            ? "Только выбор"
-                            : "Весь трафик"}
-                        </span>
-                        <span className="text-[10px] font-mono text-cyan-400/90 font-bold">
-                          {totalCount}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeletePreset(pr.id);
-                          }}
-                          className="ml-1 text-slate-500 hover:text-rose-400 p-0.5 opacity-60 group-hover:opacity-100 transition"
-                          title="Удалить пресет"
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Active Preset Description Banner */}
-                <div className="pt-1.5 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/80">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-cyan-400 font-medium shrink-0">Активный профиль:</span>
-                    <span className="text-slate-300 truncate">
-                      {routingPresets.find((p) => p.id === activePresetId)?.description ||
-                        routingPresets.find((p) => p.id === activePresetId)?.name ||
-                        "По умолчанию"}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleResetPresets}
-                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-auto"
-                    title="Сбросить все предустановки к исходным стандартным"
-                  >
-                    Восстановить стандартные
-                  </button>
-                </div>
-              </div>
-
-
-            </div>
-
-            {/* Bottom Live Core Logs - Anchored to bottom edge */}
-            <div className="p-4 rounded-2xl bg-[#0d1322] border border-slate-800/90 space-y-2 mt-auto shrink-0 w-full">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-slate-400 flex items-center gap-2 shrink-0">
-                  <Terminal className="w-4 h-4 text-cyan-400" /> Журнал ядра sing-box
-                </span>
-                <div className="flex items-center gap-2.5 sm:gap-3 shrink-0">
-                  <button
-                    type="button"
-                    onClick={handleExportCoreLogs}
-                    className="flex items-center gap-1.5 text-[11px] text-cyan-400 hover:text-cyan-300 font-medium transition cursor-pointer"
-                    title="Сформировать файл логов и выбрать куда сохранить"
-                  >
-                    <FileDown className="w-3.5 h-3.5" />
-                    {t.exportLogsBtn}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => invoke("clear_core_logs")}
-                    className="text-[11px] text-slate-500 hover:text-slate-300 transition cursor-pointer"
-                  >
-                    {t.clearLogsBtn}
-                  </button>
-                </div>
-              </div>
-              <div className="h-32 overflow-y-auto font-mono text-[11px] text-slate-300 bg-[#070a12] p-3 rounded-xl border border-slate-800/60 space-y-1 select-text">
-                {status.logs.length === 0 ? (
-                  <div className="text-slate-600">Логи пусты...</div>
-                ) : (
-                  status.logs.map((line, idx) => (
-                    <div key={idx} className="leading-relaxed break-all">
-                      {line}
-                    </div>
-                  ))
-                )}
-                <div ref={coreLogEndRef} />
-              </div>
-            </div>
-
-          </div>
-        )}
-
-        {/* TAB 2: VPS AUTO-DEPLOY & CLEANER */}
-        {activeTab === "vps" && (
-          <div className="flex-1 overflow-y-auto p-6 flex flex-col justify-between h-full min-h-0 space-y-6 animate-tab-enter">
-            <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-                    <Server className="w-6 h-6 text-cyan-400" />
-                    Управление VPS-сервером по SSH
-                  </h2>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Автоматическая установка и настройка защищенных протоколов (SSH Tunnel, VLESS Reality, Amnezia 3.1, Hysteria 2, TUIC) на Linux VPS и полная очистка в 1 клик.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-5 lg:gap-6">
-                {/* Left Column: Server Credentials, Actions & Automation Info (5 cols) */}
-                <div className="col-span-1 xl:col-span-5 space-y-5">
-                  {/* Card 1: Server SSH Parameters */}
-                  <div className="p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
-                    <Server className="w-3.5 h-3.5 text-cyan-400" />
-                    1. Параметры сервера VPS (SSH)
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={handleTestMainServer}
-                    disabled={mainCheckStatus.busy || vpsBusy !== "idle"}
-                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/50 text-[11px] font-semibold text-amber-300 disabled:opacity-50 transition flex items-center gap-1.5 shadow-sm shadow-amber-500/10 cursor-pointer"
-                  >
-                    <Wifi className="w-3 h-3 text-amber-400" />
-                    {mainCheckStatus.busy ? "Проверка..." : "Проверить доступность"}
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="col-span-2">
-                    <label className="block text-xs text-slate-400 mb-1">
-                      IP-адрес или домен VPS
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="Например: 185.22.14.99 (Финляндия)"
-                      value={vpsCreds.host}
-                      onChange={(e) =>
-                        setVpsCreds({ ...vpsCreds, host: e.target.value })
-                      }
-                      className="w-full px-3.5 py-2 rounded-xl bg-[#0b101d] border border-slate-700/80 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">
-                      SSH Порт
-                    </label>
-                    <input
-                      type="number"
-                      value={vpsCreds.ssh_port}
-                      onChange={(e) =>
-                        setVpsCreds({
-                          ...vpsCreds,
-                          ssh_port: Number(e.target.value) || 22,
-                        })
-                      }
-                      className="w-full px-3.5 py-2 rounded-xl bg-[#0b101d] border border-slate-700/80 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">
-                      Логин SSH
-                    </label>
-                    <input
-                      type="text"
-                      value={vpsCreds.username}
-                      onChange={(e) =>
-                        setVpsCreds({ ...vpsCreds, username: e.target.value })
-                      }
-                      className="w-full px-3.5 py-2 rounded-xl bg-[#0b101d] border border-slate-700/80 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-slate-400 mb-1">
-                      Пароль root / SSH
-                    </label>
-                    <div className="relative">
-                      <input
-                        type={showVpsPassword ? "text" : "password"}
-                        placeholder="••••••••••••"
-                        value={vpsCreds.password}
-                        onChange={(e) =>
-                          setVpsCreds({ ...vpsCreds, password: e.target.value })
-                        }
-                        className="w-full pl-3.5 pr-9 py-2 rounded-xl bg-[#0b101d] border border-slate-700/80 text-sm text-white focus:border-cyan-500 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowVpsPassword(!showVpsPassword)}
-                        className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-200"
-                      >
-                        {showVpsPassword ? (
-                          <EyeOff className="w-4 h-4" />
-                        ) : (
-                          <Eye className="w-4 h-4" />
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">
-                    Локальный прокси для SSH (опционально, если ТСПУ блокирует 22 порт)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Оставьте пустым или укажите напр. 127.0.0.1:10808"
-                    value={vpsCreds.ssh_proxy || ""}
-                    onChange={(e) =>
-                      setVpsCreds({ ...vpsCreds, ssh_proxy: e.target.value })
-                    }
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-white focus:border-cyan-500 focus:outline-none"
-                  />
-                </div>
-
-                {mainCheckStatus.result && (
-                  <div className="flex items-center gap-2 p-2.5 rounded-xl bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 text-[11px] animate-fadeIn">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                    <span className="truncate"><b>Основной VPS доступен:</b> {mainCheckStatus.result}</span>
-                  </div>
-                )}
-                    {mainCheckStatus.error && (
-                      <div className="flex items-center gap-2 p-2.5 rounded-xl bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[11px] animate-fadeIn">
-                        <XCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                        <span className="truncate"><b>Основной VPS недоступен:</b> {mainCheckStatus.error}</span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Card 2: Control and Deploy Action Buttons */}
-                  <div className="p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                      Управление и выполнение
-                    </h3>
-                    <div className="flex gap-2.5">
-                      <button
-                        onClick={handleTestSsh}
-                        disabled={vpsBusy !== "idle"}
-                        style={{ color: "#ffffff" }}
-                        className="px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-yellow-600 hover:from-amber-400 hover:to-yellow-500 border border-amber-400/50 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-amber-500/25 transition flex items-center justify-center gap-2 cursor-pointer"
-                      >
-                        <Wifi className="w-4 h-4 text-white" />
-                        {vpsBusy === "testing" ? "Проверка..." : "Проверить SSH"}
-                      </button>
-
-                      <button
-                        onClick={handleDeployVps}
-                        disabled={vpsBusy !== "idle"}
-                        style={{ color: "#ffffff" }}
-                        className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/40 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-emerald-600/25 transition flex items-center justify-center gap-2 cursor-pointer"
-                      >
-                        <Zap className="w-4 h-4 text-white" />
-                        {vpsBusy === "deploying"
-                          ? "Развертывание на VPS..."
-                          : "Развернуть VPN на сервере"}
-                      </button>
-                    </div>
-
-                    <button
-                      onClick={() => setConfirmCleanModal(true)}
-                      disabled={vpsBusy !== "idle"}
-                      className="w-full py-2.5 px-4 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 disabled:opacity-50 text-xs font-semibold text-rose-300 transition flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      <Trash2 className="w-4 h-4 text-rose-400" />
-                      {vpsBusy === "cleaning"
-                        ? "Очистка сервера..."
-                        : "Очистить сервер (удалить VPN и конфиги с VPS)"}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Right Column: Protocol Selection & Detailed Parameters (7 cols) */}
-                <div className="col-span-1 xl:col-span-7 p-5 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
-                        <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                        2. Выбор протоколов для развертывания (Обход блокировок)
-                      </h3>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        Отметьте нужные протоколы. Для 100% стабильной работы рекомендуются <b>SSH Tunnel</b>, <b>VLESS Reality</b>, <b>Amnezia 3.1</b> и спецпротоколы <b>AWG + QUIC Pre-Warm / Гибрид AWG + Reality</b>.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3.5">
-
-                  {/* Protocol 0: SSH Tunnel */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_ssh
-                        ? "bg-violet-950/20 border-violet-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_ssh ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_ssh: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-violet-500 focus:ring-violet-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>SSH Tunnel (порт 22 • Direct TCP/IP)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-violet-500/20 text-violet-300 font-semibold border border-violet-500/30">
-                              ⚡ 100% обход кабельного DPI
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Прямой туннель к порту 22 VPS. Российский ТСПУ никогда не трогает SSH. Вся веб-активность и DNS шифруются внутри SSH.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-                  </div>
-
-                  {/* Protocol 1: VLESS Reality */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_vless
-                        ? "bg-emerald-950/20 border-emerald-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_vless}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_vless: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>VLESS Reality + Anti-DPI TLS Фрагментация</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
-                              🛡️ Обход ТСПУ на кабельных провайдерах
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            TCP порт 443. Маскируется под браузер Chrome и сайт Microsoft. Пакет ClientHello разбивается на фрагменты (RFC 5246/8446), обходя проверку SNI/IP на кабельном интернете (Ростелеком, Дом.ru).
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_vless && (
-                      <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-emerald-500/20">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">
-                            Порт VLESS Reality (TCP)
-                          </label>
-                          <input
-                            type="number"
-                            value={vpsCreds.vless_port || 443}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                vless_port: Number(e.target.value) || 443,
-                              })
-                            }
-                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">
-                            SNI маскировки Reality
-                          </label>
-                          <input
-                            type="text"
-                            value={vpsCreds.reality_sni || "www.microsoft.com"}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                reality_sni: e.target.value,
-                              })
-                            }
-                            placeholder="www.microsoft.com"
-                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 2: Hysteria 2 */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_hy2
-                        ? "bg-cyan-950/20 border-cyan-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_hy2}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_hy2: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>Hysteria 2</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-cyan-500/20 text-cyan-300 font-semibold border border-cyan-500/30">
-                              ⚡ Сверхскорость по UDP
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Кастомный QUIC-протокол. Максимальная скорость и устойчивость к потере пакетов на мобильных сетях.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_hy2 && (
-                      <div className="space-y-2.5 mt-3 pt-3 border-t border-cyan-500/20">
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Порт Hysteria 2 (UDP)
-                            </label>
-                            <input
-                              type="number"
-                              value={vpsCreds.hy2_port}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  hy2_port: Number(e.target.value) || 8443,
-                                })
-                              }
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              SNI маскировки TLS
-                            </label>
-                            <input
-                              type="text"
-                              value={vpsCreds.sni}
-                              onChange={(e) =>
-                                setVpsCreds({ ...vpsCreds, sni: e.target.value })
-                              }
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer pt-1">
-                          <input
-                            type="checkbox"
-                            checked={vpsCreds.enable_salamander}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                enable_salamander: e.target.checked,
-                              })
-                            }
-                            className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                          />
-                          <span>
-                            Включить обфускацию <b>Salamander</b> (скрывает QUIC-заголовки)
-                          </span>
-                        </label>
-
-                        <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={vpsCreds.enable_port_hopping ?? true}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                enable_port_hopping: e.target.checked,
-                              })
-                            }
-                            className="rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                          />
-                          <span>
-                            Включить <b>Port Hopping (20000-50000) + Порт 53 DNS</b> (прыжки по портам)
-                          </span>
-                        </label>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 3: TUIC v5 */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_tuic
-                        ? "bg-purple-950/20 border-purple-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_tuic}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_tuic: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-purple-500 focus:ring-purple-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>TUIC v5</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 font-semibold border border-purple-500/30">
-                              Альтернативный QUIC
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Оптимален для мобильных клиентов Hiddify / v2rayNG на смартфонах.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_tuic && (
-                      <div className="mt-3 pt-3 border-t border-purple-500/20">
-                        <label className="block text-[11px] text-slate-400 mb-1">
-                          Порт TUIC v5 (UDP)
-                        </label>
-                        <input
-                          type="number"
-                          value={vpsCreds.tuic_port}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              tuic_port: Number(e.target.value) || 9443,
-                            })
-                          }
-                          className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-purple-500 focus:outline-none"
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 4: Shadowsocks */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_ss
-                        ? "bg-amber-950/20 border-amber-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_ss}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_ss: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-amber-500 focus:ring-amber-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>Shadowsocks</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-semibold border border-amber-500/30">
-                              Классический TCP/UDP прокси
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Поддерживает Shadowsocks-2022 и классические AEAD шифры (Outline, sing-box, Shadowrocket, Clash).
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_ss && (
-                      <div className="mt-3 pt-3 border-t border-amber-500/20 grid grid-cols-2 gap-3">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">
-                            Порт Shadowsocks (TCP/UDP)
-                          </label>
-                          <input
-                            type="number"
-                            value={vpsCreds.ss_port}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                ss_port: Number(e.target.value) || 8388,
-                              })
-                            }
-                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-amber-500 focus:outline-none"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">
-                            Метод шифрования
-                          </label>
-                          <select
-                            value={vpsCreds.ss_method}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                ss_method: e.target.value,
-                              })
-                            }
-                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-amber-500 focus:outline-none"
-                          >
-                            <option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm (SS 2022)</option>
-                            <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm (SS 2022)</option>
-                            <option value="aes-256-gcm">aes-256-gcm (AEAD классик)</option>
-                            <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
-                          </select>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 5: Amnezia 3.1 (AWG 3.1) */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_awg
-                        ? "bg-emerald-950/20 border-emerald-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_awg}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_awg: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>Amnezia 3.1 (AWG 3.1)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30">
-                              Header Protection + 32-bit H1-H4 + Port Hunting
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Новейшая спецификация Amnezia 3.1: шифрование заголовков ChaCha20 (HeaderProtectionKey), мусорные пакеты (Jc), неколлидирующие сдвиги (S1-S4 ≥ 12), 32-битные заголовки H1-H4 и обход DPI.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_awg && (
-                      <div className="mt-3 pt-3 border-t border-emerald-500/20 space-y-3.5">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-emerald-300">Настройки и функции Amnezia 3.1</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono">
-                              Спецификация v3.1 + Anti-DPI
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const r = generateRandomAwg31Params();
-                              const newPort = getRandomInt(21000, 55000);
-                              setVpsCreds({
-                                ...vpsCreds,
-                                ...r,
-                                awg_port: newPort,
-                              });
-                              showNotice("success", `Сгенерированы параметры AWG 3.1 и порт UDP ${newPort}!`);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
-                            title="Сгенерировать случайные параметры обфускации и порт"
-                          >
-                            🎲 Сгенерировать параметры и порт
-                          </button>
-                        </div>
-
-                        <div className="p-2.5 rounded-lg bg-emerald-950/25 border border-emerald-500/20 text-[11px] text-emerald-300/90 flex items-center gap-2">
-                          <Sparkles className="w-3.5 h-3.5 flex-shrink-0 text-emerald-400" />
-                          <span>При каждом нажатии <b>«Развернуть VPN на сервере»</b> порт (не 51820) и все параметры обфускации генерируются автоматически для обхода фильтров провайдера.</span>
-                        </div>
-
-                        {/* Feature Toggles (Галочки функций) */}
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 pt-1">
-                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#070b14] border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={vpsCreds.awg_disable_cookies ?? true}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_disable_cookies: e.target.checked,
-                                })
-                              }
-                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-                            />
-                            <div className="text-left min-w-0">
-                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
-                                <span>Отключить Cookies</span>
-                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-mono">Anti-DPI</span>
-                              </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                                Запрещает серверу слать Type 3 Cookie Reply. Блокирует активное сканирование DPI РКН.
-                              </p>
-                            </div>
-                          </label>
-
-                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#070b14] border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={vpsCreds.awg_random_trailers ?? true}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_random_trailers: e.target.checked,
-                                })
-                              }
-                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-                            />
-                            <div className="text-left min-w-0">
-                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
-                                <span>Случайный паддинг</span>
-                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-mono">Trailers</span>
-                              </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                                Добавляет случайные энтропийные хвосты, маскируя размеры пакетов от эвристического анализа DPI.
-                              </p>
-                            </div>
-                          </label>
-
-                          <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-[#070b14] border border-slate-800 hover:border-emerald-500/40 cursor-pointer transition">
-                            <input
-                              type="checkbox"
-                              checked={vpsCreds.awg_port_probing ?? true}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_port_probing: e.target.checked,
-                                })
-                              }
-                              className="mt-0.5 w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
-                            />
-                            <div className="text-left min-w-0">
-                              <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
-                                <span>Авто-пробинг портов</span>
-                                <span className="text-[9px] px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 font-mono">Port Probing</span>
-                              </div>
-                              <p className="text-[10px] text-slate-400 mt-0.5 leading-tight">
-                                Клиент автоматически зондирует и переключает порты из пула Port Hunting при глушении трафика.
-                              </p>
-                            </div>
-                          </label>
-                        </div>
-
-                        {/* Ports */}
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Основной порт Amnezia 3.1 (UDP)
-                            </label>
-                            <input
-                              type="number"
-                              value={vpsCreds.awg_port}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_port: Number(e.target.value) || 0,
-                                })
-                              }
-                              placeholder="Случайный порт UDP (20000-55000)"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Диапазон авто-подбора портов (Port Hunting)
-                            </label>
-                            <input
-                              type="text"
-                              value={vpsCreds.awg_hop_ports}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_hop_ports: e.target.value,
-                                })
-                              }
-                              placeholder="20000:65000"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-
-                        {/* Obfuscation parameters */}
-                        <div className="grid grid-cols-4 gap-2 pt-1 text-[11px]">
-                          <div>
-                            <span className="text-slate-400 block mb-0.5">Jc (Мусорные пакеты)</span>
-                            <input
-                              type="number"
-                              value={vpsCreds.awg_jc ?? 5}
-                              onChange={(e) => setVpsCreds({ ...vpsCreds, awg_jc: Number(e.target.value) || 5 })}
-                              className="w-full px-2 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-xs"
-                            />
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block mb-0.5">Jmin / Jmax (размер)</span>
-                            <div className="flex items-center gap-1">
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_jmin ?? 10}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_jmin: Number(e.target.value) || 10 })}
-                                className="w-full px-1.5 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-xs"
-                              />
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_jmax ?? 50}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_jmax: Number(e.target.value) || 50 })}
-                                className="w-full px-1.5 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-xs"
-                              />
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block mb-0.5">S1-S4 (≥ 12 байт)</span>
-                            <div className="grid grid-cols-4 gap-0.5">
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_s1 ?? 12}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_s1: Math.max(12, Number(e.target.value) || 12) })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_s2 ?? 12}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_s2: Math.max(12, Number(e.target.value) || 12) })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_s3 ?? 12}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_s3: Math.max(12, Number(e.target.value) || 12) })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="number"
-                                value={vpsCreds.awg_s4 ?? 12}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_s4: Math.max(12, Number(e.target.value) || 12) })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                            </div>
-                          </div>
-                          <div>
-                            <span className="text-slate-400 block mb-0.5">H1-H4 (32-bit Random)</span>
-                            <div className="grid grid-cols-4 gap-0.5">
-                              <input
-                                type="text"
-                                value={vpsCreds.awg_h1 ?? "1"}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_h1: e.target.value })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="text"
-                                value={vpsCreds.awg_h2 ?? "2"}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_h2: e.target.value })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="text"
-                                value={vpsCreds.awg_h3 ?? "3"}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_h3: e.target.value })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                              <input
-                                type="text"
-                                value={vpsCreds.awg_h4 ?? "4"}
-                                onChange={(e) => setVpsCreds({ ...vpsCreds, awg_h4: e.target.value })}
-                                className="w-full px-1 py-1 rounded bg-[#070b14] border border-slate-700 text-white text-[11px] text-center"
-                              />
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Collapsible Advanced Session Timings & HPK */}
-                        <div className="pt-2 border-t border-slate-800/80">
-                          <button
-                            type="button"
-                            onClick={() => setShowAwgAdvanced(!showAwgAdvanced)}
-                            className="text-xs font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1.5 transition cursor-pointer"
-                          >
-                            <span>{showAwgAdvanced ? "▲ Скрыть расширенные параметры сессии" : "▼ Расширенные параметры сессии и HPK (v3.1)"}</span>
-                            <span className="text-[10px] text-slate-500">
-                              (Rekey, Keepalive, Reject Time, HPK)
-                            </span>
-                          </button>
-
-                          {showAwgAdvanced && (
-                            <div className="mt-3 p-3 rounded-xl bg-[#060c18] border border-slate-800 space-y-3">
-                              <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5 text-[11px]">
-                                <div>
-                                  <label className="text-slate-400 block mb-1">
-                                    Rekey After Time
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={vpsCreds.awg_rekey_after_time ?? "90-120"}
-                                    onChange={(e) => setVpsCreds({ ...vpsCreds, awg_rekey_after_time: e.target.value })}
-                                    placeholder="90-120"
-                                    className="w-full px-2 py-1.5 rounded bg-[#070b14] border border-slate-700 text-white text-xs font-mono"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-slate-400 block mb-1">
-                                    Rekey Timeout
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={vpsCreds.awg_rekey_timeout ?? "3-6"}
-                                    onChange={(e) => setVpsCreds({ ...vpsCreds, awg_rekey_timeout: e.target.value })}
-                                    placeholder="3-6"
-                                    className="w-full px-2 py-1.5 rounded bg-[#070b14] border border-slate-700 text-white text-xs font-mono"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-slate-400 block mb-1">
-                                    Reject After Time
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={vpsCreds.awg_reject_after_time ?? "150-180"}
-                                    onChange={(e) => setVpsCreds({ ...vpsCreds, awg_reject_after_time: e.target.value })}
-                                    placeholder="150-180"
-                                    className="w-full px-2 py-1.5 rounded bg-[#070b14] border border-slate-700 text-white text-xs font-mono"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-slate-400 block mb-1">
-                                    Keepalive Timeout
-                                  </label>
-                                  <input
-                                    type="text"
-                                    value={vpsCreds.awg_keepalive_timeout ?? "15-25"}
-                                    onChange={(e) => setVpsCreds({ ...vpsCreds, awg_keepalive_timeout: e.target.value })}
-                                    placeholder="15-25"
-                                    className="w-full px-2 py-1.5 rounded bg-[#070b14] border border-slate-700 text-white text-xs font-mono"
-                                  />
-                                </div>
-                              </div>
-
-                              <div>
-                                <label className="text-slate-400 block mb-1 text-[11px]">
-                                  Header Protection Key (HPK — 32 байта base64)
-                                </label>
-                                <div className="flex gap-2">
-                                  <input
-                                    type="text"
-                                    value={vpsCreds.awg_header_protection_key ?? ""}
-                                    onChange={(e) => setVpsCreds({ ...vpsCreds, awg_header_protection_key: e.target.value })}
-                                    placeholder="Автоматически генерируется при деплое"
-                                    className="flex-1 px-2.5 py-1.5 rounded bg-[#070b14] border border-slate-700 text-white text-xs font-mono"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => setVpsCreds({ ...vpsCreds, awg_header_protection_key: getRandomBase64Key() })}
-                                    className="px-2.5 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-semibold transition"
-                                  >
-                                    🎲 Сгенерировать
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Special Protocol 5A: AWG + QUIC Pre-Warm (Option 1) */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_awg_quic ?? true
-                        ? "bg-sky-950/20 border-sky-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_awg_quic ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_awg_quic: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-sky-500 focus:ring-sky-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
-                            <span>Спецпротокол: AWG + QUIC Pre-Warm (Мимикрия STUN / QUIC v1)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-sky-500/20 text-sky-300 font-semibold border border-sky-500/30">
-                              ⚡ Ослепление ТСПУ на старте сессии
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Отправляет WebRTC STUN Binding Request (RFC 5389) и QUIC v1 Initial (RFC 9000, 1200 байт) с рабочего <code>ListenPort</code> за 15 мс до рукопожатия AmneziaWG. Автоматически разворачивает серверный стек AWG 3.1.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {(vpsCreds.deploy_awg_quic ?? true) && (
-                      <div className="mt-3 pt-3 border-t border-sky-500/20 space-y-3">
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-bold text-sky-300">Стек протоколов внутри развертывания:</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">
-                              ✓ Сервер Amnezia 3.1 (HPK + 32-bit H1-H4)
-                            </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/20 text-sky-300 border border-sky-500/30 font-mono">
-                              ✓ Клиент STUN + QUIC v1 Pre-Warm
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const r = generateRandomAwg31Params();
-                              const newPort = getRandomInt(21000, 55000);
-                              setVpsCreds({
-                                ...vpsCreds,
-                                ...r,
-                                awg_port: newPort,
-                              });
-                              showNotice("success", `Сгенерированы параметры AWG + QUIC Pre-Warm (UDP ${newPort})!`);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-sky-600/30 hover:bg-sky-600/50 border border-sky-500/40 text-[11px] font-semibold text-sky-200 flex items-center gap-1 transition cursor-pointer"
-                          >
-                            🎲 Рандомизировать стек AWG
-                          </button>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Порт сервера AWG 3.1 (UDP)
-                            </label>
-                            <input
-                              type="number"
-                              value={vpsCreds.awg_port}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_port: Number(e.target.value) || 0,
-                                })
-                              }
-                              placeholder="Случайный порт UDP (20000-55000)"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-sky-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Пул портов Port Hunting (UDP)
-                            </label>
-                            <input
-                              type="text"
-                              value={vpsCreds.awg_hop_ports}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_hop_ports: e.target.value,
-                                })
-                              }
-                              placeholder="20000:65000"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-sky-500 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Special Protocol 5B: Hybrid AWG + VLESS Reality (Option 2) */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_awg_vless ?? true
-                        ? "bg-fuchsia-950/20 border-fuchsia-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_awg_vless ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_awg_vless: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-fuchsia-500 focus:ring-fuchsia-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
-                            <span>Спецпротокол: Гибрид AWG + VLESS Reality (TCP 443 Detour)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-fuchsia-500/20 text-fuchsia-300 font-semibold border border-fuchsia-500/30">
-                              🛡️ 100% защита рукопожатия AWG внутри TLS 1.3
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Инкапсулирует рукопожатие и поток AmneziaWG / WireGuard внутрь TLS 1.3 туннеля VLESS Reality (TCP 443, <code>xtls-rprx-vision</code> + <code>xudp</code>). Автоматически разворачивает на сервере оба протокола (VLESS Reality + Amnezia 3.1).
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {(vpsCreds.deploy_awg_vless ?? true) && (
-                      <div className="mt-3 pt-3 border-t border-fuchsia-500/20 space-y-3">
-                        <div className="flex items-center justify-between flex-wrap gap-2">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-bold text-fuchsia-300">Стек протоколов внутри развертывания:</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">
-                              ✓ VLESS Reality (TCP {vpsCreds.vless_port || 443})
-                            </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 font-mono">
-                              ✓ Amnezia 3.1 (UDP {vpsCreds.awg_port || "Auto"})
-                            </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
-                              ✓ Detour: AWG over Reality
-                            </span>
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Порт VLESS Reality (TCP)
-                            </label>
-                            <input
-                              type="number"
-                              value={vpsCreds.vless_port || 443}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  vless_port: Number(e.target.value) || 443,
-                                })
-                              }
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              SNI маскировки Reality
-                            </label>
-                            <input
-                              type="text"
-                              value={vpsCreds.reality_sni || "www.microsoft.com"}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  reality_sni: e.target.value,
-                                })
-                              }
-                              placeholder="www.microsoft.com"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-slate-400 mb-1">
-                              Внутренний порт AWG 3.1 (UDP)
-                            </label>
-                            <input
-                              type="number"
-                              value={vpsCreds.awg_port}
-                              onChange={(e) =>
-                                setVpsCreds({
-                                  ...vpsCreds,
-                                  awg_port: Number(e.target.value) || 0,
-                                })
-                              }
-                              placeholder="Случайный UDP"
-                              className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-fuchsia-500 focus:outline-none"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 6: AmneziaWG 2.0 (AWG 2.0) */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_awg2
-                        ? "bg-teal-950/20 border-teal-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_awg2 ?? false}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_awg2: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-teal-500 focus:ring-teal-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>AmneziaWG 2.0 (AWG 2.0)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-teal-500/20 text-teal-300 font-semibold border border-teal-500/30">
-                              Чистый конфиг • MTU 1420
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Чистая WireGuard-совместимая конфигурация (PrivateKey, Address, DNS, MTU 1420, PublicKey, PresharedKey, AllowedIPs, Endpoint) без лишних заголовков и параметров обфускации.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_awg2 && (
-                      <div className="mt-3 pt-3 border-t border-teal-500/20 space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-teal-300">Настройки AmneziaWG 2.0</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-teal-500/20 text-teal-300 border border-teal-500/40 font-mono">
-                              Standard UDP • PresharedKey • MTU 1420
-                            </span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const newPort = getRandomInt(21000, 55000);
-                              setVpsCreds({
-                                ...vpsCreds,
-                                awg2_port: newPort,
-                              });
-                              showNotice("success", `Выбран случайный порт AWG 2.0: UDP ${newPort}!`);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-teal-600/30 hover:bg-teal-600/50 border border-teal-500/40 text-[11px] font-semibold text-teal-300 flex items-center gap-1 transition cursor-pointer"
-                            title="Сгенерировать случайный UDP порт"
-                          >
-                            🎲 Случайный порт
-                          </button>
-                        </div>
-
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">
-                            Основной порт AmneziaWG 2.0 (UDP)
-                          </label>
-                          <input
-                            type="number"
-                            value={vpsCreds.awg2_port || ""}
-                            onChange={(e) =>
-                              setVpsCreds({
-                                ...vpsCreds,
-                                awg2_port: Number(e.target.value) || 0,
-                              })
-                            }
-                            placeholder="Случайный порт UDP (20000-55000)"
-                            className="w-full px-3 py-1.5 rounded-lg bg-[#070b14] border border-slate-700 text-xs text-white focus:border-teal-500 focus:outline-none"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 7: ShadowTLS v3 */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_shadowtls
-                        ? "bg-pink-950/20 border-pink-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_shadowtls ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_shadowtls: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-pink-500 focus:ring-pink-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>ShadowTLS v3 (L7 Паразитическая мимикрия)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-pink-500/20 text-pink-300 font-semibold border border-pink-500/30">
-                              🎭 Не детектируется ТСПУ
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Паразитирует на реальном TLS-рукопожатии сайта Microsoft/Apple. Имеет 100% защиту от активного зондирования (DPI не отличит от белого трафика).
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-                  </div>
-
-                  {/* Protocol 8: Cloudflare CDN WebSocket */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_vless_ws
-                        ? "bg-orange-950/20 border-orange-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_vless_ws ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_vless_ws: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-orange-500 focus:ring-orange-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>VLESS + WebSocket (Cloudflare CDN Shield)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-orange-500/20 text-orange-300 font-semibold border border-orange-500/30">
-                              ☁️ Защита от блокировки IP VPS
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Трафик может проксироваться через белый CDN (Cloudflare Workers/Edge). Если цензор заблокирует IP вашего VPS, соединение продолжит работать!
-                          </p>
-                        </div>
-                      </label>
-                    </div>
-
-                    {vpsCreds.deploy_vless_ws && (
-                      <div className="mt-3 pl-6 border-t border-slate-800/80 pt-2.5">
-                        <label className="block text-[11px] text-slate-400 mb-1">
-                          Домен Cloudflare Worker / CDN (опционально):
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="например: my-worker.username.workers.dev (или пусто для прямого IP)"
-                          value={vpsCreds.cdn_domain || ""}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              cdn_domain: e.target.value,
-                            })
-                          }
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-[#080d19] border border-orange-500/30 text-xs text-white placeholder-slate-600 focus:border-orange-500 focus:outline-none font-mono"
-                        />
-                        <span className="text-[10px] text-slate-500 mt-1 block">
-                          Если указан Worker, трафик пойдет через Cloudflare Edge, скрывая реальный IP сервера.
-                        </span>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Protocol 9: WebRTC Media Steganography */}
-                  <div
-                    className={`p-3.5 rounded-xl border transition ${
-                      vpsCreds.deploy_webrtc
-                        ? "bg-lime-950/20 border-lime-500/40"
-                        : "bg-[#0b101d] border-slate-800 opacity-60"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <label className="flex items-center gap-2.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={vpsCreds.deploy_webrtc ?? true}
-                          onChange={(e) =>
-                            setVpsCreds({
-                              ...vpsCreds,
-                              deploy_webrtc: e.target.checked,
-                            })
-                          }
-                          className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-lime-500 focus:ring-lime-500"
-                        />
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-2">
-                            <span>WebRTC Steganography (Маскировка под аудиозвонок)</span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-lime-500/20 text-lime-300 font-semibold border border-lime-500/30">
-                              🎙️ Потоковый Стелс
-                            </span>
-                          </div>
-                          <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
-                            Имитирует медиа-потоки мессенджеров (Telegram/Discord/Zoom). DPI видит обычный зашифрованный разговор и не трогает его.
-                          </p>
-                        </div>
-                      </label>
-                    </div>
+                  <div className="text-lg font-extrabold tracking-wide text-white leading-tight truncate mt-0.5">
+                    {connecting && !autoPortHunting
+                      ? "ПОДКЛЮЧЕНИЕ..."
+                      : reconnectCooldown
+                      ? "ПАУЗА..."
+                      : status.connected
+                      ? "ОТКЛЮЧИТЬ"
+                      : "ПОДКЛЮЧИТЬ"}
                   </div>
                 </div>
               </div>
-            </div>
-          </div>
 
-          {/* Bottom Live SSH Deployment Terminal (Anchored to bottom edge - like Dashboard!) */}
-          <div className="p-4 rounded-2xl bg-[#0d1322] border border-slate-800/90 space-y-2 mt-auto shrink-0 w-full">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-400 flex items-center gap-2">
-                <Terminal className="w-4 h-4 text-cyan-400" />
-                Терминал выполнения SSH и журнал развертывания
-              </span>
-              <div className="flex items-center gap-3">
-                {vpsBusy !== "idle" && (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 flex items-center gap-1 font-semibold animate-pulse font-mono">
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                    {vpsBusy === "deploying" ? "Развертывание..." : vpsBusy === "cleaning" ? "Очистка..." : "Тестирование..."}
+              <div className="shrink-0 flex flex-col items-end gap-1 relative z-10">
+                <span
+                  className={`w-3 h-3 rounded-full ${
+                    status.connected
+                      ? status.is_handshaking
+                        ? "bg-amber-300 animate-ping"
+                        : "bg-emerald-300 shadow-[0_0_8px_#34d399]"
+                      : "bg-slate-500"
+                  }`}
+                />
+                {selectedProfile && (
+                  <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
+                    {routing.mode === "tun" ? "TUN" : "Proxy"}
                   </span>
                 )}
+              </div>
+            </button>
+
+            {/* Quick Reconnect & Auto Port Hunt bar when connected */}
+            {(status.connected || autoPortHunting) && (
+              <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  onClick={() => setVpsLogs([])}
-                  className="text-[11px] text-slate-500 hover:text-slate-300 transition cursor-pointer"
+                  onClick={handleReconnect}
+                  disabled={connecting || reconnectCooldown || autoPortHunting}
+                  className="w-full py-1.5 px-2.5 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-[11px] font-semibold text-cyan-300 flex items-center justify-between gap-1 transition cursor-pointer disabled:opacity-50 min-w-0"
+                  title="Переподключить туннель и сменить локальный порт прослушивания (ListenPort)"
                 >
-                  Очистить вывод
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <RotateCcw className={`w-3 h-3 shrink-0 ${connecting && !autoPortHunting ? "animate-spin" : ""}`} />
+                    <span className="truncate">Переподкл.</span>
+                  </span>
+                  {status.active_listen_port && (
+                    <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 shrink-0">
+                      :{status.active_listen_port}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleAutoPortHunt}
+                  disabled={reconnectCooldown && !autoPortHunting}
+                  className={`w-full py-1.5 px-2.5 rounded-xl border text-[11px] font-semibold flex items-center justify-between gap-1 transition cursor-pointer disabled:opacity-50 min-w-0 ${
+                    autoPortHunting
+                      ? "bg-amber-500/20 hover:bg-rose-500/25 border-amber-400/60 text-amber-200 animate-pulse"
+                      : "bg-[#0b101d] hover:bg-slate-800/90 border-emerald-500/35 hover:border-emerald-400/60 text-emerald-300"
+                  }`}
+                  title={
+                    autoPortHunting
+                      ? "Остановить автоподбор портов"
+                      : "Автоматически перебирать порты (ListenPort) до установления соединения"
+                  }
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    <RefreshCw className={`w-3 h-3 shrink-0 ${autoPortHunting ? "animate-spin text-amber-300" : "text-emerald-400"}`} />
+                    <span className="truncate">
+                      {autoPortHunting ? `Стоп (#${autoPortAttempt})` : "Автоподбор"}
+                    </span>
+                  </span>
+                  {autoPortHunting && status.active_listen_port && (
+                    <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 shrink-0">
+                      :{status.active_listen_port}
+                    </span>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* Integrated Metrics Row (Download, Upload, Session/Profile Traffic) */}
+            <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-800/70">
+              <div className="px-2 py-1.5 rounded-xl bg-[#0b101d] border border-slate-800/70 flex items-center gap-2 min-w-0">
+                <div className="w-6 h-6 rounded-lg bg-cyan-500/10 border border-cyan-500/25 flex items-center justify-center shrink-0">
+                  <Download className="w-3 h-3 text-cyan-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[9px] text-slate-400 uppercase tracking-wider leading-none">Входящий</div>
+                  <div className="text-[11px] font-bold text-white font-mono truncate mt-0.5">
+                    {formatBytes(status.down_speed)}/с
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-2 py-1.5 rounded-xl bg-[#0b101d] border border-slate-800/70 flex items-center gap-2 min-w-0">
+                <div className="w-6 h-6 rounded-lg bg-indigo-500/10 border border-indigo-500/25 flex items-center justify-center shrink-0">
+                  <Upload className="w-3 h-3 text-indigo-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[9px] text-slate-400 uppercase tracking-wider leading-none">Исходящий</div>
+                  <div className="text-[11px] font-bold text-white font-mono truncate mt-0.5">
+                    {formatBytes(status.up_speed)}/с
+                  </div>
+                </div>
+              </div>
+
+              <div
+                onClick={() => invoke("open_popup_window", { mode: "logs" })}
+                className="px-2 py-1.5 rounded-xl bg-[#0b101d] border border-slate-800/70 hover:border-cyan-500/35 flex items-center gap-2 min-w-0 cursor-pointer transition"
+                title="Всего передано трафика по выбранному туннелю (нажмите для открытия журнала ядра)"
+              >
+                <div className="w-6 h-6 rounded-lg bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center shrink-0">
+                  <Activity className="w-3 h-3 text-emerald-400" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[9px] text-slate-400 uppercase tracking-wider leading-none">Трафик</div>
+                  <div className="text-[11px] font-bold text-emerald-300 font-mono truncate mt-0.5">
+                    {formatBytes((selectedProfile?.total_down_bytes || 0) + (selectedProfile?.total_up_bytes || 0))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* 3. SPLIT TUNNELING BUTTON & QUICK PRESET BAR (Кнопка раздельного туннелирования) */}
+          <div className="p-2.5 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0">
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedProfileId) switchRoutingProfile(selectedProfileId);
+                  setActiveTab("routing");
+                }}
+                className="split-tunnel-btn flex-1 flex items-center justify-between gap-2.5 px-3 py-2 rounded-xl transition cursor-pointer min-w-0 group"
+              >
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="split-tunnel-btn-icon p-1.5 rounded-lg shrink-0">
+                    <Globe className="w-4 h-4" />
+                  </div>
+                  <div className="text-left min-w-0">
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span className="truncate">Раздельное туннелирование</span>
+                      {status.connected && (
+                        <span
+                          className={`text-[9px] px-1.5 py-0.2 rounded-full border font-semibold shrink-0 ${
+                            isLightTheme
+                              ? "bg-emerald-600/15 text-emerald-700 border-emerald-600/35"
+                              : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                          }`}
+                        >
+                          ⚡ На лету
+                        </span>
+                      )}
+                    </div>
+                    <div className="split-tunnel-subtitle text-[10px] text-slate-400 truncate">
+                      {(selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling)
+                        ? `Активно: ${
+                            routingPresets.find((p) => p.id === activePresetId)?.name || "Выборочный обход"
+                          }`
+                        : "Весь трафик ПК идет через VPN"}
+                    </div>
+                  </div>
+                </div>
+                <span className="split-tunnel-btn-cta text-[11px] font-semibold group-hover:translate-x-0.5 transition shrink-0">
+                  Настроить →
+                </span>
+              </button>
+            </div>
+
+            {/* Horizontal scrollable quick routing preset chips */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 custom-scrollbar">
+              {routingPresets.map((pr) => {
+                const isActive = activePresetId === pr.id;
+                return (
+                  <button
+                    key={pr.id}
+                    type="button"
+                    onClick={() => handleSelectPreset(pr)}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-medium transition cursor-pointer shrink-0 flex items-center gap-1.5 ${
+                      isActive
+                        ? "bg-cyan-500/20 border-cyan-400 text-white shadow-sm"
+                        : "bg-[#0b101d] border-slate-800 text-slate-300 hover:text-white hover:border-slate-700"
+                    }`}
+                  >
+                    <span
+                      style={
+                        isActive
+                          ? {
+                              backgroundColor: "var(--color-accent)",
+                              boxShadow: "0 0 6px var(--color-accent-glow)",
+                            }
+                          : undefined
+                      }
+                      className={`w-1.5 h-1.5 rounded-full ${
+                        isActive ? "" : isLightTheme ? "bg-slate-400" : "bg-slate-600"
+                      }`}
+                    />
+                    <span>{pr.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 4. ADDED TUNNELS LIST (Добавленные туннели) */}
+          <div className="flex-1 flex flex-col p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block min-h-0 overflow-hidden">
+            <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-800/80 shrink-0">
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+                <Layers className="w-3.5 h-3.5 text-cyan-400" />
+                Добавленные туннели ({effectiveDashboardProfiles.length})
+              </span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("vps")}
+                  className="px-2 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 transition cursor-pointer flex items-center gap-1"
+                  title="Добавить конфиг, ссылку или развернуть VPS"
+                >
+                  <Plus className="w-3 h-3 text-cyan-400" />
+                  <span>Добавить / VPS</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("profiles")}
+                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-semibold text-slate-200 transition cursor-pointer flex items-center gap-1"
+                  title="Настройка конфигураций и устройств"
+                >
+                  <Sliders className="w-3 h-3 text-cyan-400" />
+                  <span>Настроить</span>
                 </button>
               </div>
             </div>
 
-            <div className="h-36 overflow-y-auto font-mono text-[11px] bg-[#060911] p-3 rounded-xl border border-slate-800/80 space-y-1 select-text custom-scrollbar">
-              {vpsLogs.length === 0 ? (
-                <div className="text-slate-600">Терминал готов к выполнению команд...</div>
-              ) : (
-                vpsLogs.map((log, index) => (
-                  <div
-                    key={index}
-                    className={`leading-relaxed break-all ${
-                      log.includes("ОШИБКА")
-                        ? "text-rose-400 font-semibold"
-                        : log.includes("Готово!") || log.includes("успешно") || log.includes("CLEAN_OK")
-                        ? "text-emerald-400 font-semibold"
-                        : log.includes("===")
-                        ? "text-cyan-300 font-semibold"
-                        : "text-slate-300"
-                    }`}
-                  >
-                    {log}
-                  </div>
-                ))
-              )}
-              <div ref={vpsLogEndRef} />
-            </div>
-          </div>
+            {!selectedProfile ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2.5">
+                <p className="text-xs text-slate-400">
+                  Нет добавленных туннелей на этом ПК. Импортируйте файл/ключ или разверните свой VPS.
+                </p>
+                <button
+                  onClick={() => setActiveTab("vps")}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white transition cursor-pointer"
+                >
+                  Добавление и Автодеплой
+                </button>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar min-h-0">
+                {effectiveDashboardProfiles.map((p) => {
+                  const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
+                  const isLiveConnected = status.connected && status.active_profile_id === p.id;
+                  const shownListenPort =
+                    isLiveConnected && status.active_listen_port
+                      ? status.active_listen_port
+                      : p.listen_port;
 
-          {/* Confirmation Modal for Server Clean */}
-            {confirmCleanModal && (
-              <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                <div className="max-w-md w-full p-6 rounded-2xl bg-[#111827] border border-rose-500/40 shadow-2xl space-y-4">
-                  <div className="flex items-center gap-3 text-rose-400">
-                    <AlertTriangle className="w-6 h-6 shrink-0" />
-                    <h3 className="text-base font-bold text-white">
-                      Подтвердите очистку сервера
-                    </h3>
-                  </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    Вы уверены, что хотите полностью удалить <b>sing-box</b>, все ключи, сертификаты (<code>/etc/sing-box</code>) и правила портов с сервера <b>{vpsCreds.host || "VPS"}</b>?
-                  </p>
-                  <div className="flex justify-end gap-3 pt-2">
-                    <button
-                      onClick={() => setConfirmCleanModal(false)}
-                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200"
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => handleQuickSwitchProfile(p.id)}
+                      className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2 group ${
+                        isCurrentSelected
+                          ? "bg-cyan-500/10 border-cyan-500/60 shadow-sm ring-1 ring-cyan-500/30"
+                          : "bg-[#0b101d] border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/40"
+                      }`}
                     >
-                      Отмена
-                    </button>
-                    <button
-                      onClick={handleCleanVps}
-                      className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white"
-                    >
-                      Да, очистить сервер
-                    </button>
-                  </div>
-                </div>
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        {renderProtocolBadge(p.protocol, p.awg_version)}
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                            <span className="truncate">{p.name}</span>
+                            {isLiveConnected && (
+                              <span
+                                className={`text-[9px] px-1.5 py-0.2 rounded-full border animate-pulse font-mono font-medium shrink-0 ${
+                                  isLightTheme
+                                    ? "bg-emerald-600/15 text-emerald-700 border-emerald-600/35"
+                                    : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                                }`}
+                              >
+                                ON
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
+                            <span className="truncate">
+                              {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
+                            </span>
+                            {(p.protocol === "amneziawg" ||
+                              p.protocol === "awg_quic" ||
+                              p.protocol === "awg2" ||
+                              p.protocol === "wireguard") &&
+                              shownListenPort && (
+                                <span
+                                  className={`text-[9px] px-1 py-0.2 rounded border font-mono shrink-0 ${
+                                    isLightTheme
+                                      ? "bg-emerald-600/10 text-emerald-700 border-emerald-600/35"
+                                      : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                                  }`}
+                                  title="Локальный порт прослушивания (ListenPort)"
+                                >
+                                  :{shownListenPort}
+                                </span>
+                              )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {p.ping_ms != null ? (
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePingProfile(p.id);
+                            }}
+                            className={`text-[10px] font-mono font-semibold hover:underline ${
+                              isLightTheme ? "text-emerald-700" : "text-emerald-400"
+                            }`}
+                            title="Нажмите для повторного пинга"
+                          >
+                            {p.ping_ms} мс
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePingProfile(p.id);
+                            }}
+                            disabled={pingingId === p.id}
+                            className="tunnel-ping-btn text-[9px] px-1.5 py-0.5 rounded transition cursor-pointer"
+                          >
+                            {pingingId === p.id ? "..." : "Пинг"}
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenEditModal(p);
+                          }}
+                          className="p-1 rounded-lg text-slate-400 hover:text-cyan-300 hover:bg-slate-800 transition"
+                          title="Настроить параметры туннеля"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+
+                        <div
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
+                            isCurrentSelected
+                              ? isLiveConnected
+                                ? "border-emerald-400 bg-emerald-500"
+                                : "border-cyan-400 bg-cyan-500"
+                              : "border-slate-600 bg-transparent group-hover:border-slate-500"
+                          }`}
+                        >
+                          {isCurrentSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
+          </div>
+        </div>
+          )
+        )}
 
+
+        {/* TAB 4: ДОБАВЛЕНИЕ КОНФИГУРАЦИЙ И АВТОДЕПЛОЙ VPS */}
+        {activeTab === "vps" && (
+          <div className="flex-1 overflow-y-auto p-4 flex flex-col justify-between h-full min-h-0 space-y-3 animate-tab-enter">
+            <div className="space-y-3">
+              {/* Section Header */}
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Server className="w-5 h-5 text-cyan-400" />
+                  Добавление конфигураций и Автодеплой
+                </h2>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Выберите способ добавления туннеля, развертывания или управления сервером.
+                </p>
+              </div>
+
+              {/* 4 Main Action Buttons */}
+              <div className="space-y-2.5 pt-0.5">
+                {/* 1. Добавить из файла -> напрямую Проводник Windows */}
+                <button
+                  type="button"
+                  onClick={handlePickConfigFile}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-cyan-500/35 hover:border-cyan-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-cyan-500/5"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/40 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition shrink-0">
+                      <FolderOpen className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-cyan-300 transition">
+                        Добавить из файла
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Выбрать файл конфигурации (.conf, .json, .txt) в Проводнике Windows
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-[11px] font-bold text-cyan-300 shrink-0">
+                    Выбрать
+                  </div>
+                </button>
+
+                {/* 2. Добавить VPS */}
+                <button
+                  type="button"
+                  onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-emerald-500/35 hover:border-emerald-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-emerald-500/5"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/40 flex items-center justify-center text-emerald-400 group-hover:scale-105 transition shrink-0">
+                      <Server className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-emerald-300 transition">
+                        Добавить VPS
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Автодеплой нового контейнера на Linux VPS по SSH (без перезаписи старых)
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-[11px] font-bold text-emerald-300 shrink-0">
+                    Открыть
+                  </div>
+                </button>
+
+                {/* 3. Вставить ключ */}
+                <button
+                  type="button"
+                  onClick={() => invoke("open_popup_window", { mode: "key" })}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-indigo-500/35 hover:border-indigo-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-indigo-500/5"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/40 flex items-center justify-center text-indigo-400 group-hover:scale-105 transition shrink-0">
+                      <Key className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-indigo-300 transition">
+                        Вставить ключ
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Вставить ключ-ссылку (vless://, awg://, hy2://, ss://, tuic://) или текст конфига
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-[11px] font-bold text-indigo-300 shrink-0">
+                    Открыть
+                  </div>
+                </button>
+
+                {/* 4. Управление VPS */}
+                <button
+                  type="button"
+                  onClick={() => invoke("open_popup_window", { mode: "vps_admin" })}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-[#162033] border border-amber-500/35 hover:border-amber-400/70 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-amber-500/5"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-center text-amber-400 group-hover:scale-105 transition shrink-0">
+                      <Sliders className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-amber-300 transition">
+                        Управление VPS
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Вход по SSH: управление контейнерами, конфигами и выпуск новых ключей
+                      </div>
+                    </div>
+                  </div>
+                  <div className="px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-[11px] font-bold text-amber-300 shrink-0">
+                    Открыть
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer status indicator inside section */}
+            <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Layers className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span className="text-xs text-slate-300 truncate">
+                  Добавлено туннелей: <b className="text-white">{profiles.length}</b>
+                </span>
+              </div>
+              {profiles.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("dashboard")}
+                  className="px-3 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-[11px] font-semibold text-cyan-300 transition cursor-pointer shrink-0"
+                >
+                  Перейти к подключению
+                </button>
+              )}
+            </div>
           </div>
         )}
 
-        {/* TAB 3: PROFILES & DEVICES MANAGER */}
+        {/* TAB 2: НАСТРОЙКА КОНФИГУРАЦИЙ */}
         {activeTab === "profiles" && (
-          <div className="flex-1 overflow-y-auto p-6 space-y-5 animate-tab-enter">
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-3.5 animate-tab-enter">
             {/* Header */}
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-                  <Smartphone className="w-6 h-6 text-cyan-400" />
-                  Менеджер туннелей и устройств
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-cyan-400" />
+                  Настройка конфигураций
                 </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Управление туннелями для текущего ПК и синхронизация отдельных ключей для мобильных устройств (Телефон, Ноутбук, Друзья).
+                <p className="text-[10px] text-slate-400 mt-0.5">
+                  Управление установленными туннелями, редактирование параметров и экспорт (.conf / QR).
                 </p>
               </div>
             </div>
 
             {/* ========================================================================= */}
-            {/* БЛОК 1: ТУННЕЛИ, УСТАНОВЛЕННЫЕ В ПРИЛОЖЕНИИ (ЭТОТ ПК)                       */}
+            {/* ТУННЕЛИ, УСТАНОВЛЕННЫЕ В ПРИЛОЖЕНИИ (ЭТОТ ПК)                             */}
             {/* ========================================================================= */}
-            <div className="p-5 rounded-2xl bg-[#0e1526] border border-slate-800/90 space-y-4 shadow-sm">
-              <div className="flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shadow-sm shrink-0">
-                    <Monitor className="w-5 h-5" />
+            <div className="p-3.5 rounded-2xl bg-[#0e1526] border border-slate-800/90 soft-edge-block space-y-3 shadow-sm">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="w-8 h-8 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400 shadow-sm shrink-0">
+                    <Monitor className="w-4 h-4" />
                   </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                      Туннели, установленные в приложении (Этот ПК)
+                  <div className="min-w-0">
+                    <h3 className="text-xs font-bold text-white flex items-center gap-2">
+                      <span>Установленные туннели</span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
                         {effectiveClientProfiles.length}
                       </span>
                     </h3>
-                    <p className="text-[11px] text-slate-400">
-                      Конфигурации для защиты и маршрутизации трафика на этом компьютере.
+                    <p className="text-[10px] text-slate-400 truncate">
+                      Конфигурации для защиты и маршрутизации трафика на этом ПК
                     </p>
                   </div>
                 </div>
-
-                {/* Column layout for manual buttons */}
-                <div className="flex flex-col gap-2 shrink-0 items-stretch sm:items-end min-w-[175px]">
-                  <button
-                    onClick={handlePickConfigFile}
-                    className="w-full px-3.5 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5 transition shrink-0"
-                    title="Выбрать файл конфигурации на компьютере (.conf, .json, .txt)"
-                  >
-                    <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
-                    Выбрать файл конфига
-                  </button>
-                  <button
-                    onClick={() => {
-                      setNewProfile({
-                        id: "",
-                        name: `SSH Tunnel (${vpsCreds.host || "VPS"})`,
-                        protocol: "ssh",
-                        server: vpsCreds.host || "",
-                        port: vpsCreds.ssh_port || 22,
-                        sni: vpsCreds.username || "root",
-                        insecure: false,
-                        password: vpsCreds.password || "",
-                        uuid: "",
-                        obfs_password: "",
-                        ss_method: "2022-blake3-aes-128-gcm",
-                        ss_plugin: "",
-                        ss_plugin_opts: "",
-                        tls_fragment: false,
-                        up_mbps: 100,
-                        down_mbps: 100,
-                        uri: "",
-                      });
-                      setShowNewProfileForm(true);
-                    }}
-                    className="w-full px-3.5 py-1.5 rounded-xl bg-violet-600/20 hover:bg-violet-600/30 border border-violet-500/40 text-xs font-semibold text-violet-300 flex items-center justify-center gap-1.5 transition shrink-0"
-                  >
-                    <Key className="w-3.5 h-3.5 text-violet-400" />
-                    ⚡ Быстрый SSH-туннель
-                  </button>
-                  <button
-                    onClick={() => setShowNewProfileForm(!showNewProfileForm)}
-                    className="w-full px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 flex items-center justify-center gap-1.5 transition shrink-0"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Добавить вручную
-                  </button>
-                </div>
               </div>
 
-            {/* Quick URI Import Bar & File Picker */}
-            <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800/90 flex flex-wrap sm:flex-nowrap gap-3 items-center">
-              <input
-                type="text"
-                placeholder="Или вставьте готовую ссылку vless://, ss://, hy2:// или tuic:// для импорта"
-                value={uriInput}
-                onChange={(e) => setUriInput(e.target.value)}
-                className="flex-1 px-3.5 py-1.5 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none min-w-[200px]"
-              />
-              <button
-                onClick={handleImportUri}
-                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 shrink-0 transition"
-              >
-                Импортировать ссылку
-              </button>
-              <button
-                onClick={handlePickConfigFile}
-                className="px-4 py-1.5 rounded-xl bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/40 text-xs font-semibold text-cyan-300 flex items-center gap-1.5 shrink-0 transition"
-                title="Выбрать файл конфигурации на компьютере (.conf, .json, .txt)"
-              >
-                <FolderOpen className="w-3.5 h-3.5 text-cyan-400" />
-                Выбрать файл (.conf / .json)
-              </button>
-            </div>
-
-            {/* Manual Profile Form Drawer */}
-            {showNewProfileForm && (
+            {false && showNewProfileForm && (
               <div className="p-5 rounded-2xl bg-[#111827] border border-cyan-500/40 space-y-4">
                 <h3 className="text-sm font-bold text-cyan-300">
                   Новый профиль VPN
@@ -4806,13 +7413,13 @@ export default function App() {
                       }}
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                     >
-                      <option value="ssh">SSH Tunnel (порт 22 • 100% обход блокировок)</option>
-                      <option value="vless">VLESS Reality (порт 443 + Anti-DPI)</option>
-                      <option value="shadowtls">ShadowTLS v3 (L7 TLS-паразит Microsoft/Apple)</option>
+                      <option value="ssh">SSH Tunnel (порт 22 • Direct TCP/IP)</option>
+                      <option value="vless">VLESS Reality (порт 443 + TLS Fragment)</option>
+                      <option value="shadowtls">ShadowTLS v3 (L7 TLS 1.3 верификация)</option>
                       <option value="vless_ws">VLESS + WebSocket (Cloudflare CDN Shield)</option>
                       <option value="webrtc">WebRTC Steganography (VLESS over gRPC Media)</option>
                       <option value="amneziawg">Amnezia 3.1 (Header Protection + 32-bit H1-H4)</option>
-                      <option value="awg_quic">Спецпротокол: AWG + QUIC Pre-Warm (Ослепление DPI)</option>
+                      <option value="awg_quic">Спецпротокол: AWG + QUIC Pre-Warm (Прогрев STUN / QUIC)</option>
                       <option value="awg_vless">Спецпротокол: Гибрид AWG + VLESS Reality (Капсула TCP 443)</option>
                       <option value="awg2">AmneziaWG 2.0 (AWG 2.0 • Чистый конфиг)</option>
                       <option value="hysteria2">Hysteria 2 (QUIC + Salamander)</option>
@@ -4881,7 +7488,7 @@ export default function App() {
                       <div className="p-3 rounded-xl bg-sky-950/30 border border-sky-500/35 text-xs text-sky-200 flex items-start gap-2">
                         <span className="text-base">⚡</span>
                         <div>
-                          <span className="font-bold">Спецпротокол AWG + QUIC Pre-Warm:</span> за 15 мс до запуска рукопожатия с того же <code>ListenPort</code> отправляет пакеты RFC 9000 QUIC v1 Initial (1200B) и WebRTC STUN Binding Request. Таблица ТСПУ (conntrack) помечает UDP-поток как медиа/QUIC и пропускает рукопожатие AmneziaWG без инспекции.
+                          <span className="font-bold">Спецпротокол AWG + QUIC Pre-Warm:</span> за 15 мс до запуска рукопожатия с того же <code>ListenPort</code> отправляет пакеты RFC 9000 QUIC v1 Initial (1200B) и WebRTC STUN Binding Request. Сетевые маршрутизаторы (NAT/conntrack) инициализируют UDP-поток как стандартную QUIC-сессию перед рукопожатием AmneziaWG.
                         </div>
                       </div>
                     )}
@@ -5057,7 +7664,7 @@ export default function App() {
                             }
                             className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
                           />
-                          <span>Автоматически перебирать порты при DPI блокировках</span>
+                          <span>Автоматически перебирать порты при потере связи</span>
                         </label>
                       </div>
                     </div>
@@ -5301,8 +7908,8 @@ export default function App() {
                     <div className="p-3 rounded-xl bg-violet-950/30 border border-violet-500/30 text-xs text-violet-200 flex items-start gap-2">
                       <span className="text-base">🛡️</span>
                       <div>
-                        <span className="font-bold">SSH-туннель (порт 22)</span> — 100% защита от кабельных блокировок (ТСПУ).
-                        Российские провайдеры никогда не блокируют SSH (порт 22). Вся веб-активность и DNS шифруются через TCP-туннель.
+                        <span className="font-bold">SSH-туннель (порт 22)</span> — надежное шифрованное соединение по стандартному протоколу SSH.
+                        Вся веб-активность и DNS шифруются внутри прямого TCP-туннеля.
                       </div>
                     </div>
                   </div>
@@ -5373,7 +7980,7 @@ export default function App() {
                         />
                       </div>
                       <div>
-                        <label className="block text-xs text-slate-400 mb-1">Паразитный SNI</label>
+                        <label className="block text-xs text-slate-400 mb-1">Целевой SNI</label>
                         <input
                           type="text"
                           placeholder="gateway.icloud.com"
@@ -5386,7 +7993,7 @@ export default function App() {
                     <div className="p-3 rounded-xl bg-pink-950/30 border border-pink-500/30 text-xs text-pink-200 flex items-start gap-2">
                       <span className="text-base">🪞</span>
                       <div>
-                        <span className="font-bold">ShadowTLS v3</span> — паразитирует на рукопожатиях легитимных серверов (Apple / Microsoft). Блокираторы DPI получают настоящий валидный TLS-сертификат Apple/Microsoft при сканировании и не могут заблокировать сервер.
+                        <span className="font-bold">ShadowTLS v3</span> — использует стандартное TLS 1.3 рукопожатие с верификацией валидного сертификата целевого сервера и защитой от внешнего сканирования порта.
                       </div>
                     </div>
                   </div>
@@ -5427,7 +8034,7 @@ export default function App() {
                     <div className="p-3 rounded-xl bg-orange-950/30 border border-orange-500/30 text-xs text-orange-200 flex items-start gap-2">
                       <span className="text-base">☁️</span>
                       <div>
-                        <span className="font-bold">Cloudflare CDN Shield</span> — туннелирование VLESS трафика через глобальную сеть Cloudflare Edge. Скрывает реальный IP VPS за миллионами белых IP Cloudflare.
+                        <span className="font-bold">Cloudflare CDN Shield</span> — туннелирование VLESS трафика через глобальную сеть Cloudflare Edge. Скрывает реальный IP VPS за сетью Cloudflare.
                       </div>
                     </div>
                   </div>
@@ -5468,7 +8075,7 @@ export default function App() {
                     <div className="p-3 rounded-xl bg-lime-950/30 border border-lime-500/30 text-xs text-lime-200 flex items-start gap-2">
                       <span className="text-base">🎙️</span>
                       <div>
-                        <span className="font-bold">WebRTC Steganography</span> — пакеты трафика упаковываются в непрерывный медиа-поток с pacing-задержками реального аудио/видео звонка. ТСПУ не видит VPN сигнатур.
+                        <span className="font-bold">WebRTC Steganography</span> — пакеты трафика упаковываются в непрерывный мультимедийный поток с минимальным джиттером и стабильной передачей пакетов без задержек.
                       </div>
                     </div>
                   </div>
@@ -5545,7 +8152,7 @@ export default function App() {
                             className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-emerald-500 focus:ring-emerald-500"
                           />
                           <span className="text-xs text-slate-300">
-                            🛡️ Анти-DPI фрагментация TLS (ClientHello record splitting — обход ТСПУ на кабельном интернете)
+                            🛡️ Фрагментация TLS-рукопожатия (ClientHello record splitting — RFC 5246/8446)
                           </span>
                         </label>
                       </div>
@@ -5571,542 +8178,236 @@ export default function App() {
             )}
 
               {/* Client Tunnels List */}
-              <div className="space-y-2.5 pt-1">
+              <div className="space-y-2.5">
                 {effectiveClientProfiles.length === 0 ? (
-                  <div className="p-6 rounded-xl bg-[#070b14] border border-slate-800/80 text-center space-y-2">
-                    <Monitor className="w-8 h-8 text-slate-500 mx-auto" />
+                  <div className="p-5 rounded-xl bg-[#070b14] border border-slate-800/80 text-center space-y-2">
+                    <Monitor className="w-7 h-7 text-slate-500 mx-auto" />
                     <div className="text-xs font-semibold text-slate-300">
                       Нет установленных туннелей в приложении
                     </div>
-                    <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                      Создайте быстрый SSH-туннель, добавьте конфигурацию вручную или вставьте готовую ссылку vless:// выше.
+                    <p className="text-[10px] text-slate-400 max-w-xs mx-auto">
+                      Добавьте конфигурацию из файла, по ключу или через Автодеплой VPS в соответствующем разделе.
                     </p>
                   </div>
                 ) : (
                   effectiveClientProfiles.map((prof) => (
                     <div
                       key={prof.id}
-                      className={`p-3.5 rounded-xl border transition flex items-center justify-between gap-3 ${
+                      style={
                         selectedProfileId === prof.id
-                          ? "bg-[#131d33] border-cyan-500/50"
+                          ? {
+                              borderColor: "rgba(16, 185, 129, 0.65)",
+                              boxShadow: "0 0 18px rgba(16, 185, 129, 0.30)",
+                            }
+                          : undefined
+                      }
+                      className={`p-3 rounded-xl border transition flex flex-col gap-2 ${
+                        selectedProfileId === prof.id
+                          ? "bg-[#131d33]"
                           : "bg-[#070b14] border-slate-800/90 hover:border-slate-700"
                       }`}
                     >
-                      {/* Left Column: Protocol Top-Left + Compact Info Stack */}
-                      <div className="flex flex-col items-start gap-1.5 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap min-w-0 max-w-full">
+                      {/* Row 1: Protocol Badge + Name + Ping */}
+                      <div className="flex items-center justify-between gap-2 min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
                           {renderProtocolBadge(prof.protocol, prof.awg_version)}
-                          <span className="text-sm font-bold text-white truncate" title={prof.name}>
+                          <span
+                            className="text-xs font-bold text-white truncate"
+                            title={prof.name}
+                          >
                             {prof.name}
                           </span>
-                          {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim() && (
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            onClick={() => handlePingProfile(prof.id)}
+                            disabled={pingingId === prof.id}
+                            className="tunnel-ping-btn px-2 py-0.5 rounded-md text-[10px] font-mono font-medium flex items-center gap-1 shrink-0 cursor-pointer transition"
+                            title="Проверить пинг"
+                          >
+                            <Activity
+                              className={`w-3 h-3 ${
+                                isLightTheme ? "text-emerald-600" : "text-emerald-400"
+                              }`}
+                            />
+                            {pingingId === prof.id
+                              ? "..."
+                              : prof.ping_ms != null
+                              ? `${prof.ping_ms} мс`
+                              : "Пинг"}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Missing Private Key Warning (if applicable) */}
+                      {(prof.protocol === "amneziawg" ||
+                        prof.protocol === "awg_quic" ||
+                        prof.protocol === "awg_vless" ||
+                        prof.protocol === "awg2" ||
+                        prof.protocol === "wireguard") &&
+                        !(prof.awg_private_key || prof.password)?.trim() && (
+                          <div className="flex items-center">
                             <span
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleOpenEditModal(prof);
                               }}
-                              className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-medium flex items-center gap-1 cursor-pointer hover:bg-amber-500/30 shrink-0"
+                              className={`text-[10px] px-2 py-0.5 rounded-md border font-medium inline-flex items-center gap-1 cursor-pointer hover:bg-amber-500/25 ${
+                                isLightTheme
+                                  ? "bg-amber-500/15 text-amber-800 border-amber-600/35"
+                                  : "bg-amber-500/15 text-amber-300 border-amber-500/30"
+                              }`}
                               title="Нажмите для ввода ключа"
                             >
-                              <AlertTriangle className="w-3 h-3 text-amber-400" />
-                              Нет Private Key
+                              <AlertTriangle
+                                className={`w-3 h-3 shrink-0 ${
+                                  isLightTheme ? "text-amber-600" : "text-amber-400"
+                                }`}
+                              />
+                              Нет Private Key — нажмите, чтобы указать
                             </span>
-                          )}
-                          {selectedProfileId === prof.id && (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono font-medium shrink-0">
-                              Активен на ПК
-                            </span>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 font-mono min-w-0 max-w-full">
-                          <span className="text-slate-300 font-semibold shrink-0">
-                            {prof.server}:{prof.port}
-                          </span>
-                          {prof.listen_port && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700/80 shrink-0">
-                              Listen :{prof.listen_port}
-                            </span>
-                          )}
-                          {(prof.awg_hop_ports || prof.hop_ports) && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/90 text-cyan-300/90 border border-cyan-500/25 shrink-0">
-                              Hop: {prof.awg_hop_ports || prof.hop_ports}
-                            </span>
-                          )}
-                          <span
-                            className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-cyan-300 border border-cyan-500/30 font-mono inline-flex items-center gap-1.5 shrink-0"
-                            title="Суммарный трафик, прошедший через данную конфигурацию"
-                          >
-                            <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
-                            <span className="text-slate-600">•</span>
-                            <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
-                            <span className="text-slate-600">•</span>
-                            <span className="text-emerald-300 font-semibold">
-                              Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
-                            </span>
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Right Column: Action Buttons Pinned to Right Edge */}
-                      <div className="flex items-center gap-1.5 justify-end shrink-0 ml-auto self-center">
-                        <button
-                          onClick={() => handlePingProfile(prof.id)}
-                          disabled={pingingId === prof.id}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1 shrink-0 cursor-pointer"
-                          title="Проверить пинг"
-                        >
-                          <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                          {pingingId === prof.id
-                            ? "..."
-                            : prof.ping_ms != null
-                            ? `${prof.ping_ms} мс`
-                            : "Пинг"}
-                        </button>
-
-                        <button
-                          onClick={async () => {
-                            await handlePinProfileOnPc(prof.id);
-                            handleQuickSwitchProfile(prof.id);
-                            if ((prof.protocol === "amneziawg" || prof.protocol === "awg_quic" || prof.protocol === "awg_vless" || prof.protocol === "awg2" || prof.protocol === "wireguard") && !(prof.awg_private_key || prof.password)?.trim()) {
-                              showNotice("info", "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл.");
-                            }
-                            setActiveTab("dashboard");
-                          }}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition shrink-0 cursor-pointer ${
-                            selectedProfileId === prof.id
-                              ? "bg-cyan-600 text-white"
-                              : "bg-slate-800 hover:bg-slate-700 text-slate-200"
-                          }`}
-                        >
-                          На ПК
-                        </button>
-
-                        <button
-                          onClick={() => handleOpenQrModal(prof)}
-                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Показать QR-код для телефона"
-                        >
-                          <QrCode className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          onClick={() => {
-                            if (
-                              prof.protocol === "amneziawg" ||
-                              prof.protocol === "awg_quic" ||
-                              prof.protocol === "awg_vless" ||
-                              prof.protocol === "awg2" ||
-                              prof.protocol === "wireguard"
-                            ) {
-                              handleDownloadAwgConf(prof);
-                            } else {
-                              handleExportJson(prof);
-                            }
-                          }}
-                          className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title={
-                            prof.protocol === "amneziawg" ||
-                            prof.protocol === "awg_quic" ||
-                            prof.protocol === "awg_vless" ||
-                            prof.protocol === "awg2" ||
-                            prof.protocol === "wireguard"
-                              ? "Скачать .conf для WireGuard / AmneziaVPN"
-                              : "Скачать .json конфиг sing-box"
-                          }
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
-
-                        {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic") && (
-                          <button
-                            onClick={() => handleProbeAwgPorts(prof.id)}
-                            disabled={probingAwgId === prof.id}
-                            className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                            title="Тест портов AWG"
-                          >
-                            <Zap className={`w-4 h-4 text-cyan-400 ${probingAwgId === prof.id ? "animate-pulse" : ""}`} />
-                          </button>
+                          </div>
                         )}
 
-                        <button
-                          onClick={() => handleCopyUri(prof)}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Скопировать ссылку"
-                        >
-                          {copiedId === prof.id ? (
-                            <Check className="w-4 h-4 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-4 h-4 text-cyan-400" />
-                          )}
-                        </button>
-
-                        <button
-                          onClick={() => handleOpenEditModal(prof)}
-                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Изменить конфигурацию в приложении"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          onClick={() => handleOpenEditModal(prof, "text")}
-                          className="p-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Текст конфига (.conf / JSON)"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
-
-                        <button
-                          onClick={() => handleDeleteProfile(prof.id)}
-                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Удалить профиль"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* ========================================================================= */}
-            {/* БЛОК 2: СИНХРОНИЗАЦИЯ С VPS И КЛЮЧИ УСТРОЙСТВ (ТЕЛЕФОН, ДРУЗЬЯ)            */}
-            {/* ========================================================================= */}
-            <div className="p-5 rounded-2xl bg-[#0d1424] border border-indigo-500/30 space-y-4 shadow-sm">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-sm shrink-0">
-                  <Cloud className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    Синхронизация с сервером и ключи устройств (Телефон, Ноутбук, Друзья)
-                    {serverProfiles.length > 0 && (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-semibold font-mono">
-                        {serverProfiles.length}
-                      </span>
-                    )}
-                  </h3>
-                  <p className="text-[11px] text-slate-400">
-                    Синхронизация со списком на вашем сервере VPS и выпуск отдельных ключей для мобильных устройств и друзей.
-                  </p>
-                </div>
-              </div>
-
-              {/* VPS OWNER AUTHENTICATION & DEVICE KEY ISSUANCE */}
-              {!isVpsAdmin ? (
-                <div className="p-4 rounded-xl bg-[#090e1c] border border-slate-800 space-y-3 shadow-inner">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <NeuralWiresIcon className="w-5 h-5" />
-                      <div>
-                        <h4 className="text-xs font-bold text-white flex items-center gap-2">
-                          Вход для владельца VPS (Управление сервером и синхронизация)
-                        </h4>
-                        <p className="text-[11px] text-slate-400">
-                          Авторизуйтесь по SSH, чтобы подтянуть устройства с сервера и разблокировать создание новых ключей.
-                        </p>
-                      </div>
-                    </div>
-                    <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 font-semibold">
-                      Режим пользователя
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-12 gap-3 items-end pt-1">
-                    <div className="col-span-4">
-                      <label className="block text-[11px] text-slate-400 mb-1">IP-адрес / Хост VPS</label>
-                      <input
-                        type="text"
-                        placeholder="Например: 185.100.85.10"
-                        value={vpsCreds.host}
-                        onChange={(e) => setVpsCreds({ ...vpsCreds, host: e.target.value.trim() })}
-                        className="w-full px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="col-span-2">
-                      <label className="block text-[11px] text-slate-400 mb-1">Логин SSH</label>
-                      <input
-                        type="text"
-                        placeholder="root"
-                        value={vpsCreds.username || "root"}
-                        onChange={(e) => setVpsCreds({ ...vpsCreds, username: e.target.value.trim() })}
-                        className="w-full px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="col-span-3">
-                      <label className="block text-[11px] text-slate-400 mb-1">Пароль SSH (root)</label>
-                      <input
-                        type="password"
-                        placeholder="Пароль root от VPS"
-                        value={vpsCreds.password}
-                        onChange={(e) => setVpsCreds({ ...vpsCreds, password: e.target.value })}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") handleLoginVpsAdmin();
-                        }}
-                        className="w-full px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                      />
-                    </div>
-
-                    <div className="col-span-3">
-                      <button
-                        onClick={handleLoginVpsAdmin}
-                        disabled={adminLoginLoading || !vpsCreds.host.trim() || !vpsCreds.password.trim()}
-                        className="w-full py-1.5 px-3 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-40 text-xs font-bold text-white shadow-md shadow-cyan-600/20 flex items-center justify-center gap-1.5 transition"
-                      >
-                        <Key className="w-3.5 h-3.5" />
-                        {adminLoginLoading ? "Подключение к VPS..." : "Войти как владелец"}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {/* Logged in as VPS Owner Banner */}
-                  <div className="p-3.5 rounded-xl bg-emerald-950/25 border border-emerald-500/40 flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-                      <div>
-                        <span className="text-xs font-bold text-emerald-300 flex items-center gap-2">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                          Авторизован как Владелец сервера: {vpsCreds.host}
+                      {/* Row 2: Server Endpoint & Ports */}
+                      <div className="flex items-center gap-1.5 flex-wrap text-[10px] font-mono">
+                        <span className="tunnel-meta-chip font-semibold px-2 py-0.5 rounded truncate max-w-[195px]">
+                          {prof.server}:{prof.port}
                         </span>
-                        <p className="text-[10px] text-slate-400 mt-0.5">
-                          Устройства синхронизированы с VPS. Выпуск новых ключей разблокирован.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={handleLoginVpsAdmin}
-                        disabled={adminLoginLoading}
-                        className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 flex items-center gap-1.5 transition"
-                      >
-                        <RefreshCw className={`w-3.5 h-3.5 ${adminLoginLoading ? "animate-spin" : ""}`} />
-                        Синхронизировать
-                      </button>
-                      <button
-                        onClick={handleLogoutVpsAdmin}
-                        className="px-3 py-1 rounded-lg bg-rose-950/40 hover:bg-rose-900/40 border border-rose-500/30 text-xs font-medium text-rose-300 transition"
-                      >
-                        Выйти
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Create Key on VPS (UNLOCKED) */}
-                  <div className="p-4 rounded-xl bg-[#090e1c] border border-cyan-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold uppercase tracking-wider text-cyan-300 flex items-center gap-2">
-                        <UserPlus className="w-4 h-4 text-cyan-400" />
-                        Выпустить новый ключ на сервере ({vpsCreds.host})
-                      </span>
-                      <span className="text-[10px] text-slate-400">
-                        Создает отдельного пользователя в /etc/sing-box/config.json на сервере
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-12 gap-3 items-end">
-                      <div className="col-span-5">
-                        <label className="block text-[11px] text-slate-400 mb-1">
-                          Название устройства / имя друга
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="Например: Мой iPhone, Ноутбук, Друг..."
-                          value={deviceNameInput}
-                          onChange={(e) => setDeviceNameInput(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") handleCreateDeviceKey();
-                          }}
-                          className="w-full px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                        />
-                      </div>
-
-                      <div className="col-span-4">
-                        <label className="block text-[11px] text-slate-400 mb-1">Протокол</label>
-                        <select
-                          value={deviceProtocol}
-                          onChange={(e) =>
-                            setDeviceProtocol(e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg2")
-                          }
-                          className="w-full px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                        >
-                          <option value="vless">VLESS Reality (TCP 443 — для кабельного интернета)</option>
-                          <option value="hysteria2">Hysteria 2 (UDP скоростной)</option>
-                          <option value="tuic">TUIC v5</option>
-                          <option value="shadowsocks">Shadowsocks (TCP/UDP классический прокси)</option>
-                          <option value="amneziawg">Amnezia 3.1 (AWG 3.1 — Header Protection + Anti-DPI)</option>
-                          <option value="awg2">AmneziaWG 2.0 (AWG 2.0 — Чистый конфиг)</option>
-                        </select>
-                      </div>
-
-                      <div className="col-span-3">
-                        <button
-                          onClick={handleCreateDeviceKey}
-                          disabled={creatingDevice || !deviceNameInput.trim()}
-                          className="w-full py-1.5 px-3 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 disabled:opacity-40 text-xs font-bold text-white shadow-md shadow-cyan-600/20 flex items-center justify-center gap-1.5 transition"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          {creatingDevice ? "Создание на VPS..." : "+ Создать ключ и QR"}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Server Synced Devices List */}
-              <div className="space-y-2.5 pt-1">
-                {serverProfiles.length === 0 ? (
-                  <div className="p-6 rounded-xl bg-[#090d18] border border-slate-800/80 text-center space-y-2">
-                    <Smartphone className="w-8 h-8 text-slate-500 mx-auto" />
-                    <div className="text-xs font-semibold text-slate-300">
-                      Отдельные ключи для устройств пока не созданы
-                    </div>
-                    <p className="text-[11px] text-slate-400 max-w-md mx-auto">
-                      Авторизуйтесь на сервере выше, введите имя устройства (например, «Мой iPhone» или «Ноутбук») и нажмите «+ Создать ключ и QR», чтобы сгенерировать конфигурацию и отсканировать QR-код с экрана телефона.
-                    </p>
-                  </div>
-                ) : (
-                  serverProfiles.map((prof) => (
-                    <div
-                      key={prof.id}
-                      className="p-3.5 rounded-xl border border-indigo-500/20 bg-[#0c1222] hover:border-indigo-500/40 transition flex items-center justify-between gap-3"
-                    >
-                      {/* Left Column: Protocol Top-Left + Compact Info Stack */}
-                      <div className="flex flex-col items-start gap-1.5 min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap min-w-0 max-w-full">
-                          {renderProtocolBadge(prof.protocol, prof.awg_version)}
-                          <span className="text-sm font-bold text-white truncate" title={prof.name}>
-                            {prof.name}
+                        {prof.listen_port && (
+                          <span className="tunnel-meta-chip px-1.5 py-0.5 rounded shrink-0">
+                            :{prof.listen_port}
                           </span>
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium shrink-0">
-                            Устройство на сервере
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-2 flex-wrap text-xs text-slate-400 font-mono min-w-0 max-w-full">
-                          <span className="text-slate-300 font-semibold shrink-0">
-                            {prof.server}:{prof.port}
-                          </span>
+                        )}
+                        {(prof.awg_hop_ports || prof.hop_ports) && (
                           <span
-                            className="text-[10px] px-2 py-0.5 rounded-md bg-slate-900/90 text-indigo-200 border border-indigo-500/30 font-mono inline-flex items-center gap-1.5 shrink-0"
-                            title="Трафик по данной конфигурации (по данным сервера VPS и локальной статистики)"
+                            className="tunnel-hop-chip px-1.5 py-0.5 rounded truncate max-w-[130px]"
+                            title={`Hop: ${prof.awg_hop_ports || prof.hop_ports}`}
                           >
-                            <span>↓ {formatBytes(prof.total_down_bytes || 0)}</span>
-                            <span className="text-slate-600">•</span>
-                            <span>↑ {formatBytes(prof.total_up_bytes || 0)}</span>
-                            <span className="text-slate-600">•</span>
-                            <span className="text-emerald-300 font-semibold">
-                              Σ {formatBytes((prof.total_down_bytes || 0) + (prof.total_up_bytes || 0))}
-                            </span>
+                            Hop: {prof.awg_hop_ports || prof.hop_ports}
                           </span>
-                        </div>
+                        )}
                       </div>
 
-                      {/* Right Column: Action Buttons Pinned to Right Edge */}
-                      <div className="flex items-center gap-1.5 justify-end shrink-0 ml-auto self-center">
-                        <button
-                          onClick={() => handlePingProfile(prof.id)}
-                          disabled={pingingId === prof.id}
-                          className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 flex items-center gap-1 shrink-0 cursor-pointer"
-                          title="Проверить пинг"
-                        >
-                          <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                          {pingingId === prof.id
-                            ? "..."
-                            : prof.ping_ms != null
-                            ? `${prof.ping_ms} мс`
-                            : "Пинг"}
-                        </button>
-
+                      {/* Row 3: Action Toolbar (single row) */}
+                      <div className="flex items-center justify-between gap-1.5 pt-2 border-t border-slate-800/80 flex-nowrap">
                         <button
                           onClick={async () => {
                             await handlePinProfileOnPc(prof.id);
                             handleQuickSwitchProfile(prof.id);
+                            if (
+                              (prof.protocol === "amneziawg" ||
+                                prof.protocol === "awg_quic" ||
+                                prof.protocol === "awg_vless" ||
+                                prof.protocol === "awg2" ||
+                                prof.protocol === "wireguard") &&
+                              !(prof.awg_private_key || prof.password)?.trim()
+                            ) {
+                              showNotice(
+                                "info",
+                                "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл."
+                              );
+                            }
                             setActiveTab("dashboard");
                           }}
-                          className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 shrink-0 cursor-pointer"
-                          title="Использовать на этом ПК"
+                          className={`px-2 py-1 rounded-lg text-[10px] font-semibold transition shrink-0 whitespace-nowrap cursor-pointer ${
+                            selectedProfileId === prof.id
+                              ? "bg-emerald-600 text-white shadow-sm shadow-emerald-600/25 keep-white"
+                              : "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/70"
+                          }`}
                         >
-                          На ПК
+                          {selectedProfileId === prof.id ? "Выбран на ПК" : "Выбрать на ПК"}
                         </button>
 
-                        <button
-                          onClick={() => handleOpenQrModal(prof)}
-                          className="p-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white flex items-center justify-center shadow-md shadow-cyan-600/20 transition shrink-0 cursor-pointer"
-                          title="Показать QR-код для телефона"
-                        >
-                          <QrCode className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-[3px] flex-nowrap justify-end shrink-0">
+                          <button
+                            onClick={() => handleOpenQrModal(prof)}
+                            className="p-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Показать QR-код для телефона"
+                          >
+                            <QrCode className="w-3.5 h-3.5" />
+                          </button>
 
-                        <button
-                          onClick={() => {
-                            if (
+                          <button
+                            onClick={() => {
+                              if (
+                                prof.protocol === "amneziawg" ||
+                                prof.protocol === "awg_quic" ||
+                                prof.protocol === "awg_vless" ||
+                                prof.protocol === "awg2" ||
+                                prof.protocol === "wireguard"
+                              ) {
+                                handleDownloadAwgConf(prof);
+                              } else {
+                                handleExportJson(prof);
+                              }
+                            }}
+                            className="p-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title={
                               prof.protocol === "amneziawg" ||
                               prof.protocol === "awg_quic" ||
                               prof.protocol === "awg_vless" ||
                               prof.protocol === "awg2" ||
                               prof.protocol === "wireguard"
-                            ) {
-                              handleDownloadAwgConf(prof);
-                            } else {
-                              handleExportJson(prof);
+                                ? "Скачать .conf для WireGuard / AmneziaVPN"
+                                : "Скачать .json конфиг sing-box"
                             }
-                          }}
-                          className="p-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title={
-                            prof.protocol === "amneziawg" ||
-                            prof.protocol === "awg_quic" ||
-                            prof.protocol === "awg_vless" ||
-                            prof.protocol === "awg2" ||
-                            prof.protocol === "wireguard"
-                              ? "Скачать .conf для AmneziaVPN / WireGuard"
-                              : "Скачать готовый .json конфиг sing-box"
-                          }
-                        >
-                          <Download className="w-4 h-4" />
-                        </button>
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                          </button>
 
-                        <button
-                          onClick={() => handleCopyUri(prof)}
-                          className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Скопировать ссылку"
-                        >
-                          {copiedId === prof.id ? (
-                            <Check className="w-4 h-4 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-4 h-4 text-cyan-400" />
+                          {(prof.protocol === "amneziawg" || prof.protocol === "awg_quic") && (
+                            <button
+                              onClick={() => handleProbeAwgPorts(prof.id)}
+                              disabled={probingAwgId === prof.id}
+                              className="p-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                              title="Тест портов AWG"
+                            >
+                              <Zap
+                                className={`w-3.5 h-3.5 text-cyan-400 ${
+                                  probingAwgId === prof.id ? "animate-pulse" : ""
+                                }`}
+                              />
+                            </button>
                           )}
-                        </button>
 
-                        <button
-                          onClick={() => handleOpenEditModal(prof)}
-                          className="p-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Изменить конфигурацию в приложении"
-                        >
-                          <Edit3 className="w-4 h-4" />
-                        </button>
+                          <button
+                            onClick={() => handleCopyUri(prof)}
+                            className="p-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700/70 text-slate-200 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Скопировать ссылку"
+                          >
+                            {copiedId === prof.id ? (
+                              <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-3.5 h-3.5 text-cyan-400" />
+                            )}
+                          </button>
 
-                        <button
-                          onClick={() => handleOpenEditModal(prof, "text")}
-                          className="p-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Текст конфига (.conf / JSON)"
-                        >
-                          <FileText className="w-4 h-4" />
-                        </button>
+                          <button
+                            onClick={() => handleOpenEditModal(prof)}
+                            className="p-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-cyan-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Изменить конфигурацию в приложении"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
 
-                        <button
-                          onClick={() => handleDeleteProfile(prof.id, true)}
-                          className="p-1.5 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 text-rose-400 flex items-center justify-center transition shrink-0 cursor-pointer"
-                          title="Удалить ключ с сервера VPS и из приложения"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                          <button
+                            onClick={() => handleOpenEditModal(prof, "text")}
+                            className="p-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-indigo-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Текст конфига (.conf / JSON)"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
+                            onClick={() => handleDeleteProfile(prof.id)}
+                            className="p-1 rounded-lg bg-rose-950/40 hover:bg-rose-900/60 border border-rose-500/30 text-rose-400 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            title="Удалить профиль"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
                       </div>
                     </div>
                   ))
@@ -6114,217 +8415,42 @@ export default function App() {
               </div>
             </div>
 
-            {/* QR Code & Mobile Setup Modal */}
-            {qrModalProfile && (
-              <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                <div className="max-w-xl w-full p-5 rounded-2xl bg-[#111827] border border-cyan-500/40 shadow-2xl space-y-3.5 max-h-[92vh] overflow-y-auto">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                    <div>
-                      <h3 className="text-base font-bold text-white flex items-center gap-2">
-                        <Smartphone className="w-5 h-5 text-cyan-400" />
-                        Подключение смартфона: {qrModalProfile.name}
-                      </h3>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        Сервер: {qrModalProfile.server}:{qrModalProfile.port} (
-                        {qrModalProfile.protocol === "ssh"
-                          ? "SSH Tunnel"
-                          : qrModalProfile.protocol === "vless"
-                          ? "VLESS Reality"
-                          : qrModalProfile.protocol === "vless_ws"
-                          ? "VLESS CDN Shield"
-                          : qrModalProfile.protocol === "webrtc"
-                          ? "WebRTC Media"
-                          : qrModalProfile.protocol === "shadowtls"
-                          ? "ShadowTLS v3"
-                          : qrModalProfile.protocol === "tuic"
-                          ? "TUIC v5"
-                          : qrModalProfile.protocol === "shadowsocks"
-                          ? "Shadowsocks"
-                          : qrModalProfile.protocol === "awg2"
-                          ? "AmneziaWG 2.0"
-                          : qrModalProfile.protocol === "awg_quic"
-                          ? "AWG + QUIC Pre-Warm"
-                          : qrModalProfile.protocol === "awg_vless"
-                          ? "Hybrid AWG + Reality"
-                          : qrModalProfile.protocol === "amneziawg"
-                          ? "Amnezia 3.1"
-                          : qrModalProfile.protocol === "wireguard"
-                          ? "WireGuard"
-                          : "Hysteria 2"}
-                        )
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setQrModalProfile(null)}
-                      className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
-                    >
-                      Закрыть
-                    </button>
-                  </div>
-
-                  {/* Quick Protocol Switcher inside QR Modal */}
-                  {profiles.some(
-                    (p) =>
-                      p.server === qrModalProfile.server &&
-                      p.protocol !== qrModalProfile.protocol
-                  ) && (
-                    <div className="flex flex-wrap items-center justify-between p-2.5 rounded-xl bg-[#0b101d] border border-purple-500/30 gap-2">
-                      <span className="text-xs text-slate-300">
-                        {qrModalProfile.protocol === "hysteria2"
-                          ? "Для Hiddify / Shadowsocks на телефоне можно переключить:"
-                          : "Другие протоколы для этого сервера:"}
-                      </span>
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        {profiles
-                          .filter(
-                            (p) =>
-                              p.server === qrModalProfile.server &&
-                              p.protocol !== qrModalProfile.protocol
-                          )
-                          .map((alt) => (
-                            <button
-                              key={alt.id}
-                              onClick={() => handleOpenQrModal(alt)}
-                              className="px-2.5 py-1 rounded-lg bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 text-xs font-semibold text-purple-200"
-                            >
-                              {alt.protocol === "ssh"
-                                ? "SSH Tunnel"
-                                : alt.protocol === "vless"
-                                ? "VLESS Reality"
-                                : alt.protocol === "vless_ws"
-                                ? "VLESS CDN"
-                                : alt.protocol === "webrtc"
-                                ? "WebRTC"
-                                : alt.protocol === "shadowtls"
-                                ? "ShadowTLS v3"
-                                : alt.protocol === "hysteria2"
-                                ? "Hysteria 2"
-                                : alt.protocol === "tuic"
-                                ? "TUIC v5"
-                                : alt.protocol === "awg2"
-                                ? "AWG 2.0"
-                                : alt.protocol === "amneziawg"
-                                ? "Amnezia 3.1"
-                                : alt.protocol === "wireguard"
-                                ? "WireGuard"
-                                : "Shadowsocks"}
-                            </button>
-                          ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="flex flex-col items-center justify-center py-1">
-                    <div className="p-3 bg-white rounded-2xl shadow-xl">
-                      <img
-                        src={qrDataUrl}
-                        alt="VPN QR Code"
-                        className="w-52 h-52 block"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Quick Actions */}
-                  <div className={`grid ${(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2" || qrModalProfile.protocol === "wireguard") ? "grid-cols-3" : "grid-cols-2"} gap-2.5`}>
-                    <button
-                      onClick={() => handleCopyUri(qrModalProfile)}
-                      className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5"
-                    >
-                      <Copy className="w-4 h-4" />
-                      Ссылка{" "}
-                      {qrModalProfile.protocol === "ssh"
-                        ? "ssh://"
-                        : qrModalProfile.protocol === "vless" || qrModalProfile.protocol === "vless_ws" || qrModalProfile.protocol === "webrtc"
-                        ? "vless://"
-                        : qrModalProfile.protocol === "shadowtls"
-                        ? "shadowtls://"
-                        : qrModalProfile.protocol === "tuic"
-                        ? "tuic://"
-                        : qrModalProfile.protocol === "shadowsocks"
-                        ? "ss://"
-                        : qrModalProfile.protocol === "awg2"
-                        ? "awg2://"
-                        : qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "wireguard"
-                        ? "awg://"
-                        : "hysteria2://"}
-                    </button>
-                    {(qrModalProfile.protocol === "amneziawg" || qrModalProfile.protocol === "awg2" || qrModalProfile.protocol === "wireguard") && (
-                      <button
-                        onClick={() => handleDownloadAwgConf(qrModalProfile)}
-                        className="py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white flex items-center justify-center gap-1.5"
-                      >
-                        <FileDown className="w-4 h-4" />
-                        Скачать .conf (Amnezia)
-                      </button>
-                    )}
-                    <button
-                      onClick={() => handleExportJson(qrModalProfile)}
-                      className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-xs font-bold text-white flex items-center justify-center gap-1.5"
-                    >
-                      <FileDown className="w-4 h-4" />
-                      Скачать .json
-                    </button>
-                  </div>
-
-                  {/* Troubleshooting Box for Hiddify Timeout / Unknown IP */}
-                  <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-xs text-amber-100 space-y-1.5">
-                    <div className="font-bold text-amber-300">
-                      Почему в Hiddify пишет «Тайм-аут» и «Неизвестный IP»? Как исправить за 15 секунд:
-                    </div>
-                    <div>
-                      1. <b>Используйте протокол TUIC v5 (порт 9443)</b>: в мобильном Hiddify есть баг парсера ссылок Hysteria 2 с паролем обфускации <code>obfs=salamander</code> (приложение теряет пароль обфускации и сервер отбрасывает пакеты). Нажмите кнопку <b>«Переключить QR на TUIC v5»</b> выше и отсканируйте его!
-                    </div>
-                    <div>
-                      2. В Hiddify откройте <b>Параметры конфигурации</b> (значок ползунков вверху справа):
-                      <br />• <b>Регион</b> → выберите <b>«Другой (other)»</b> (при выборе «Россия» Hiddify ломает проверку соединения).
-                      <br />• Включите тумблер <b>«Разрешить небезопасные (Allow Insecure)»</b> (для самоподписанного сертификата VPS).
-                    </div>
-                    <div>
-                      3. <b>Или используйте официальное приложение <code>sing-box</code>, Shadowsocks / v2rayNG / NekoBox</b> (Google Play / App Store) или скачанный <code>.json</code> — там стабильно работают Shadowsocks, TUIC v5 и Hysteria 2.
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
 
           </div>
         )}
 
         {/* TAB 4: ROUTING & CORE */}
         {activeTab === "routing" && (
-          <div className="flex-1 overflow-y-auto p-6 space-y-5 animate-tab-enter">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-                  <Globe className="w-5 h-5 text-cyan-400" />
-                  Раздельное туннелирование и маршруты
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-3 animate-tab-enter">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Globe className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span>Раздельное туннелирование</span>
                 </h2>
-                <p className="text-xs text-slate-400 mt-1">
-                  Индивидуальные правила обхода и списки сайтов для каждого профиля. (Для перехвата трафика любых игр и программ рекомендуется <b>TUN-режим</b>).
+                <p className="text-[10px] text-slate-400 mt-0.5 truncate">
+                  Правила обхода и списки приложений для каждого профиля (рекомендуется TUN)
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleSaveRouting}
-                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-600/20 shrink-0 cursor-pointer"
+                className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-[11px] font-bold text-white shadow-md shadow-cyan-600/20 shrink-0 cursor-pointer transition"
               >
-                Сохранить и применить
+                Сохранить
               </button>
             </div>
 
-            {/* Profile Selector for Routing */}
+            {/* Profile Selector for Routing (Compact) */}
             {effectiveDashboardProfiles.length > 0 && (
-              <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <Smartphone className="w-4 h-4 text-cyan-400" />
-                    {t.selectProfileForRouting} ({effectiveDashboardProfiles.length})
-                  </span>
-                  <span className="text-[11px] text-slate-400">
-                    Правила маршрутизации сохраняются отдельно для выбранного профиля
+              <div className="p-2.5 rounded-xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                    <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
+                    Профиль маршрутизации ({effectiveDashboardProfiles.length})
                   </span>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 max-h-[168px] overflow-y-auto pr-1 custom-scrollbar">
+                <div className="grid grid-cols-2 gap-1.5 max-h-[104px] overflow-y-auto pr-1 custom-scrollbar">
                   {effectiveDashboardProfiles.map((p) => {
                     const isTarget = p.id === (routingProfileId || selectedProfileId);
                     const isSplitActive = p.routing ? p.routing.split_tunneling : routing.split_tunneling;
@@ -6333,37 +8459,37 @@ export default function App() {
                         key={p.id}
                         type="button"
                         onClick={() => switchRoutingProfile(p.id)}
-                        className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center justify-between gap-2 transition border cursor-pointer min-w-0 text-left ${
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-between gap-1.5 transition border cursor-pointer min-w-0 text-left ${
                           isTarget
-                            ? "bg-cyan-500/20 border-cyan-400 text-white shadow-md shadow-cyan-500/20"
+                            ? "bg-cyan-500/20 border-cyan-400 text-white shadow-sm shadow-cyan-500/20"
                             : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
                         }`}
                       >
-                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
                           <span
-                            className={`w-2 h-2 rounded-full shrink-0 ${
-                              isSplitActive ? "bg-cyan-400 shadow-[0_0_6px_#22d3ee]" : "bg-slate-600"
+                            style={
+                              isSplitActive
+                                ? {
+                                    backgroundColor: "var(--color-accent)",
+                                    boxShadow: "0 0 5px var(--color-accent-glow)",
+                                  }
+                                : undefined
+                            }
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              isSplitActive ? "" : isLightTheme ? "bg-slate-400" : "bg-slate-600"
                             }`}
                           />
                           <span className="truncate font-bold">{p.name}</span>
                         </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 border border-slate-700/60 uppercase font-mono">
-                            {p.protocol === "awg_quic"
-                              ? "AWG+QUIC"
-                              : p.protocol === "awg_vless"
-                              ? "AWG+REALITY"
-                              : p.protocol === "amneziawg"
-                              ? "AWG 3.1"
-                              : p.protocol}
-                          </span>
-                          {p.id === selectedProfileId && (
-                            <span
-                              className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]"
-                              title="Активен на ПК"
-                            />
-                          )}
-                        </div>
+                        <span className="tunnel-meta-chip text-[8px] px-1 py-0.5 rounded uppercase font-mono shrink-0">
+                          {p.protocol === "awg_quic"
+                            ? "AWG+Q"
+                            : p.protocol === "awg_vless"
+                            ? "AWG+R"
+                            : p.protocol === "amneziawg"
+                            ? "AWG"
+                            : p.protocol}
+                        </span>
                       </button>
                     );
                   })}
@@ -6371,43 +8497,41 @@ export default function App() {
               </div>
             )}
 
-            {/* Master Split Tunneling Toggle Card (Top Placement) */}
+            {/* Master Split Tunneling Toggle Card (Compact) */}
             <div
-              className={`p-5 rounded-2xl border transition-all ${
+              className={`p-3 rounded-xl border soft-edge-block transition-all ${
                 routing.split_tunneling
-                  ? "bg-[#111827] border-cyan-500/50 shadow-[0_0_30px_-10px_rgba(6,182,212,0.25)]"
+                  ? "bg-[#111827] border-cyan-500/50"
                   : "bg-[#111827] border-slate-800/90"
               }`}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3.5">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5 min-w-0">
                   <div
-                    className={`p-2.5 rounded-xl border ${
+                    className={`p-2 rounded-lg border shrink-0 ${
                       routing.split_tunneling
-                        ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-400 shadow-[0_0_15px_-3px_rgba(6,182,212,0.4)]"
+                        ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-400"
                         : "bg-slate-800/60 border-slate-700/60 text-slate-400"
                     }`}
                   >
-                    <Zap className="w-5 h-5" />
+                    <Zap className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="flex items-center gap-2.5">
-                      <h3 className="text-sm font-bold text-white">
-                        {t.splitTunnelingMasterTitle} «{activeRoutingProfile?.name || "По умолчанию"}»
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="text-xs font-bold text-white truncate">
+                        Раздельное туннелирование: «{activeRoutingProfile?.name || "По умолчанию"}»
                       </h3>
                       <span
-                        className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase border ${
+                        className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase border shrink-0 ${
                           routing.split_tunneling
                             ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"
                             : "bg-slate-800 border-slate-700 text-slate-400"
                         }`}
                       >
-                        {routing.split_tunneling
-                          ? t.splitTunnelingEnabledBadge
-                          : t.splitTunnelingDisabledBadge}
+                        {routing.split_tunneling ? "ВКЛ" : "ВЫКЛ"}
                       </span>
                     </div>
-                    <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
+                    <p className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">
                       {t.splitTunnelingMasterDesc}
                     </p>
                   </div>
@@ -6416,9 +8540,19 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleToggleSplitForProfile}
-                  className={`w-14 h-7 rounded-full transition-colors p-0.5 shrink-0 ml-4 cursor-pointer ${
+                  style={
                     routing.split_tunneling
-                      ? "bg-cyan-500 shadow-[0_0_15px_rgba(6,182,212,0.5)]"
+                      ? {
+                          backgroundColor: "var(--btn-grad-from)",
+                          boxShadow: "0 0 12px var(--color-accent-glow)",
+                        }
+                      : undefined
+                  }
+                  className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer ${
+                    routing.split_tunneling
+                      ? ""
+                      : isLightTheme
+                      ? "bg-slate-300"
                       : "bg-slate-700"
                   }`}
                   title={
@@ -6428,19 +8562,24 @@ export default function App() {
                   }
                 >
                   <div
-                    className={`w-6 h-6 rounded-full bg-white shadow-md transform transition-transform ${
-                      routing.split_tunneling ? "translate-x-7" : "translate-x-0"
+                    className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
+                      routing.split_tunneling ? "translate-x-5" : "translate-x-0"
                     }`}
                   />
                 </button>
               </div>
             </div>
 
-            {/* Anti-DPI TLS Fragmentation Setting */}
             {/* Split Tunneling Inactive Notice */}
             {!routing.split_tunneling && (
-              <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs flex items-center gap-3">
-                <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0" />
+              <div
+                className={`p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-[11px] flex items-center gap-2 ${
+                  isLightTheme ? "text-amber-800" : "text-amber-200"
+                }`}
+              >
+                <AlertTriangle
+                  className={`w-4 h-4 shrink-0 ${isLightTheme ? "text-amber-600" : "text-amber-400"}`}
+                />
                 <div>
                   <span className="font-bold">Внимание:</span> {t.splitTunnelingDisabledNotice}
                 </div>
@@ -6449,74 +8588,87 @@ export default function App() {
 
             {/* Split Tunneling Rules Container */}
             <div
-              className={`space-y-5 transition-all duration-300 ${
+              className={`space-y-3 transition-all duration-300 ${
                 !routing.split_tunneling
                   ? "opacity-35 pointer-events-none select-none filter grayscale-[35%]"
                   : ""
               }`}
             >
-              {/* 1. ROUTING PRESETS (Перемещен выше режима туннелирования) */}
-              <div className="p-4 rounded-2xl bg-[#111827] border border-cyan-500/30 shadow-[0_0_25px_-10px_rgba(6,182,212,0.2)] space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-400">
-                      <Bookmark className="w-4 h-4" />
+              {/* 1. ROUTING PRESETS (Compact Card) */}
+              <div className="p-3 rounded-xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="p-1.5 rounded-lg bg-cyan-500/15 border border-cyan-500/30 text-cyan-400 shrink-0">
+                      <Bookmark className="w-3.5 h-3.5" />
                     </div>
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-white flex items-center gap-2">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-bold uppercase tracking-wider text-white flex items-center gap-1.5">
                         <span>Предустановки маршрутизации</span>
                         {status.connected && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 font-semibold animate-pulse">
-                            <Zap className="w-3 h-3" /> На лету ⚡
+                          <span
+                            className={`text-[9px] px-1.5 py-0.5 rounded-full border flex items-center gap-0.5 font-semibold ${
+                              isLightTheme
+                                ? "bg-emerald-600/15 text-emerald-700 border-emerald-600/35"
+                                : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                            }`}
+                          >
+                            <Zap className="w-2.5 h-2.5" /> На лету
                           </span>
                         )}
                       </div>
-                      <p className="text-[11px] text-slate-400">
-                        Переключайте списки программ в один клик без смены конфигов и разрыва соединения
+                      <p className="text-[10px] text-slate-400 truncate">
+                        Быстрое переключение списков программ в один клик
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     {status.connected && (
                       <button
                         type="button"
                         onClick={handleApplyOnTheFly}
                         disabled={isApplyingPreset}
-                        className="px-3 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition cursor-pointer"
+                        className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer ${
+                          isLightTheme
+                            ? "bg-emerald-600/15 hover:bg-emerald-600/25 border-emerald-600/40 text-emerald-700"
+                            : "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-300"
+                        }`}
                         title="Применить текущие списки программ к работающему VPN"
                       >
-                        <Zap className={`w-3.5 h-3.5 ${isApplyingPreset ? "animate-spin" : ""}`} />
-                        <span>Применить к VPN ⚡</span>
+                        <Zap className={`w-3 h-3 ${isApplyingPreset ? "animate-spin" : ""}`} />
+                        <span>Применить</span>
                       </button>
                     )}
                     {activePresetId && !routingPresets.find((p) => p.id === activePresetId)?.is_builtin && (
                       <button
                         type="button"
                         onClick={handleUpdateCurrentPreset}
-                        className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center gap-1.5 transition cursor-pointer"
-                        title="Перезаписать активный пользовательский пресет текущими списками"
+                        className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-200 flex items-center gap-1 transition cursor-pointer"
+                        title="Обновить текущий пресет"
                       >
-                        <Save className="w-3.5 h-3.5 text-cyan-400" />
-                        <span>Обновить пресет</span>
+                        <Save className="w-3 h-3 text-cyan-400" />
+                        <span>Обновить</span>
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={() => {
-                        setNewPresetOutbound(routing.default_outbound || "direct");
-                        setShowSavePresetModal(true);
+                        invoke("open_popup_window", {
+                          mode: "save_preset",
+                          profileId: routingProfileId || selectedProfileId || null,
+                          submode: routing.default_outbound || "direct",
+                        });
                       }}
-                      className="px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-semibold text-cyan-200 flex items-center gap-1.5 transition cursor-pointer"
+                      className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-[10px] font-semibold text-cyan-200 flex items-center gap-1 transition cursor-pointer"
                     >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>+ Создать пресет</span>
+                      <Plus className="w-3 h-3" />
+                      <span>Пресет</span>
                     </button>
                   </div>
                 </div>
 
-                {/* Preset Chips */}
-                <div className="flex flex-wrap items-center gap-2 pt-1">
+                {/* Preset Chips (Compact) */}
+                <div className="flex flex-wrap items-center gap-1.5">
                   {routingPresets.map((pr) => {
                     const isActive = activePresetId === pr.id;
                     const totalCount = (pr.proxy_processes || []).length + (pr.direct_processes || []).length;
@@ -6524,34 +8676,34 @@ export default function App() {
                       <div
                         key={pr.id}
                         onClick={() => handleSelectPreset(pr)}
-                        className={`group relative flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-medium transition cursor-pointer select-none ${
+                        className={`group relative flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-[11px] font-medium transition cursor-pointer select-none ${
                           isActive
-                            ? "bg-gradient-to-r from-cyan-600/25 to-indigo-600/25 border-cyan-400 text-white shadow-md shadow-cyan-500/20"
+                            ? "bg-cyan-500/20 border-cyan-400 text-white shadow-sm"
                             : "bg-[#0b101d] border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white"
                         }`}
                       >
-                        {isActive ? (
-                          <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_#22d3ee] animate-pulse" />
-                        ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-slate-600 group-hover:bg-slate-400" />
-                        )}
                         {pr.id.includes("games") ? (
-                          <Gamepad2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <Gamepad2
+                            className={`w-3 h-3 shrink-0 ${
+                              isLightTheme ? "text-emerald-600" : "text-emerald-400"
+                            }`}
+                          />
                         ) : pr.id.includes("discord") ? (
-                          <MessageSquare className="w-3.5 h-3.5 text-indigo-400" />
+                          <MessageSquare className="w-3 h-3 text-indigo-400 shrink-0" />
                         ) : pr.id.includes("browser") ? (
-                          <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                          <Globe className="w-3 h-3 text-cyan-400 shrink-0" />
                         ) : pr.id.includes("media") ? (
-                          <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                          <Sparkles
+                            className={`w-3 h-3 shrink-0 ${
+                              isLightTheme ? "text-amber-600" : "text-amber-400"
+                            }`}
+                          />
                         ) : (
-                          <Zap className="w-3.5 h-3.5 text-violet-400" />
+                          <Zap className="w-3 h-3 text-cyan-400 shrink-0" />
                         )}
-                        <span className="font-semibold">{pr.name}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-900/80 text-slate-400 border border-slate-800">
-                          {pr.default_outbound === "direct" ? "Только выбор" : "Весь трафик"}
-                        </span>
-                        <span className="text-[10px] font-mono text-cyan-400/90 font-bold">
-                          {totalCount}
+                        <span className="font-semibold truncate max-w-[115px]">{pr.name}</span>
+                        <span className="text-[9px] font-mono text-cyan-400/90 font-bold">
+                          ({totalCount})
                         </span>
                         <button
                           type="button"
@@ -6559,10 +8711,10 @@ export default function App() {
                             e.stopPropagation();
                             handleDeletePreset(pr.id);
                           }}
-                          className="ml-1 text-slate-500 hover:text-rose-400 p-0.5 opacity-60 group-hover:opacity-100 transition"
+                          className="text-slate-500 hover:text-rose-400 p-0.5 opacity-60 group-hover:opacity-100 transition"
                           title="Удалить пресет"
                         >
-                          <X className="w-3 h-3" />
+                          <X className="w-2.5 h-2.5" />
                         </button>
                       </div>
                     );
@@ -6570,772 +8722,301 @@ export default function App() {
                 </div>
 
                 {/* Active Preset Description Banner */}
-                <div className="pt-1 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-800/80">
-                  <div className="flex items-center gap-1.5 truncate">
-                    <span className="text-cyan-400 font-medium">Активный профиль:</span>
-                    <span className="text-slate-300">
-                      {routingPresets.find((p) => p.id === activePresetId)?.description ||
-                        routingPresets.find((p) => p.id === activePresetId)?.name ||
-                        "По умолчанию"}
+                <div className="pt-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-800/80">
+                  <div className="flex items-center gap-1 truncate">
+                    <span className="text-cyan-400 font-medium">Активен:</span>
+                    <span className="text-slate-300 truncate">
+                      {routingPresets.find((p) => p.id === activePresetId)?.name || "Пользовательский"}
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={handleResetPresets}
-                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-2"
-                    title="Сбросить все предустановки к исходным стандартным"
+                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-2 cursor-pointer"
                   >
-                    Восстановить стандартные
+                    Сбросить пресеты
                   </button>
                 </div>
               </div>
 
-              {/* ДВА РАЗДЕЛЬНЫХ МАСТЕР-БЛОКА: ТОЛЬКО ВЫБРАННОЕ ЧЕРЕЗ VPN (Слева) и ВЕСЬ ТРАФИК ЧЕРЕЗ VPN (Справа) */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-                {/* МАСТЕР-БЛОК 1: ТОЛЬКО ВЫБРАННОЕ ЧЕРЕЗ VPN (Белый список) */}
+              {/* ДВЕ СВЕРНУТЫЕ КОМПАКТНЫЕ ПЛИТКИ РЕЖИМОВ С КНОПКОЙ «НАСТРОИТЬ» */}
+              <div className="grid grid-cols-1 gap-2.5">
+                {/* ПЛИТКА 1: ТОЛЬКО ВЫБРАННОЕ ЧЕРЕЗ VPN (Белый список) */}
                 <div
-                  className={`p-5 rounded-2xl transition-all space-y-4 border-2 ${
-                    routing.default_outbound === "direct"
-                      ? "bg-[#0b1424]/95 border-cyan-500 shadow-[0_0_35px_-5px_rgba(6,182,212,0.35)]"
-                      : "bg-[#070d18]/70 border-slate-800/80 hover:border-cyan-500/40 opacity-80"
+                  className={`routing-mode-card p-3 rounded-xl transition-all flex flex-col gap-2 ${
+                    routing.default_outbound === "direct" ? "is-active" : ""
                   }`}
                 >
-                  {/* Интерактивный переключатель режима прямо в шапке блока */}
-                  <div
-                    onClick={() => {
-                      if (routing.default_outbound !== "direct") {
-                        const nextRouting = buildCurrentRoutingObject({
-                          default_outbound: "direct",
-                        });
-                        void syncAndApplyRoutingImmediately(nextRouting);
-                      }
-                    }}
-                    className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
-                      routing.default_outbound === "direct"
-                        ? "bg-cyan-500/15 border-cyan-500/70 shadow-[0_0_20px_-3px_rgba(6,182,212,0.25)] ring-1 ring-cyan-500/50"
-                        : "bg-[#050b16] border-slate-800 hover:border-cyan-500/50 hover:bg-cyan-950/20"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3 min-w-0 flex-1">
-                        <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                            routing.default_outbound === "direct"
-                              ? "bg-cyan-500/25 border border-cyan-400/50 text-cyan-300 shadow-[0_0_12px_rgba(6,182,212,0.3)]"
-                              : "bg-slate-800 border border-slate-700 text-slate-400"
-                          }`}
-                        >
-                          <Shield className="w-5 h-5 text-cyan-400" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span
-                              className={`text-sm font-bold tracking-tight ${
-                                routing.default_outbound === "direct"
-                                  ? "text-cyan-200"
-                                  : "text-slate-300"
-                              }`}
-                            >
-                              Только выбранное через VPN
-                            </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950/90 text-cyan-300 border border-cyan-700/60 font-semibold font-mono">
-                              Белый список
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                            Весь ПК и игры работают напрямую без задержек. Через VPN идут{" "}
-                            <strong className="text-cyan-300 font-semibold">только</strong> программы,
-                            папки и сайты из списка ниже.
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 flex items-center mt-0.5">
-                        {routing.default_outbound === "direct" ? (
-                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-cyan-500 text-slate-950 font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-[0_0_12px_rgba(6,182,212,0.5)]">
-                            <Check className="w-3.5 h-3.5 stroke-[3]" /> Активен
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="text-[10px] px-3 py-1 rounded-full bg-slate-800 text-slate-300 hover:bg-cyan-500/20 hover:text-cyan-300 border border-slate-700 transition font-medium"
-                          >
-                            Включить режим
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 1.1: Программы и папки через VPN */}
-                  <div className="p-4 rounded-xl bg-[#080d19] border border-cyan-500/20 space-y-2.5">
-                    <div className="flex items-center gap-2">
-                      <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">
-                        Программы и папки ЧЕРЕЗ VPN ({proxyProcessesList.length})
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      Добавьте сюда папку программы (например <code>Discord</code>), <code>.exe</code> файл или процесс, который должен всегда идти через VPN:
-                    </p>
-
-                    {/* Action Buttons */}
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => handlePickExeFile("proxy")}
-                        className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <FileCode className="w-3.5 h-3.5" /> + Файл (.exe)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePickFolder("proxy")}
-                        className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-xs font-semibold text-cyan-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <FolderOpen className="w-3.5 h-3.5" /> + Папка
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenProcessModal("proxy")}
-                        className="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <Cpu className="w-3.5 h-3.5" /> + Из запущенных
-                      </button>
-                    </div>
-
-                    {/* Manual Input */}
-                    <div className="flex gap-2 pt-1">
-                      <input
-                        type="text"
-                        placeholder="Имя процесса (напр. Discord.exe) или путь к папке..."
-                        value={manualProxyProcInput}
-                        onChange={(e) => setManualProxyProcInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            addProcessItem("proxy", manualProxyProcInput);
-                            setManualProxyProcInput("");
-                          }
-                        }}
-                        className="flex-1 px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          addProcessItem("proxy", manualProxyProcInput);
-                          setManualProxyProcInput("");
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 cursor-pointer"
-                      >
-                        Добавить
-                      </button>
-                    </div>
-
-                    {/* List */}
-                    <div className="h-44 overflow-y-auto rounded-xl bg-[#050811] border border-slate-800/80 p-2 space-y-1.5">
-                      {proxyProcessesList.length === 0 ? (
-                        <div className="h-full flex items-center justify-center text-xs text-slate-600 text-center px-4">
-                          Список пуст. Нажмите «+ Файл», «+ Папка» или «+ Из запущенных».
-                        </div>
-                      ) : (
-                        proxyProcessesList.map((item, idx) => {
-                          const isPath = item.includes("\\") || item.includes("/");
-                          const isExe = item.toLowerCase().endsWith(".exe");
-                          return (
-                            <div
-                              key={idx}
-                              className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#0e1628] border border-slate-800 text-xs group"
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
-                                {isPath && !isExe ? (
-                                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                                ) : isPath ? (
-                                  <FileCode className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                                ) : (
-                                  <Cpu className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                                )}
-                                <div className="truncate font-mono text-[11px] text-slate-200 min-w-0 flex-1" title={item}>
-                                  {item}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => removeProcessItem("proxy", item)}
-                                className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0 cursor-pointer"
-                                title="Удалить"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-
-                  {/* 1.2: Домены через VPN */}
-                  <div className="p-4 rounded-xl bg-[#080d19] border border-cyan-500/20 space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-                      <Globe className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span>Домены всегда ЧЕРЕЗ VPN (Proxy Домены)</span>
-                    </label>
-                    <p className="text-[11px] text-slate-400">
-                      Сайты, которые принудительно идут через VPN (по одному на строку):
-                    </p>
-                    <textarea
-                      rows={4}
-                      value={proxyDomainsText}
-                      onChange={(e) => setProxyDomainsText(e.target.value)}
-                      className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-
-                  {/* 1.3: IP-адреса через VPN */}
-                  <div className="p-4 rounded-xl bg-[#080d19] border border-cyan-500/20 space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-2">
-                      <Layers className="w-4 h-4 text-cyan-400 shrink-0" />
-                      <span>IP-адреса и подсети ЧЕРЕЗ VPN (Proxy IP / CIDR)</span>
-                    </label>
-                    <p className="text-[11px] text-slate-400">
-                      IP-адреса или диапазоны подсетей CIDR для принудительной маршрутизации через VPN (по одному на строку):
-                    </p>
-                    <textarea
-                      rows={4}
-                      value={proxyIpsText}
-                      placeholder="1.1.1.1&#10;8.8.8.8&#10;91.108.4.0/22&#10;149.154.160.0/20"
-                      onChange={(e) => setProxyIpsText(e.target.value)}
-                      className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-
-                {/* МАСТЕР-БЛОК 2: ВЕСЬ ТРАФИК ЧЕРЕЗ VPN (Черный список / Исключения) */}
-                <div
-                  className={`p-5 rounded-2xl transition-all space-y-4 border-2 ${
-                    (routing.default_outbound || "proxy") === "proxy"
-                      ? "bg-[#071616]/95 border-emerald-500 shadow-[0_0_35px_-5px_rgba(16,185,129,0.35)]"
-                      : "bg-[#050f0f]/70 border-slate-800/80 hover:border-emerald-500/40 opacity-80"
-                  }`}
-                >
-                  {/* Интерактивный переключатель режима прямо в шапке блока */}
-                  <div
-                    onClick={() => {
-                      if ((routing.default_outbound || "proxy") !== "proxy") {
-                        const nextRouting = buildCurrentRoutingObject({
-                          default_outbound: "proxy",
-                        });
-                        void syncAndApplyRoutingImmediately(nextRouting);
-                      }
-                    }}
-                    className={`p-4 rounded-xl border transition-all cursor-pointer select-none ${
-                      (routing.default_outbound || "proxy") === "proxy"
-                        ? "bg-emerald-500/15 border-emerald-500/70 shadow-[0_0_20px_-3px_rgba(16,185,129,0.25)] ring-1 ring-emerald-500/50"
-                        : "bg-[#040e0e] border-slate-800 hover:border-emerald-500/50 hover:bg-emerald-950/20"
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex items-start gap-3 min-w-0 flex-1">
-                        <div
-                          className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                            (routing.default_outbound || "proxy") === "proxy"
-                              ? "bg-emerald-500/25 border border-emerald-400/50 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]"
-                              : "bg-slate-800 border border-slate-700 text-slate-400"
-                          }`}
-                        >
-                          <Zap className="w-5 h-5 text-emerald-400" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span
-                              className={`text-sm font-bold tracking-tight ${
-                                (routing.default_outbound || "proxy") === "proxy"
-                                  ? "text-emerald-200"
-                                  : "text-slate-300"
-                              }`}
-                            >
-                              Весь трафик через VPN
-                            </span>
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/90 text-emerald-300 border border-emerald-700/60 font-semibold font-mono">
-                              Черный список
-                            </span>
-                          </div>
-                          <div className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                            Все программы и сайты шифруются через VPN. Напрямую идут{" "}
-                            <strong className="text-emerald-300 font-semibold">только</strong> выбранные
-                            исключения, игры и RU-сайты ниже.
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 flex items-center mt-0.5">
-                        {(routing.default_outbound || "proxy") === "proxy" ? (
-                          <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-500 text-slate-950 font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-[0_0_12px_rgba(16,185,129,0.5)]">
-                            <Check className="w-3.5 h-3.5 stroke-[3]" /> Активен
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="text-[10px] px-3 py-1 rounded-full bg-slate-800 text-slate-300 hover:bg-emerald-500/20 hover:text-emerald-300 border border-slate-700 transition font-medium"
-                          >
-                            Включить режим
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 2.1: Программы и папки мимо VPN */}
-                  <div className="p-4 rounded-xl bg-[#061111] border border-emerald-500/20 space-y-2.5">
-                    <div className="flex items-center gap-2">
-                      <Cpu className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                        Программы и папки МИМО VPN ({directProcessesList.length})
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-400">
-                      Добавьте сюда папки с играми (например <code>Steam</code>, <code>CS2</code>), торренты или программы, которые должны идти напрямую без пинга:
-                    </p>
-
-                    {/* Action Buttons */}
-                    <div className="flex flex-wrap gap-2 pt-1">
-                      <button
-                        type="button"
-                        onClick={() => handlePickExeFile("direct")}
-                        className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <FileCode className="w-3.5 h-3.5" /> + Файл (.exe)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePickFolder("direct")}
-                        className="px-2.5 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-xs font-semibold text-emerald-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <FolderOpen className="w-3.5 h-3.5" /> + Папка
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenProcessModal("direct")}
-                        className="px-2.5 py-1.5 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-xs font-semibold text-indigo-300 flex items-center gap-1.5 transition cursor-pointer"
-                      >
-                        <Cpu className="w-3.5 h-3.5" /> + Из запущенных
-                      </button>
-                    </div>
-
-                    {/* Manual Input */}
-                    <div className="flex gap-2 pt-1">
-                      <input
-                        type="text"
-                        placeholder="Имя процесса (напр. cs2.exe) или путь к папке..."
-                        value={manualDirectProcInput}
-                        onChange={(e) => setManualDirectProcInput(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            addProcessItem("direct", manualDirectProcInput);
-                            setManualDirectProcInput("");
-                          }
-                        }}
-                        className="flex-1 px-3 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          addProcessItem("direct", manualDirectProcInput);
-                          setManualDirectProcInput("");
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 cursor-pointer"
-                      >
-                        Добавить
-                      </button>
-                    </div>
-
-                    {/* List */}
-                    <div className="h-44 overflow-y-auto rounded-xl bg-[#040b0b] border border-slate-800/80 p-2 space-y-1.5">
-                      {directProcessesList.length === 0 ? (
-                        <div className="h-full flex items-center justify-center text-xs text-slate-600 text-center px-4">
-                          Список пуст. Нажмите «+ Файл», «+ Папка» или «+ Из запущенных».
-                        </div>
-                      ) : (
-                        directProcessesList.map((item, idx) => {
-                          const isPath = item.includes("\\") || item.includes("/");
-                          const isExe = item.toLowerCase().endsWith(".exe");
-                          return (
-                            <div
-                              key={idx}
-                              className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-[#091818] border border-slate-800 text-xs group"
-                            >
-                              <div className="flex items-center gap-2 min-w-0 flex-1 pr-2">
-                                {isPath && !isExe ? (
-                                  <FolderOpen className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                                ) : isPath ? (
-                                  <FileCode className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                ) : (
-                                  <Cpu className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                                )}
-                                <div className="truncate font-mono text-[11px] text-slate-200 min-w-0 flex-1" title={item}>
-                                  {item}
-                                </div>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => removeProcessItem("direct", item)}
-                                className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0 cursor-pointer"
-                                title="Удалить"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          );
-                        })
-                      )}
-                    </div>
-                  </div>
-
-                  {/* 2.2: Домены мимо VPN */}
-                  <div className="p-4 rounded-xl bg-[#061111] border border-emerald-500/20 space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
-                      <Globe className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>Домены всегда МИМО VPN (Direct Домены)</span>
-                    </label>
-                    <p className="text-[11px] text-slate-400">
-                      Сайты и доменные зоны напрямую (например <code>.ru</code>, <code>vk.com</code>, <code>steamcontent.com</code>):
-                    </p>
-                    <textarea
-                      rows={4}
-                      value={directDomainsText}
-                      onChange={(e) => setDirectDomainsText(e.target.value)}
-                      className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-
-                  {/* 2.3: IP-адреса мимо VPN */}
-                  <div className="p-4 rounded-xl bg-[#061111] border border-emerald-500/20 space-y-2">
-                    <label className="text-xs font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-2">
-                      <Layers className="w-4 h-4 text-emerald-400 shrink-0" />
-                      <span>IP-адреса и подсети МИМО VPN (Direct IP / CIDR)</span>
-                    </label>
-                    <p className="text-[11px] text-slate-400">
-                      IP-адреса или локальные подсети, которые всегда идут напрямую без VPN:
-                    </p>
-                    <textarea
-                      rows={4}
-                      value={directIpsText}
-                      placeholder="192.168.0.0/16&#10;10.0.0.0/8&#10;172.16.0.0/12"
-                      onChange={(e) => setDirectIpsText(e.target.value)}
-                      className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-slate-200 focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-                </div>
-              </div>
-
-            {/* DNS, Local Ports & Core Block */}
-            <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800/90 space-y-3">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
-                <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-cyan-400" />
-                  DNS-серверы, локальный прокси-порт и Ядро sing-box
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  System Core Settings
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 items-end">
-                <div>
-                  <label className="text-xs text-slate-400 mb-1 flex items-center gap-1.5">
-                    <Shield className="w-3.5 h-3.5 text-cyan-400" />
-                    <span>Защищенный DNS (VPN)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={routing.remote_dns}
-                    onChange={(e) =>
-                      setRouting({ ...routing, remote_dns: e.target.value })
-                    }
-                    placeholder="tls://1.1.1.1"
-                    className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-400 mb-1 flex items-center gap-1.5">
-                    <Globe className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Прямой DNS (RU)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={routing.direct_dns}
-                    onChange={(e) =>
-                      setRouting({ ...routing, direct_dns: e.target.value })
-                    }
-                    placeholder="77.88.8.8"
-                    className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-slate-400 mb-1 flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                    <span>Локальный прокси-порт</span>
-                  </label>
-                  <input
-                    type="number"
-                    value={routing.local_mixed_port}
-                    onChange={(e) =>
-                      setRouting({
-                        ...routing,
-                        local_mixed_port: Number(e.target.value) || 2080,
-                      })
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <button
-                    onClick={handleDownloadCore}
-                    disabled={downloadingCore}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-xs font-semibold text-cyan-300 border border-cyan-500/30 flex items-center justify-center gap-2 transition cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${downloadingCore ? "animate-spin" : ""}`} />
-                    {downloadingCore ? "Обновление..." : "Обновить sing-box"}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-
-            </div>
-
-            {/* Running Processes Picker Modal */}
-            {procModalTarget && (
-              <div className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-                <div className="max-w-2xl w-full p-5 rounded-2xl bg-[#111827] border border-slate-700 shadow-2xl flex flex-col max-h-[80vh]">
-                  <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                    <div>
-                      <h3 className="text-base font-bold text-white flex items-center gap-2">
-                        <Cpu className="w-5 h-5 text-cyan-400" />
-                        Выбор из запущенных процессов и их папок
-                      </h3>
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        Добавление в список:{" "}
-                        <b className={procModalTarget === "proxy" ? "text-cyan-300" : "text-emerald-300"}>
-                          {procModalTarget === "proxy" ? "ЧЕРЕЗ VPN" : "МИМО VPN (Напрямую)"}
-                        </b>
-                      </p>
-                    </div>
-                    <button
-                      onClick={() => setProcModalTarget(null)}
-                      className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
-                    >
-                      Закрыть
-                    </button>
-                  </div>
-
-                  <div className="my-3 relative">
-                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                    <input
-                      type="text"
-                      placeholder="Поиск по имени процесса или пути (например discord, steam, chrome)..."
-                      value={procSearch}
-                      onChange={(e) => setProcSearch(e.target.value)}
-                      className="w-full pl-9 pr-4 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white focus:border-cyan-500 focus:outline-none"
-                    />
-                  </div>
-
-                  <div className="flex-1 overflow-y-auto space-y-1.5 pr-1">
-                    {loadingProcs ? (
-                      <div className="py-12 text-center text-xs text-slate-400">
-                        Сканирование запущенных процессов...
-                      </div>
-                    ) : (
-                      runningProcs
-                        .filter(
-                          (p) =>
-                            p.name.toLowerCase().includes(procSearch.toLowerCase()) ||
-                            p.path.toLowerCase().includes(procSearch.toLowerCase())
-                        )
-                        .map((proc, i) => {
-                          const folderPath = proc.path.includes("\\")
-                            ? proc.path.substring(0, proc.path.lastIndexOf("\\"))
-                            : "";
-                          return (
-                            <div
-                              key={i}
-                              className="p-2.5 rounded-xl bg-[#0b101d] border border-slate-800/80 flex items-center justify-between gap-3 hover:border-slate-700"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs font-bold text-white">
-                                  {proc.name}
-                                </div>
-                                <div
-                                  className="text-[10px] text-slate-400 font-mono truncate"
-                                  title={proc.path}
-                                >
-                                  {proc.path}
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    addProcessItem(procModalTarget, proc.name);
-                                    showNotice("info", `Добавлен процесс: ${proc.name}`);
-                                  }}
-                                  className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300"
-                                >
-                                  + Имя ({proc.name})
-                                </button>
-                                {folderPath && (
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      addProcessItem(procModalTarget, folderPath);
-                                      showNotice("info", `Добавлена вся папка: ${folderPath}`);
-                                    }}
-                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-[11px] font-semibold text-amber-300"
-                                    title={`Добавить всю папку: ${folderPath}`}
-                                  >
-                                    + Папку целиком
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          );
-                        })
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* SAVE PRESET MODAL */}
-            {showSavePresetModal && (
-              <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
-                <div className="w-full max-w-md rounded-2xl bg-[#0f172a] border border-cyan-500/40 shadow-2xl p-6 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Bookmark className="w-5 h-5 text-cyan-400" />
-                      <h3 className="text-base font-bold text-white">Новая предустановка маршрутов</h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setShowSavePresetModal(false)}
-                      className="text-slate-400 hover:text-white p-1"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  <p className="text-xs text-slate-300">
-                    Текущие списки программ будут сохранены в отдельную предустановку, которую можно будет переключать в один клик прямо во время работы VPN.
-                  </p>
-
-                  <div className="space-y-1.5">
-                    <label className="text-xs font-semibold text-slate-200">Название предустановки:</label>
-                    <input
-                      type="text"
-                      placeholder="например: Для работы, Стриминг, Игры + Discord"
-                      value={newPresetName}
-                      onChange={(e) => setNewPresetName(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") handleSaveAsNewPreset();
+                  <div className="flex items-center justify-between gap-2">
+                    <div
+                      onClick={() => {
+                        if (routing.default_outbound !== "direct") {
+                          const nextRouting = buildCurrentRoutingObject({
+                            default_outbound: "direct",
+                          });
+                          void syncAndApplyRoutingImmediately(nextRouting);
+                        }
                       }}
-                      autoFocus
-                      className="w-full px-3.5 py-2 rounded-xl bg-[#080c15] border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                    />
+                      className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer"
+                    >
+                      <div
+                        className={`routing-mode-icon w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                          routing.default_outbound === "direct" ? "is-active" : ""
+                        }`}
+                      >
+                        <Shield className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`text-xs font-bold ${
+                              routing.default_outbound === "direct"
+                                ? "text-white"
+                                : "text-slate-200"
+                            }`}
+                          >
+                            Только выбранное через VPN
+                          </span>
+                          <span className="routing-mode-pill text-[9px] px-1.5 py-0.5 rounded-full font-semibold font-mono">
+                            Белый список
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                          Через VPN идут только выбранные программы, домены и IP
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          invoke("open_popup_window", {
+                            mode: "routing_rules",
+                            profileId: routingProfileId || selectedProfileId || null,
+                            submode: "proxy",
+                          })
+                        }
+                        className="routing-mode-config-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Sliders className="w-3 h-3" />
+                        <span>Настроить</span>
+                      </button>
+
+                      {routing.default_outbound === "direct" ? (
+                        <span className="routing-mode-active-badge text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase flex items-center gap-1">
+                          <Check className="w-3 h-3 stroke-[3]" /> Активен
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextRouting = buildCurrentRoutingObject({
+                              default_outbound: "direct",
+                            });
+                            void syncAndApplyRoutingImmediately(nextRouting);
+                          }}
+                          className="routing-mode-enable-btn text-[10px] px-2.5 py-1 rounded-lg transition font-semibold cursor-pointer"
+                        >
+                          Включить
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="p-3 rounded-xl bg-[#080c15] border border-slate-800 space-y-2">
-                    <div className="text-xs font-semibold text-slate-300">Сохраняемые списки:</div>
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="text-cyan-300">Через VPN:</span>
-                      <span className="font-mono text-white font-bold">{proxyProcessesList.length} программ / папок</span>
+                  {/* Compact counters summary */}
+                  <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/80 text-[10px] text-slate-400 font-mono">
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      Программ: <b>{proxyProcessesList.length}</b>
+                    </span>
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      Доменов:{" "}
+                      <b>
+                        {
+                          proxyDomainsText
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean).length
+                        }
+                      </b>
+                    </span>
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      IP / CIDR:{" "}
+                      <b>
+                        {
+                          proxyIpsText
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean).length
+                        }
+                      </b>
+                    </span>
+                  </div>
+                </div>
+
+                {/* ПЛИТКА 2: ВЕСЬ ТРАФИК ЧЕРЕЗ VPN (Черный список / Исключения) */}
+                <div
+                  className={`routing-mode-card p-3 rounded-xl transition-all flex flex-col gap-2 ${
+                    (routing.default_outbound || "proxy") === "proxy" ? "is-active" : ""
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div
+                      onClick={() => {
+                        if ((routing.default_outbound || "proxy") !== "proxy") {
+                          const nextRouting = buildCurrentRoutingObject({
+                            default_outbound: "proxy",
+                          });
+                          void syncAndApplyRoutingImmediately(nextRouting);
+                        }
+                      }}
+                      className="flex items-center gap-2.5 min-w-0 flex-1 cursor-pointer"
+                    >
+                      <div
+                        className={`routing-mode-icon w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                          (routing.default_outbound || "proxy") === "proxy" ? "is-active" : ""
+                        }`}
+                      >
+                        <Zap className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`text-xs font-bold ${
+                              (routing.default_outbound || "proxy") === "proxy"
+                                ? "text-white"
+                                : "text-slate-200"
+                            }`}
+                          >
+                            Весь трафик через VPN
+                          </span>
+                          <span className="routing-mode-pill text-[9px] px-1.5 py-0.5 rounded-full font-semibold font-mono">
+                            Черный список
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-400 truncate mt-0.5">
+                          Весь трафик через VPN, кроме выбранных исключений (мимо VPN)
+                        </p>
+                      </div>
                     </div>
-                    <div className="flex items-center justify-between text-xs text-slate-400">
-                      <span className="text-emerald-300">Мимо VPN:</span>
-                      <span className="font-mono text-white font-bold">{directProcessesList.length} программ / папок</span>
-                    </div>
-                    <div className="flex items-center justify-between text-xs text-slate-400 pt-1 border-t border-slate-800">
-                      <span>Режим маршрутизации:</span>
-                      <span className="text-white font-semibold">
-                        {(routing.default_outbound || "direct") === "direct"
-                          ? "Только выбранные через VPN"
-                          : "Весь трафик ПК через VPN"}
-                      </span>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          invoke("open_popup_window", {
+                            mode: "routing_rules",
+                            profileId: routingProfileId || selectedProfileId || null,
+                            submode: "direct",
+                          })
+                        }
+                        className="routing-mode-config-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Sliders className="w-3 h-3" />
+                        <span>Настроить</span>
+                      </button>
+
+                      {(routing.default_outbound || "proxy") === "proxy" ? (
+                        <span className="routing-mode-active-badge text-[10px] px-2.5 py-1 rounded-lg font-bold uppercase flex items-center gap-1">
+                          <Check className="w-3 h-3 stroke-[3]" /> Активен
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const nextRouting = buildCurrentRoutingObject({
+                              default_outbound: "proxy",
+                            });
+                            void syncAndApplyRoutingImmediately(nextRouting);
+                          }}
+                          className="routing-mode-enable-btn text-[10px] px-2.5 py-1 rounded-lg transition font-semibold cursor-pointer"
+                        >
+                          Включить
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  {status.connected && (
-                    <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-300 flex items-center gap-2">
-                      <Zap className="w-4 h-4 shrink-0" />
-                      <span>Будет мгновенно применено на лету к активному VPN без разрыва связи!</span>
-                    </div>
-                  )}
-
-                  <div className="flex justify-end gap-2.5 pt-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowSavePresetModal(false)}
-                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition cursor-pointer"
-                    >
-                      Отмена
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSaveAsNewPreset}
-                      disabled={!newPresetName.trim()}
-                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-lg shadow-cyan-600/20 disabled:opacity-50 transition cursor-pointer"
-                    >
-                      Сохранить пресет
-                    </button>
+                  {/* Compact counters summary */}
+                  <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800/80 text-[10px] text-slate-400 font-mono">
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      Программ: <b>{directProcessesList.length}</b>
+                    </span>
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      Доменов:{" "}
+                      <b>
+                        {
+                          directDomainsText
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean).length
+                        }
+                      </b>
+                    </span>
+                    <span className="routing-mode-counter px-2 py-0.5 rounded">
+                      IP / CIDR:{" "}
+                      <b>
+                        {
+                          directIpsText
+                            .split("\n")
+                            .map((s) => s.trim())
+                            .filter(Boolean).length
+                        }
+                      </b>
+                    </span>
                   </div>
                 </div>
               </div>
-            )}
+
+            </div>
+
 
           </div>
         )}
 
         {/* TAB 5: SETTINGS & THEMES */}
         {activeTab === "settings" && (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 animate-tab-enter">
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-4 animate-tab-enter">
             {/* Header */}
             <div>
-              <h2 className="text-xl font-bold text-white flex items-center gap-2.5">
-                <Settings className={`w-6 h-6 ${currentTheme.styles.accentText}`} />
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Settings className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
                 {t.settingsTitle}
               </h2>
-              <p className="text-xs text-slate-400 mt-1">{t.settingsSubtitle}</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">{t.settingsSubtitle}</p>
             </div>
 
             {/* NETWORK OPERATING MODE SECTION (Moved from Connection tab) */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <Globe className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                   <div>
-                    <h3 className="text-sm font-bold text-white">Режим работы сети</h3>
-                    <p className="text-[11px] text-slate-400">
+                    <h3 className="text-xs font-bold text-white">Режим работы сети</h3>
+                    <p className="text-[10px] text-slate-400">
                       Выбор способа перехвата сетевого трафика в Windows
                     </p>
                   </div>
                 </div>
-                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
-                  {routing.mode === "tun" ? "TUN-режим (Вирт. адаптер)" : "System Proxy (Прокси Windows)"}
+                <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
+                  {routing.mode === "tun" ? "TUN-режим" : "System Proxy"}
                 </span>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <button
                   type="button"
                   onClick={() => handleQuickSwitchMode("system_proxy")}
-                  className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left transition cursor-pointer ${
                     routing.mode === "system_proxy"
                       ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
                       : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold">System Proxy</span>
                     <Globe className="w-4 h-4 text-cyan-400" />
                   </div>
@@ -7347,13 +9028,13 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => handleQuickSwitchMode("tun")}
-                  className={`p-3.5 rounded-xl border text-left transition cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left transition cursor-pointer ${
                     routing.mode === "tun"
                       ? "bg-cyan-500/15 border-cyan-500/50 text-white shadow-md shadow-cyan-500/10"
                       : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-1">
                     <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
                     <Zap className="w-4 h-4 text-indigo-400" />
                   </div>
@@ -7362,66 +9043,119 @@ export default function App() {
                   </p>
                 </button>
               </div>
+            </div>
 
-              {/* Split Tunneling Status & Link to Routing tab */}
-              <div className="pt-2.5 flex items-center justify-between border-t border-slate-800/80 text-xs">
+            {/* DNS-СЕРВЕРЫ И ЛОКАЛЬНЫЙ ПОРТ (Moved from Routing tab) */}
+            <div
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+              style={{ backgroundColor: currentTheme.styles.cardBg }}
+            >
+              <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800/60">
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-400">Раздельное туннелирование:</span>
-                  <span
-                    className={`font-semibold flex items-center gap-1.5 ${
-                      (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling)
-                        ? "text-cyan-400"
-                        : "text-slate-400"
-                    }`}
-                  >
-                    {(selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) ? (
-                      <>
-                        <span className="w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
-                        Включено для «{selectedProfile?.name || "профиля"}»
-                      </>
-                    ) : (
-                      <>
-                        <span className="w-2 h-2 rounded-full bg-slate-600" />
-                        Выключено (Весь трафик в VPN)
-                      </>
-                    )}
-                  </span>
+                  <Activity className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                  <div>
+                    <h3 className="text-xs font-bold text-white">
+                      DNS-серверы и локальный порт
+                    </h3>
+                    <p className="text-[10px] text-slate-400">
+                      Параметры DNS, локального прокси-порта и ядра sing-box
+                    </p>
+                  </div>
                 </div>
                 <button
                   type="button"
-                  onClick={() => {
-                    if (selectedProfileId) switchRoutingProfile(selectedProfileId);
-                    setActiveTab("routing");
-                  }}
-                  className="text-cyan-400 hover:text-cyan-300 font-medium flex items-center gap-1 transition cursor-pointer"
+                  onClick={handleSaveRouting}
+                  className="px-2.5 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/35 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer shrink-0"
                 >
-                  {t.manageRoutingLink}
+                  <Save className="w-3 h-3" />
+                  Сохранить
                 </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-end">
+                <div>
+                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
+                    <Shield className="w-3 h-3 text-cyan-400" />
+                    <span>Защищенный DNS (VPN)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={routing.remote_dns}
+                    onChange={(e) =>
+                      setRouting({ ...routing, remote_dns: e.target.value })
+                    }
+                    placeholder="tls://1.1.1.1"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-cyan-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
+                    <Globe className="w-3 h-3 text-emerald-400" />
+                    <span>Прямой DNS (RU)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={routing.direct_dns}
+                    onChange={(e) =>
+                      setRouting({ ...routing, direct_dns: e.target.value })
+                    }
+                    placeholder="77.88.8.8"
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 mb-1 flex items-center gap-1">
+                    <Layers className="w-3 h-3 text-indigo-400" />
+                    <span>Локальный прокси-порт</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={routing.local_mixed_port}
+                    onChange={(e) =>
+                      setRouting({
+                        ...routing,
+                        local_mixed_port: Number(e.target.value) || 2080,
+                      })
+                    }
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700/70 text-xs text-white font-mono focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <button
+                    type="button"
+                    onClick={handleDownloadCore}
+                    disabled={downloadingCore}
+                    className="w-full py-1.5 px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-[11px] font-semibold text-cyan-300 border border-cyan-500/30 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${downloadingCore ? "animate-spin" : ""}`} />
+                    {downloadingCore ? "Обновление..." : "Обновить sing-box"}
+                  </button>
+                </div>
               </div>
             </div>
 
             {/* SECURITY & KILL SWITCH SECTION */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center gap-2.5">
-                <ShieldAlert className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex items-center gap-2">
+                <ShieldAlert className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-sm font-bold text-white">
+                  <h3 className="text-xs font-bold text-white">
                     Сетевая безопасность, Kill Switch и защита от утечек
                   </h3>
-                  <p className="text-[11px] text-slate-400">
+                  <p className="text-[10px] text-slate-400">
                     Управление защитой от утечек IP, DNS и аварийной блокировкой сетевого трафика
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3.5 pt-1">
+              <div className="grid grid-cols-1 gap-2.5 pt-1">
                 {/* Kill Switch Toggle */}
                 <div
                   onClick={handleToggleKillSwitch}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="flex items-center gap-1.5">
@@ -7452,7 +9186,7 @@ export default function App() {
                 {/* DNS Leak Protection Toggle */}
                 <div
                   onClick={handleToggleDnsLeakProtect}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="flex items-center gap-1.5">
@@ -7480,7 +9214,7 @@ export default function App() {
                 {/* IPv6 Leak Shield Toggle */}
                 <div
                   onClick={handleToggleBlockIpv6}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="flex items-center gap-1.5">
@@ -7505,7 +9239,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Anti-DPI TLS ClientHello Splitting Full Card */}
+                {/* TLS ClientHello Splitting Full Card */}
                 <div
                   onClick={async () => {
                     const nextVal = !(routing.tls_fragment ?? true);
@@ -7521,45 +9255,34 @@ export default function App() {
                       showNotice("error", String(e));
                     }
                   }}
-                  className={`col-span-2 p-4 rounded-xl border cursor-pointer transition flex items-center justify-between gap-4 group ${
+                  className={`p-3 rounded-xl border cursor-pointer transition flex items-center justify-between gap-3 group ${
                     (routing.tls_fragment ?? true)
                       ? "bg-emerald-950/20 border-emerald-500/40 shadow-sm"
                       : "bg-slate-900/60 border-slate-800/80 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-start gap-3.5 min-w-0 pr-2">
-                    <div
-                      className={`p-2.5 rounded-xl border shrink-0 transition-colors ${
-                        (routing.tls_fragment ?? true)
-                          ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-400 shadow-[0_0_15px_-3px_rgba(16,185,129,0.4)]"
-                          : "bg-slate-800/60 border-slate-700/60 text-slate-400"
-                      }`}
-                    >
-                      <ShieldCheck className="w-5 h-5" />
+                  <div className="min-w-0 pr-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                        Фрагментация TLS-рукопожатия (ClientHello)
+                      </span>
+                      <span
+                        className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full border ${
+                          (routing.tls_fragment ?? true)
+                            ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
+                            : "bg-slate-800 border-slate-700 text-slate-400"
+                        }`}
+                      >
+                        {(routing.tls_fragment ?? true) ? "Активно" : "Выкл"}
+                      </span>
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
-                          Анти-DPI фрагментация TLS (ClientHello Record Splitting)
-                        </span>
-                        <span
-                          className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                            (routing.tls_fragment ?? true)
-                              ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-300"
-                              : "bg-slate-800 border-slate-700 text-slate-400"
-                          }`}
-                        >
-                          {(routing.tls_fragment ?? true) ? "Активно" : "Выключено"}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                        Разбивает TCP пакет и TLS-записи рукопожатия ClientHello на фрагменты (RFC 5246/8446) для протоколов VLESS Reality, TUIC и Hysteria 2. Обходит сигнатурный анализ и проверку соответствия SNI/IP российскими ТСПУ у кабельных провайдеров (Ростелеком, Дом.ru, МТС, Билайн).
-                      </p>
-                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                      Разбивает TCP-пакет и TLS-записи рукопожатия ClientHello на фрагменты для протоколов VLESS Reality, TUIC и Hysteria 2.
+                    </p>
                   </div>
 
                   <div
-                    className={`w-12 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
+                    className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 ${
                       (routing.tls_fragment ?? true)
                         ? "bg-emerald-500 shadow-sm shadow-emerald-500/50"
                         : "bg-slate-700"
@@ -7567,7 +9290,7 @@ export default function App() {
                   >
                     <div
                       className={`w-5 h-5 rounded-full bg-white shadow-md transform transition-transform ${
-                        (routing.tls_fragment ?? true) ? "translate-x-6" : "translate-x-0"
+                        (routing.tls_fragment ?? true) ? "translate-x-5" : "translate-x-0"
                       }`}
                     />
                   </div>
@@ -7577,22 +9300,22 @@ export default function App() {
 
             {/* SYSTEM AUTOSTART & TRAY BEHAVIOR SECTION */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center gap-2.5">
-                <Monitor className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex items-center gap-2">
+                <Monitor className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-sm font-bold text-white">{t.systemSectionTitle}</h3>
-                  <p className="text-[11px] text-slate-400">{t.systemSectionSubtitle}</p>
+                  <h3 className="text-xs font-bold text-white">{t.systemSectionTitle}</h3>
+                  <p className="text-[10px] text-slate-400">{t.systemSectionSubtitle}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3.5 pt-1">
+              <div className="grid grid-cols-1 gap-2.5 pt-1">
                 {/* Autostart Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ autostart: !autostart })}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
@@ -7618,7 +9341,7 @@ export default function App() {
                 {/* Start Minimized Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ startMinimized: !startMinimized })}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
@@ -7644,7 +9367,7 @@ export default function App() {
                 {/* Close to Tray Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ closeToTray: !closeToTray })}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
@@ -7670,7 +9393,7 @@ export default function App() {
                 {/* Auto-connect on startup Toggle */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ autoConnect: !autoConnect })}
-                  className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
+                  className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-3 transition group"
                 >
                   <div className="min-w-0 pr-2">
                     <div className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
@@ -7697,38 +9420,38 @@ export default function App() {
 
             {/* INTERFACE LANGUAGE SECTION */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center gap-2.5">
-                <Languages className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex items-center gap-2">
+                <Languages className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-sm font-bold text-white">{t.languageSectionTitle}</h3>
-                  <p className="text-[11px] text-slate-400">{t.languageSectionSubtitle}</p>
+                  <h3 className="text-xs font-bold text-white">{t.languageSectionTitle}</h3>
+                  <p className="text-[10px] text-slate-400">{t.languageSectionSubtitle}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 pt-1">
+              <div className="grid grid-cols-2 gap-2.5 pt-1">
                 {/* Russian Card */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ language: "ru" })}
-                  className={`p-4 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
+                  className={`p-3 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
                     language === "ru"
                       ? "border-cyan-400 bg-cyan-500/10 shadow-md ring-1 ring-cyan-400/50"
                       : "border-slate-800 bg-slate-900/50 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-blue-500/15 border border-blue-500/30 flex items-center justify-center font-black font-mono text-sm text-blue-300 shrink-0 shadow-sm">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-blue-500/15 border border-blue-500/30 flex items-center justify-center font-black font-mono text-xs text-blue-300 shrink-0">
                       RU
                     </div>
                     <div>
                       <div className="text-xs font-bold text-white">{t.langRu}</div>
-                      <div className="text-[11px] text-slate-400">Русский язык интерфейса</div>
+                      <div className="text-[10px] text-slate-400">Русский</div>
                     </div>
                   </div>
                   <div
-                    className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
                       language === "ru"
                         ? "border-cyan-400 bg-cyan-500"
                         : "border-slate-600 bg-transparent"
@@ -7741,23 +9464,23 @@ export default function App() {
                 {/* English Card */}
                 <div
                   onClick={() => handleUpdateSystemSettings({ language: "en" })}
-                  className={`p-4 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
+                  className={`p-3 rounded-xl cursor-pointer border transition-all flex items-center justify-between ${
                     language === "en"
                       ? "border-cyan-400 bg-cyan-500/10 shadow-md ring-1 ring-cyan-400/50"
                       : "border-slate-800 bg-slate-900/50 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center font-black font-mono text-sm text-amber-300 shrink-0 shadow-sm">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center font-black font-mono text-xs text-amber-300 shrink-0">
                       EN
                     </div>
                     <div>
                       <div className="text-xs font-bold text-white">{t.langEn}</div>
-                      <div className="text-[11px] text-slate-400">English Interface</div>
+                      <div className="text-[10px] text-slate-400">English</div>
                     </div>
                   </div>
                   <div
-                    className={`w-4 h-4 rounded-full border flex items-center justify-center ${
+                    className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
                       language === "en"
                         ? "border-cyan-400 bg-cyan-500"
                         : "border-slate-600 bg-transparent"
@@ -7771,72 +9494,79 @@ export default function App() {
 
             {/* THEMES & APPEARANCE SECTION */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-5 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <Palette className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Palette className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                   <div>
-                    <h3 className="text-sm font-bold text-white">{t.themesSectionTitle}</h3>
-                    <p className="text-[11px] text-slate-400">{t.themesSectionSubtitle}</p>
+                    <h3 className="text-xs font-bold text-white">{t.themesSectionTitle}</h3>
+                    <p className="text-[10px] text-slate-400">{t.themesSectionSubtitle}</p>
                   </div>
                 </div>
-                <span className="text-[11px] px-3 py-1 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium">
+                <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-medium">
                   {t.activeTheme}: <b className="text-white">{currentTheme.name}</b>
                 </span>
               </div>
 
-              {/* Theme Grid Cards */}
-              <div className="grid grid-cols-3 gap-4 pt-1">
+              {/* Theme Grid Cards (Compact) */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-0.5">
                 {THEMES.map((theme) => {
                   const isSelected = theme.id === currentThemeId;
                   return (
                     <div
                       key={theme.id}
                       onClick={() => handleSelectTheme(theme.id)}
-                      className={`p-4 rounded-xl cursor-pointer border transition-all text-left relative group ${
+                      className={`p-2 rounded-xl cursor-pointer border transition-all text-left relative group flex flex-col justify-between ${
                         isSelected
-                          ? `border-cyan-400 shadow-lg ${theme.styles.accentGlow} bg-slate-800/40 ring-1 ring-cyan-400/50`
+                          ? `border-cyan-400 shadow-md ${theme.styles.accentGlow} bg-slate-800/40 ring-1 ring-cyan-400/50`
                           : "border-slate-800 hover:border-slate-600 bg-slate-900/50 hover:bg-slate-800/30"
                       }`}
                     >
-                      {/* Swatch Previews */}
-                      <div className="flex items-center gap-1.5 mb-3">
-                        <div
-                          className="w-6 h-6 rounded-md shadow-inner border border-white/10"
-                          style={{ backgroundColor: theme.preview.bg }}
-                          title="Background"
-                        />
-                        <div
-                          className="w-6 h-6 rounded-md shadow-inner border border-white/10"
-                          style={{ backgroundColor: theme.preview.card }}
-                          title="Cards"
-                        />
-                        <div
-                          className="w-6 h-6 rounded-md shadow-inner border border-white/10"
-                          style={{ backgroundColor: theme.preview.accent }}
-                          title="Primary Accent"
-                        />
-                        <div
-                          className="w-6 h-6 rounded-md shadow-inner border border-white/10"
-                          style={{ backgroundColor: theme.preview.secondary }}
-                          title="Secondary Accent"
-                        />
-                      </div>
+                      <div>
+                        {/* Swatch Previews */}
+                        <div className="flex items-center justify-between gap-1 mb-1.5">
+                          <div className="flex items-center gap-1">
+                            <div
+                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              style={{ backgroundColor: theme.preview.bg }}
+                              title="Background"
+                            />
+                            <div
+                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              style={{ backgroundColor: theme.preview.card }}
+                              title="Cards"
+                            />
+                            <div
+                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              style={{ backgroundColor: theme.preview.accent }}
+                              title="Primary Accent"
+                            />
+                            <div
+                              className="w-3.5 h-3.5 rounded shadow-inner border border-white/10"
+                              style={{ backgroundColor: theme.preview.secondary }}
+                              title="Secondary Accent"
+                            />
+                          </div>
+                          {isSelected && (
+                            <span className="w-4 h-4 rounded-full bg-cyan-500/20 border border-cyan-500/40 flex items-center justify-center shrink-0">
+                              <Check className="w-2.5 h-2.5 text-cyan-400" />
+                            </span>
+                          )}
+                        </div>
 
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold text-white group-hover:text-cyan-200 transition">
+                        <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition truncate mb-0.5">
                           {theme.name}
-                        </span>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                          {theme.badge}
-                        </span>
-                      </div>
+                        </div>
 
-                      <p className="text-[11px] text-slate-400 leading-relaxed mb-3 min-h-[32px]">
-                        {theme.description}
-                      </p>
+                        <p
+                          className="text-[9px] text-slate-400 leading-snug line-clamp-1 mb-2"
+                          title={theme.description}
+                        >
+                          {theme.description}
+                        </p>
+                      </div>
 
                       <button
                         type="button"
@@ -7844,7 +9574,7 @@ export default function App() {
                           e.stopPropagation();
                           handleSelectTheme(theme.id);
                         }}
-                        className={`w-full py-1.5 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition ${
+                        className={`w-full py-1 px-2 rounded-md text-[10px] font-semibold flex items-center justify-center gap-1 transition ${
                           isSelected
                             ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
                             : "bg-slate-800 text-slate-300 hover:bg-slate-700"
@@ -7852,11 +9582,11 @@ export default function App() {
                       >
                         {isSelected ? (
                           <>
-                            <Check className="w-3.5 h-3.5 text-cyan-400" />
-                            {t.themeSelected}
+                            <Check className="w-3 h-3 text-cyan-400" />
+                            <span>{t.themeSelected}</span>
                           </>
                         ) : (
-                          t.applyTheme
+                          <span>{t.applyTheme}</span>
                         )}
                       </button>
                     </div>
@@ -7865,24 +9595,21 @@ export default function App() {
               </div>
 
               {/* Window Opacity Slider (Внешний вид и прозрачность окна) */}
-              <div className="pt-5 border-t border-slate-800/80 space-y-3">
+              <div className="pt-4 border-t border-slate-800/80 space-y-2.5">
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2">
                     <Sliders className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                     <div>
                       <h4 className="text-xs font-bold text-white">Прозрачность окна приложения</h4>
-                      <p className="text-[11px] text-slate-400">
-                        Настройте прозрачность интерфейса NeuroVeil VPN для комфортной работы поверх других окон
-                      </p>
                     </div>
                   </div>
-                  <span className="text-xs px-2.5 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
                     {windowOpacity}%
                   </span>
                 </div>
 
-                <div className="flex items-center gap-4 pt-1">
-                  <span className="text-xs text-slate-400 font-mono">70%</span>
+                <div className="flex items-center gap-2.5 pt-1">
+                  <span className="text-[11px] text-slate-400 font-mono">70%</span>
                   <input
                     type="range"
                     min={70}
@@ -7892,12 +9619,12 @@ export default function App() {
                     onChange={(e) => handleUpdateOpacity(parseInt(e.target.value, 10))}
                     className="flex-1 accent-cyan-500 cursor-pointer h-2 bg-slate-800 rounded-lg appearance-none"
                   />
-                  <span className="text-xs text-slate-400 font-mono">100%</span>
+                  <span className="text-[11px] text-slate-400 font-mono">100%</span>
                   <button
                     onClick={() => handleUpdateOpacity(100)}
-                    className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
+                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-medium text-slate-300 transition"
                   >
-                    Сбросить (100%)
+                    100%
                   </button>
                 </div>
               </div>
@@ -7905,47 +9632,41 @@ export default function App() {
 
             {/* SYSTEM & CORE SECTION */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-3.5 ${currentTheme.styles.cardBorder}`}
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
-              <div className="flex items-center gap-2.5">
-                <Cpu className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
+              <div className="flex items-center gap-2">
+                <Cpu className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-sm font-bold text-white">{t.coreSectionTitle}</h3>
-                  <p className="text-[11px] text-slate-400">{t.coreSectionSubtitle}</p>
+                  <h3 className="text-xs font-bold text-white">{t.coreSectionTitle}</h3>
+                  <p className="text-[10px] text-slate-400">{t.coreSectionSubtitle}</p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 pt-1">
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-                  <span className="text-[11px] text-slate-400">{t.coreVersionLabel}</span>
+              <div className="grid grid-cols-1 gap-2.5 pt-1">
+                <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
+                  <span className="text-[10px] text-slate-400">{t.coreVersionLabel}</span>
                   <div className="text-xs font-mono font-semibold text-white flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
                     {status.singbox_version || "sing-box (готов)"}
                   </div>
-                  <p className="text-[10px] text-slate-500 pt-1">
-                    Бинарный файл: <code>data/bin/sing-box.exe</code>
-                  </p>
                 </div>
 
-                <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
-                  <span className="text-[11px] text-slate-400">{t.coreDriverLabel}</span>
+                <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1">
+                  <span className="text-[10px] text-slate-400">{t.coreDriverLabel}</span>
                   <div className="text-xs font-mono font-semibold text-white flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
                     wintun.dll (High-performance Layer-3 TUN)
                   </div>
-                  <p className="text-[10px] text-slate-500 pt-1">
-                    Расположение: <code>data/bin/wintun.dll</code>
-                  </p>
                 </div>
               </div>
 
-              <div className="flex gap-3 pt-1">
+              <div className="flex flex-wrap gap-2 pt-1">
                 <button
                   type="button"
                   onClick={handleDownloadCore}
                   disabled={downloadingCore}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 flex items-center gap-2 transition"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 flex items-center gap-1.5 transition"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${downloadingCore ? "animate-spin" : ""}`} />
                   {downloadingCore ? "Проверка..." : t.reinstallCoreBtn}
@@ -7956,21 +9677,109 @@ export default function App() {
                     await invoke("clear_core_logs");
                     showNotice("info", "Журнал логов ядра очищен");
                   }}
-                  className="px-4 py-2 rounded-xl bg-slate-800/60 hover:bg-slate-700/60 text-xs font-medium text-slate-400 hover:text-slate-200 transition"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/60 text-xs font-medium text-slate-400 hover:text-slate-200 transition"
                 >
                   {t.clearLogsBtn}
                 </button>
               </div>
             </div>
 
+            {/* BACKUPS & FACTORY RESET SECTION */}
+            <div
+              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+              style={{ backgroundColor: currentTheme.styles.cardBg }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Save className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                  <div>
+                    <h3 className="text-xs font-bold text-white">
+                      Резервные копии и сброс настроек
+                    </h3>
+                    <p className="text-[10px] text-slate-400">
+                      Экспорт и восстановление профилей ({profiles.length}), правил и параметров или полный сброс
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleExportBackup}
+                  disabled={backupBusy !== "idle" || resetBusy}
+                  className="py-2 px-3 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 disabled:opacity-50 border border-cyan-500/35 text-xs font-semibold text-cyan-300 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  {backupBusy === "export" ? "Сохранение..." : "Создать бэкап"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleImportBackup}
+                  disabled={backupBusy !== "idle" || resetBusy}
+                  className="py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 border border-slate-700 text-xs font-semibold text-slate-200 flex items-center justify-center gap-1.5 transition cursor-pointer"
+                >
+                  <Upload className="w-3.5 h-3.5" />
+                  {backupBusy === "import" ? "Восстановление..." : "Восстановить из файла"}
+                </button>
+              </div>
+
+              <div className="pt-2.5 border-t border-slate-800/70 space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-rose-300 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      <span>Сброс до заводских настроек</span>
+                    </div>
+                    <p className="text-[10px] text-slate-400 mt-0.5 leading-snug">
+                      Удалит все туннели, правила, параметры и сбросит тему оформления (ядро sing-box сохранится).
+                    </p>
+                  </div>
+                  {!confirmFactoryReset && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmFactoryReset(true)}
+                      disabled={resetBusy || backupBusy !== "idle"}
+                      className="px-3 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/40 text-xs font-semibold text-rose-300 flex items-center gap-1.5 transition cursor-pointer shrink-0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Сбросить
+                    </button>
+                  )}
+                </div>
+
+                {confirmFactoryReset && (
+                  <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[11px] font-medium text-rose-200">
+                      Точно удалить все данные и сбросить настройки?
+                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleFactoryReset}
+                        disabled={resetBusy}
+                        className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-[11px] font-bold text-white transition cursor-pointer"
+                      >
+                        {resetBusy ? "Сброс..." : "Подтвердить сброс"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmFactoryReset(false)}
+                        disabled={resetBusy}
+                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-medium text-slate-300 transition cursor-pointer"
+                      >
+                        Отмена
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Bottom Footer Bar */}
-            <div className="p-4 rounded-xl bg-slate-900/40 border border-slate-800/60 text-[11px] text-slate-400 flex items-center justify-between">
-              <div>
-                <span className="font-semibold text-slate-300">NeuroVeil VPN v{APP_VERSION} (Build {APP_BUILD})</span> — Next-Gen High-Speed VPN Client
-              </div>
-              <div className="text-slate-500 font-mono text-[10px]">
-                Port: 8443 (Hy2) • 9443 (TUIC) • Динамический UDP (Amnezia 3.1) • Tray & Autostart Active
-              </div>
+            <div className="p-3 rounded-xl bg-slate-900/40 border border-slate-800/60 text-[10px] text-slate-400 text-center">
+              <span className="font-semibold text-slate-300">NeuroVeil VPN v{APP_VERSION} (Build {APP_BUILD})</span>
             </div>
 
           </div>
@@ -7978,7 +9787,7 @@ export default function App() {
 
         {/* TAB 6: ABOUT & DEVELOPER (MoDiE) */}
         {activeTab === "about" && (
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 animate-tab-enter">
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-4 animate-tab-enter">
             {/* Header */}
             <div className="flex items-center justify-between">
               <div>
@@ -7987,7 +9796,7 @@ export default function App() {
                   О программе NeuroVeil VPN
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  Архитектура безопасности, специальные протоколы обхода ТСПУ, функционал клиента и центр обновлений
+                  Архитектура безопасности, специальные протоколы защиты соединения, функционал клиента и центр обновлений
                 </p>
               </div>
               <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
@@ -7997,7 +9806,7 @@ export default function App() {
 
             {/* Brand Hero Banner */}
             <div
-              className={`p-6 rounded-2xl border transition-all duration-300 relative overflow-hidden ${currentTheme.styles.cardBorder}`}
+              className={`p-6 rounded-2xl border soft-edge-block transition-all duration-300 relative overflow-hidden ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex flex-col md:flex-row items-center gap-6 relative z-10">
@@ -8018,11 +9827,11 @@ export default function App() {
                       sing-box-lx 1.14+ Core
                     </span>
                     <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 font-mono">
-                      Anti-DPI Handshake Shield
+                      Adaptive Handshake Shield
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения, разработанный специально для беспрепятственного доступа к сети в условиях жестких блокировок, фильтрации трафика и глубокого анализа пакетов (DPI / ТСПУ). Объединяет 12 современных криптографических и стеганографических протоколов, специальные гибридные схемы защиты рукопожатия WireGuard / Amnezia, интеллектуальный автоподбор портов, развертывание собственного VPS-сервера в 1 клик и раздельное туннелирование на лету.
+                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения для стабильного и безопасного доступа к сети. Объединяет 12 современных криптографических протоколов, специальные гибридные схемы защиты заголовков и рукопожатия WireGuard / Amnezia, интеллектуальный автоподбор портов, развертывание собственного VPS-сервера в 1 клик и раздельное туннелирование на лету.
                   </p>
                 </div>
               </div>
@@ -8030,7 +9839,7 @@ export default function App() {
 
             {/* Key Client Capabilities & Functional Modules */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-5 rounded-2xl border soft-edge-block transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center gap-2">
@@ -8085,7 +9894,7 @@ export default function App() {
                     TLS ClientHello Фрагментация
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Нарезка TCP-пакетов и TLS-записей рукопожатия (RFC 5246/8446) для обхода сигнатурного анализа SNI на кабельных и мобильных сетях.
+                    Фрагментация TCP-пакетов и TLS-записей рукопожатия (RFC 5246/8446) для защиты метаданных соединения на кабельных и мобильных сетях.
                   </p>
                 </div>
 
@@ -8103,7 +9912,7 @@ export default function App() {
 
             {/* Architecture & Tech Specs Details */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-5 rounded-2xl border soft-edge-block transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center gap-2">
@@ -8118,7 +9927,7 @@ export default function App() {
                     AWG + QUIC Pre-Warm (Спецпротокол)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Отправляет 20-байтный пакет WebRTC STUN Binding Request (RFC 5389) и 1200-байтный QUIC v1 Initial (RFC 9000) с рабочего UDP-порта за 15 мс до старта AmneziaWG, переводя классификатор ТСПУ в режим белого трафика.
+                    Отправляет 20-байтный пакет WebRTC STUN Binding Request (RFC 5389) и 1200-байтный QUIC v1 Initial (RFC 9000) с рабочего UDP-порта за 15 мс до старта AmneziaWG для предварительной инициализации UDP-сессии.
                   </p>
                 </div>
 
@@ -8148,7 +9957,7 @@ export default function App() {
                     VLESS Reality (Vision)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Маскировка TLS 1.3 рукопожатия под легитимный трафик зарубежных гигантов (Microsoft, Apple, Bing) с отпечатком браузера Chrome uTLS без необходимости покупать домен.
+                    Нативная TLS 1.3 верификация с использованием профиля браузера Chrome uTLS и высокой производительностью без необходимости настраивать собственный домен.
                   </p>
                 </div>
 
@@ -8158,7 +9967,7 @@ export default function App() {
                     ShadowTLS v3 & CDN Shield (WS)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Паразитическая мимикрия L7 с защитой от активного зондирования (ShadowTLS v3) и проксирование через белые узлы Cloudflare Edge / Workers (VLESS WebSocket).
+                    Протокол верификации рукопожатия L7 с защитой от внешнего сканирования (ShadowTLS v3) и маршрутизация через глобальную сеть Cloudflare Edge / Workers (VLESS WebSocket).
                   </p>
                 </div>
 
@@ -8168,7 +9977,7 @@ export default function App() {
                     WebRTC Steganography (gRPC)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Маскировка мультиплексированных потоков данных под аудио/видеозвонки мессенджеров поверх HTTP/2 gRPC с минимальной задержкой.
+                    Передача мультиплексированных потоков данных в формате мультимедийных пакетов реального времени поверх HTTP/2 gRPC с минимальной задержкой.
                   </p>
                 </div>
 
@@ -8206,7 +10015,7 @@ export default function App() {
 
             {/* Developer Card (MoDiE) */}
             <div
-              className={`p-6 rounded-2xl border transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
+              className={`p-6 rounded-2xl border soft-edge-block transition-all duration-300 space-y-4 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex items-center justify-between">
@@ -8222,7 +10031,7 @@ export default function App() {
                       </span>
                     </div>
                     <p className="text-xs text-slate-400 mt-0.5">
-                      Разработка архитектуры клиента, алгоритмов обхода ТСПУ и интерфейса NeuroVeil VPN
+                      Разработка архитектуры клиента, сетевых протоколов и интерфейса NeuroVeil VPN
                     </p>
                   </div>
                 </div>
@@ -8277,7 +10086,7 @@ export default function App() {
 
             {/* Updates Section */}
             <div
-              className={`p-5 rounded-2xl border transition-all duration-300 space-y-3.5 ${currentTheme.styles.cardBorder}`}
+              className={`p-5 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3.5 ${currentTheme.styles.cardBorder}`}
               style={{ backgroundColor: currentTheme.styles.cardBg }}
             >
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -8388,826 +10197,6 @@ export default function App() {
           </div>
         )}
 
-        {/* EDIT PROFILE CONFIG MODAL */}
-        {editingProfile && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-fadeIn">
-            <div className="max-w-2xl w-full p-6 rounded-2xl bg-[#111827] border border-cyan-500/40 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="p-2 rounded-xl bg-cyan-500/10 text-cyan-400 border border-cyan-500/30">
-                    <Edit3 className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h3 className="text-base font-bold text-white flex items-center gap-2">
-                      Редактирование профиля: {editingProfile.name}
-                    </h3>
-                    <p className="text-xs text-slate-400">
-                      Протокол: {editingProfile.protocol === "awg2" ? "AMNEZIAWG 2.0" : editingProfile.protocol === "awg_quic" ? "AWG + QUIC PRE-WARM" : editingProfile.protocol === "awg_vless" ? "ГИБРИД AWG + REALITY" : editingProfile.protocol === "amneziawg" ? "AMNEZIA 3.1" : editingProfile.protocol.toUpperCase()} • ID: {editingProfile.id}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={async () => {
-                      if (!editModeRaw) {
-                        const isAwgOrWg =
-                          editingProfile.protocol === "amneziawg" ||
-                          editingProfile.protocol === "awg_quic" ||
-                          editingProfile.protocol === "awg_vless" ||
-                          editingProfile.protocol === "awg2" ||
-                          editingProfile.protocol === "wireguard";
-                        if (isAwgOrWg) {
-                          try {
-                            const conf = await invoke<string>("export_awg_conf", {
-                              profileId: editingProfile.id,
-                              profile: { ...editingProfile, ...editForm },
-                            });
-                            setEditRawConf(conf);
-                          } catch {}
-                        }
-                        setEditRawJson(JSON.stringify({ ...editingProfile, ...editForm }, null, 2));
-                      }
-                      setEditModeRaw(!editModeRaw);
-                    }}
-                    className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 text-xs font-semibold text-cyan-300 border border-cyan-500/40 flex items-center gap-1.5 transition"
-                  >
-                    <FileText className="w-3.5 h-3.5" />
-                    {editModeRaw ? "Визуальный редактор" : "Редактировать текст конфига"}
-                  </button>
-                  <button
-                    onClick={() => setEditingProfile(null)}
-                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white"
-                  >
-                    <X className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-
-              {editModeRaw ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-slate-300 font-bold">Текстовый редактор конфигурации:</span>
-                      {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
-                        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-800 border border-slate-700">
-                          <button
-                            type="button"
-                            onClick={() => setRawTextFormat("conf")}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition ${
-                              rawTextFormat === "conf" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
-                            }`}
-                          >
-                            .conf (WireGuard / Amnezia)
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setRawTextFormat("json")}
-                            className={`px-2 py-0.5 rounded text-[11px] font-semibold transition ${
-                              rawTextFormat === "json" ? "bg-cyan-600 text-white" : "text-slate-400 hover:text-white"
-                            }`}
-                          >
-                            JSON (Sing-box)
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                    <span className="text-[11px] text-slate-400">
-                      {rawTextFormat === "conf" ? "Синтаксис .conf [Interface] / [Peer]" : "Синтаксис JSON"}
-                    </span>
-                  </div>
-
-                  {rawTextFormat === "conf" ? (
-                    <textarea
-                      rows={15}
-                      value={editRawConf}
-                      onChange={(e) => setEditRawConf(e.target.value)}
-                      placeholder="[Interface]&#10;PrivateKey = ...&#10;Address = ...&#10;ListenPort = ...&#10;&#10;[Peer]&#10;PublicKey = ...&#10;Endpoint = ..."
-                      className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-emerald-300 focus:outline-none focus:border-cyan-500 leading-relaxed"
-                    />
-                  ) : (
-                    <textarea
-                      rows={15}
-                      value={editRawJson}
-                      onChange={(e) => setEditRawJson(e.target.value)}
-                      className="w-full p-3 rounded-xl bg-[#070a12] border border-slate-800 text-xs font-mono text-cyan-200 focus:outline-none focus:border-cyan-500 leading-relaxed"
-                    />
-                  )}
-                  <p className="text-[11px] text-slate-400">
-                    💡 Вы можете напрямую отредактировать или вставить текст конфигурации. При сохранении параметры будут проверены и применены.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3.5">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Название профиля</label>
-                      <input
-                        type="text"
-                        value={editForm.name || ""}
-                        onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Сервер / IP</label>
-                      <input
-                        type="text"
-                        value={editForm.server || ""}
-                        onChange={(e) => setEditForm({ ...editForm, server: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Порт (сервера)</label>
-                      <input
-                        type="number"
-                        value={editForm.port || 0}
-                        onChange={(e) => setEditForm({ ...editForm, port: parseInt(e.target.value, 10) || 0 })}
-                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-slate-400 mb-1">Порт прослушивания (Listen Port)</label>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          value={editForm.listen_port ?? ""}
-                          placeholder="Случайный / не задан"
-                          onChange={(e) =>
-                            setEditForm({
-                              ...editForm,
-                              listen_port: e.target.value ? parseInt(e.target.value, 10) || null : null,
-                            })
-                          }
-                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setEditForm({
-                              ...editForm,
-                              listen_port: getRandomInt(10000, 64999),
-                            })
-                          }
-                          className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-cyan-300 shrink-0 transition"
-                          title="Выбрать случайный порт прослушивания"
-                        >
-                          🎲
-                        </button>
-                      </div>
-                    </div>
-                    {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless" || editingProfile.protocol === "awg2" || editingProfile.protocol === "wireguard") && (
-                      <div className="col-span-2">
-                        <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-[#0b101d] border border-slate-800 hover:border-cyan-500/40 cursor-pointer transition">
-                          <input
-                            type="checkbox"
-                            checked={editForm.auto_rotate_listen_port ?? true}
-                            onChange={(e) =>
-                              setEditForm({
-                                ...editForm,
-                                auto_rotate_listen_port: e.target.checked,
-                              })
-                            }
-                            className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-cyan-500 focus:ring-cyan-500"
-                          />
-                          <div>
-                            <div className="text-xs font-semibold text-slate-200">
-                              Менять порт прослушивания (ListenPort) при переподключении
-                            </div>
-                            <div className="text-[10px] text-slate-400">
-                              При нажатии кнопки «Переподключиться» выбирается новый свободный UDP-порт; основная кнопка подключения сохраняет текущий порт
-                            </div>
-                          </div>
-                        </label>
-                      </div>
-                    )}
-                    <div className={editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg_quic" && editingProfile.protocol !== "awg_vless" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" ? "col-span-1" : "col-span-2"}>
-                      <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
-                      <input
-                        type="text"
-                        value={editForm.sni || ""}
-                        onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
-                        className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                      />
-                    </div>
-                    {editingProfile.protocol !== "amneziawg" && editingProfile.protocol !== "awg_quic" && editingProfile.protocol !== "awg_vless" && editingProfile.protocol !== "awg2" && editingProfile.protocol !== "wireguard" && (
-                      <div className={editingProfile.protocol === "tuic" ? "col-span-1" : "col-span-2"}>
-                        <label className="block text-xs text-slate-400 mb-1">
-                          {editingProfile.protocol === "vless" || editingProfile.protocol === "vless_ws" || editingProfile.protocol === "webrtc"
-                            ? "UUID пользователя"
-                            : "Пароль / Секретный ключ"}
-                        </label>
-                        <input
-                          type="text"
-                          value={editForm.password || editForm.uuid || ""}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            if (
-                              editingProfile.protocol === "vless" ||
-                              editingProfile.protocol === "vless_ws" ||
-                              editingProfile.protocol === "webrtc"
-                            ) {
-                              setEditForm({ ...editForm, password: val, uuid: val });
-                            } else {
-                              setEditForm({ ...editForm, password: val });
-                            }
-                          }}
-                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                        />
-                      </div>
-                    )}
-                    {editingProfile.protocol === "tuic" && (
-                      <div className="col-span-2">
-                        <label className="block text-xs text-slate-400 mb-1">TUIC UUID</label>
-                        <input
-                          type="text"
-                          value={editForm.uuid || ""}
-                          onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
-                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                        />
-                      </div>
-                    )}
-                  </div>
-
-                  {editingProfile.protocol === "awg_vless" && (
-                    <div className="p-3.5 rounded-xl bg-fuchsia-950/20 border border-fuchsia-500/35 space-y-2.5">
-                      <div className="text-xs font-bold text-fuchsia-300">
-                        Параметры капсулы VLESS Reality Detour (TCP 443):
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Порт VLESS Reality (TCP)</label>
-                          <input
-                            type="number"
-                            value={editForm.vless_port ?? 443}
-                            onChange={(e) => setEditForm({ ...editForm, vless_port: parseInt(e.target.value, 10) || 443 })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">UUID VLESS</label>
-                          <input
-                            type="text"
-                            value={editForm.uuid || ""}
-                            placeholder="UUID пользователя VLESS"
-                            onChange={(e) => setEditForm({ ...editForm, uuid: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Reality Public Key</label>
-                          <input
-                            type="text"
-                            value={editForm.reality_public_key || ""}
-                            placeholder="Public Key Reality"
-                            onChange={(e) => setEditForm({ ...editForm, reality_public_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Reality Short ID (sid)</label>
-                          <input
-                            type="text"
-                            value={editForm.reality_short_id || ""}
-                            placeholder="0123456789abcdef"
-                            onChange={(e) => setEditForm({ ...editForm, reality_short_id: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {(editingProfile.protocol === "amneziawg" || editingProfile.protocol === "awg_quic" || editingProfile.protocol === "awg_vless") && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <div className="text-xs font-bold text-emerald-400">Параметры Amnezia 3.1 (Header Protection + 32-bit H1-H4):</div>
-                          <span className="text-[10px] text-slate-400">Стек обфускации, 32-битные заголовки H1-H4, динамические сдвиги S1-S4 ≥ 12 и Port Hunting</span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const r = generateRandomAwg31Params();
-                            setEditForm({ ...editForm, ...r });
-                            showNotice("success", "Параметры Amnezia 3.1 (включая 32-битные H1-H4) рандомизированы!");
-                          }}
-                          className="px-2.5 py-1 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition"
-                        >
-                          🎲 Рандомизировать 3.1
-                        </button>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            AWG Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_private_key || editForm.password || ""}
-                            placeholder="Вставьте PrivateKey из .conf"
-                            onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            AWG Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_public_key || ""}
-                            placeholder="Вставьте PublicKey сервера"
-                            onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_local_address || ""}
-                            placeholder="10.8.0.2/32"
-                            onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">HeaderProtectionKey (Base64 32 байта)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_header_protection_key || ""}
-                            placeholder="Base64 32 байта"
-                            onChange={(e) => setEditForm({ ...editForm, awg_header_protection_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div className="col-span-2">
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_preshared_key || ""}
-                            placeholder="Опциональный pre-shared key"
-                            onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div className="col-span-2">
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Диапазон перебора портов (Port Hunting Range)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_hop_ports || ""}
-                            placeholder="20000:65000"
-                            onChange={(e) => setEditForm({ ...editForm, awg_hop_ports: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div className="col-span-2 grid grid-cols-3 gap-2">
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jc (Мусорные пакеты)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jc ?? 5}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jc: parseInt(e.target.value, 10) || 5 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jmin (Мин. размер)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jmin ?? 10}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jmin: parseInt(e.target.value, 10) || 10 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-[10px] text-slate-400">Jmax (Макс. размер)</label>
-                            <input
-                              type="number"
-                              value={editForm.awg_jmax ?? 50}
-                              onChange={(e) => setEditForm({ ...editForm, awg_jmax: parseInt(e.target.value, 10) || 50 })}
-                              className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                            />
-                          </div>
-                        </div>
-
-                        {/* Shifts S1-S4 (≥ 12 bytes) */}
-                        <div className="col-span-2">
-                          <label className="block text-[10px] text-slate-400 mb-1">Сдвиги пакетов S1 - S4 (Amnezia 3.1: каждый ≥ 12 байт)</label>
-                          <div className="grid grid-cols-4 gap-2">
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S1"
-                                value={editForm.awg_s1 ?? 12}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s1: parseInt(e.target.value, 10) || 12 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S1</span>
-                            </div>
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S2"
-                                value={editForm.awg_s2 ?? 12}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s2: parseInt(e.target.value, 10) || 12 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S2</span>
-                            </div>
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S3"
-                                value={editForm.awg_s3 ?? 12}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s3: parseInt(e.target.value, 10) || 12 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S3</span>
-                            </div>
-                            <div>
-                              <input
-                                type="number"
-                                placeholder="S4"
-                                value={editForm.awg_s4 ?? 12}
-                                onChange={(e) => setEditForm({ ...editForm, awg_s4: parseInt(e.target.value, 10) || 12 })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">S4</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Magic Headers H1-H4 */}
-                        <div className="col-span-2">
-                          <label className="block text-[10px] text-slate-400 mb-1">Заголовки H1 - H4 (1, 2, 3, 4)</label>
-                          <div className="grid grid-cols-4 gap-2">
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H1"
-                                value={editForm.awg_h1 ?? "1"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h1: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H1</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H2"
-                                value={editForm.awg_h2 ?? "2"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h2: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H2</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H3"
-                                value={editForm.awg_h3 ?? "3"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h3: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H3</span>
-                            </div>
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="H4"
-                                value={editForm.awg_h4 ?? "4"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_h4: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white text-center font-mono"
-                              />
-                              <span className="text-[9px] text-slate-500 block text-center mt-0.5">H4</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Amnezia 3.1 Timers */}
-                        <div className="col-span-2 pt-1 border-t border-slate-800">
-                          <label className="block text-[10px] text-slate-400 mb-1">Таймеры и параметры рукопожатия Amnezia 3.1</label>
-                          <div className="grid grid-cols-3 gap-2">
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">RekeyAfterTime</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_rekey_after_time || "100-120"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_rekey_after_time: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">RekeyTimeout</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_rekey_timeout || "3-7"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_rekey_timeout: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">RejectAfterTime</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_reject_after_time || "150-180"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_reject_after_time: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">KeepaliveTimeout</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_keepalive_timeout || "5-15"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_keepalive_timeout: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">MaxHandshakeAttempts</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_max_handshake_attempts || "15-20"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_max_handshake_attempts: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                            <div>
-                              <span className="text-[9px] text-slate-500 block mb-0.5">PersistentKeepalive</span>
-                              <input
-                                type="text"
-                                value={editForm.awg_persistent_keepalive || "25-35"}
-                                onChange={(e) => setEditForm({ ...editForm, awg_persistent_keepalive: e.target.value })}
-                                className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-xs text-white"
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "awg2" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
-                      <div>
-                        <div className="text-xs font-bold text-teal-400">Параметры AmneziaWG 2.0:</div>
-                        <span className="text-[10px] text-slate-400">
-                          Чистая конфигурация (PrivateKey, Address, DNS 1.1.1.1, MTU 1420, PublicKey, PresharedKey, Endpoint)
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            AWG Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_private_key || editForm.password || ""}
-                            placeholder="Вставьте PrivateKey из .conf"
-                            onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            AWG Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_public_key || ""}
-                            placeholder="Вставьте PublicKey сервера"
-                            onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_local_address || ""}
-                            placeholder="10.8.1.2/24"
-                            onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_preshared_key || ""}
-                            placeholder="Опциональный pre-shared key"
-                            onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "wireguard" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-3">
-                      <div>
-                        <div className="text-xs font-bold text-rose-400">Параметры стандартного WireGuard:</div>
-                        <span className="text-[10px] text-slate-400">Чистый протокол WireGuard (без обфускации AWG)</span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            Private Key {!editForm.awg_private_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_private_key || editForm.password || ""}
-                            placeholder="Вставьте PrivateKey из .conf"
-                            onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">
-                            Public Key (Сервер) {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
-                          </label>
-                          <input
-                            type="text"
-                            value={editForm.awg_public_key || ""}
-                            placeholder="Вставьте PublicKey сервера"
-                            onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-cyan-500"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_local_address || ""}
-                            placeholder="10.8.0.2/32"
-                            onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_preshared_key || ""}
-                            placeholder="Опциональный pre-shared key"
-                            onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div className="col-span-2">
-                          <label className="block text-[11px] text-slate-400 mb-0.5">PersistentKeepalive (секунды)</label>
-                          <input
-                            type="text"
-                            value={editForm.awg_persistent_keepalive || "25"}
-                            placeholder="25"
-                            onChange={(e) => setEditForm({ ...editForm, awg_persistent_keepalive: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "hysteria2" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
-                      <div className="text-xs font-bold text-cyan-400">Параметры Hysteria 2:</div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Пароль обфускации Salamander</label>
-                          <input
-                            type="text"
-                            value={editForm.obfs_password || ""}
-                            onChange={(e) => setEditForm({ ...editForm, obfs_password: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Port Hopping Range</label>
-                          <input
-                            type="text"
-                            value={editForm.hop_ports || ""}
-                            placeholder="20000:65000"
-                            onChange={(e) => setEditForm({ ...editForm, hop_ports: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "shadowtls" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
-                      <div className="text-xs font-bold text-pink-400">Параметры ShadowTLS v3:</div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Пароль ShadowTLS рукопожатия</label>
-                          <input
-                            type="text"
-                            value={editForm.shadowtls_password || ""}
-                            onChange={(e) => setEditForm({ ...editForm, shadowtls_password: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">Паразитный SNI (Apple / Microsoft)</label>
-                          <input
-                            type="text"
-                            value={editForm.shadowtls_sni || ""}
-                            placeholder="gateway.icloud.com"
-                            onChange={(e) => setEditForm({ ...editForm, shadowtls_sni: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "vless_ws" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
-                      <div className="text-xs font-bold text-orange-400">Параметры VLESS + WebSocket (CDN Shield):</div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">WebSocket Path</label>
-                          <input
-                            type="text"
-                            value={editForm.ws_path || ""}
-                            placeholder="/ws-tunnel"
-                            onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">CDN Domain / Host header (опционально)</label>
-                          <input
-                            type="text"
-                            value={editForm.cdn_host || ""}
-                            placeholder="worker.example.workers.dev"
-                            onChange={(e) => setEditForm({ ...editForm, cdn_host: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-
-                  {editingProfile.protocol === "webrtc" && (
-                    <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
-                      <div className="text-xs font-bold text-lime-400">Параметры WebRTC Steganography:</div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">gRPC Service / Media stream</label>
-                          <input
-                            type="text"
-                            value={editForm.ws_path || "webrtc-media"}
-                            placeholder="webrtc-media"
-                            onChange={(e) => setEditForm({ ...editForm, ws_path: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] text-slate-400 mb-0.5">SNI (Маскировочный хост)</label>
-                          <input
-                            type="text"
-                            value={editForm.sni || ""}
-                            placeholder="zoom.us или meet.google.com"
-                            onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex justify-end gap-3 pt-2 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setEditingProfile(null)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition"
-                >
-                  Отмена
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSaveEditedProfile}
-                  disabled={editSaving}
-                  className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-xs font-bold text-white shadow-lg shadow-cyan-600/30 transition flex items-center gap-2"
-                >
-                  {editSaving ? "Сохранение..." : "Сохранить изменения"}
-                </button>
-              </div>
-            </div>
-
-          </div>
-        )}
       </main>
     </div>
   );

@@ -2713,8 +2713,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "neuroveil-vpn"
-version = "1.0.9"
+name = "neuroveil-vpn-v2"
+version = "2.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

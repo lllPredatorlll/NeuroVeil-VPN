@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NeuroVeil VPN",
-  "version": "1.0.9",
-  "identifier": "com.neuroveil.vpn",
+  "productName": "NeuroVeil VPN 2.0",
+  "version": "2.0.0",
+  "identifier": "com.neuroveil.vpn2",
   "build": {
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
@@ -12,12 +12,11 @@
     "windows": [
       {
         "label": "main",
-        "title": "NeuroVeil VPN",
-        "width": 1060,
-        "height": 720,
-        "minWidth": 880,
-        "minHeight": 580,
+        "title": "NeuroVeil VPN 2.0",
+        "width": 460,
+        "height": 680,
         "resizable": true,
+        "maximizable": false,
         "fullscreen": false,
         "visible": false,
         "center": true,
