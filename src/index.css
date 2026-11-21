@@ -780,3 +780,23 @@ input[type="checkbox"]:disabled {
 [data-theme-mode="light"] .protocol-card-desc {
   color: #475569 !important;
 }
+
+/* Mobile / Android edge-to-edge safe-area & touch polish */
+html,
+body {
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-safe-top {
+  padding-top: max(env(safe-area-inset-top, 0px), 8px);
+}
+
+.mobile-safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), 6px);
+}
+
+.mobile-scroll-touch {
+  -webkit-overflow-scrolling: touch;
+}
+

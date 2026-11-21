@@ -75,6 +75,7 @@ pnpm-debug.log*
 !WebView2Loader.dll
 !wintun.dll
 *.msi
+*.apk
 *.nsis
 *.zip
 *.7z

@@ -1,6 +1,10 @@
 fn main() {
-    let mut windows = tauri_build::WindowsAttributes::new();
-    windows = windows.app_manifest(r#"
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let mut attrs = tauri_build::Attributes::new();
+
+    if target_os == "windows" {
+        let windows = tauri_build::WindowsAttributes::new().app_manifest(
+            r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <dependency>
     <dependentAssembly>
@@ -22,9 +26,10 @@ fn main() {
     </security>
   </trustInfo>
 </assembly>
-"#);
+"#,
+        );
+        attrs = attrs.windows_attributes(windows);
+    }
 
-    tauri_build::try_build(
-        tauri_build::Attributes::new().windows_attributes(windows),
-    ).expect("failed to run tauri-build");
+    tauri_build::try_build(attrs).expect("failed to run tauri-build");
 }

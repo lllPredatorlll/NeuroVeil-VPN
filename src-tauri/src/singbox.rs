@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::PathBuf;
+#[cfg(not(target_os = "android"))]
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -12,7 +13,23 @@ use uuid::Uuid;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+static APP_DATA_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_app_data_dir(dir: PathBuf) {
+    let _ = fs::create_dir_all(&dir);
+    let _ = APP_DATA_DIR_OVERRIDE.set(dir);
+}
+
 pub fn get_app_data_dir() -> PathBuf {
+    if let Some(dir) = APP_DATA_DIR_OVERRIDE.get() {
+        let _ = fs::create_dir_all(dir);
+        return dir.clone();
+    }
+    if cfg!(test) {
+        let dir = std::env::temp_dir().join("neuroveil_test_data");
+        let _ = fs::create_dir_all(&dir);
+        return dir;
+    }
     let mut base = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -47,26 +64,39 @@ pub fn get_singbox_bin_path() -> PathBuf {
 }
 
 pub fn check_singbox_version() -> (bool, String) {
-    let bin = get_singbox_bin_path();
-    if !bin.exists() {
-        return (false, "Не установлен".to_string());
+    #[cfg(target_os = "android")]
+    {
+        return (true, "libbox 1.14.4-lx (встроено)".to_string());
     }
-    let mut cmd = Command::new(&bin);
-    cmd.arg("version");
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
-    match cmd.output() {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let first_line = text.lines().next().unwrap_or("sing-box").to_string();
-            (true, first_line)
+    #[cfg(not(target_os = "android"))]
+    {
+        let bin = get_singbox_bin_path();
+        if !bin.exists() {
+            return (false, "Не установлен".to_string());
         }
-        _ => (true, "sing-box (установлен)".to_string()),
+        let mut cmd = Command::new(&bin);
+        cmd.arg("version");
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let first_line = text.lines().next().unwrap_or("sing-box").to_string();
+                (true, first_line)
+            }
+            _ => (true, "sing-box (установлен)".to_string()),
+        }
     }
 }
 
 pub fn download_singbox_core() -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        return Ok("libbox 1.14.4-lx (встроено)".to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
     let bin_path = get_singbox_bin_path();
 
     let user_agent = concat!("NeuroVeilVPN-Client/", env!("CARGO_PKG_VERSION"));
@@ -143,8 +173,10 @@ pub fn download_singbox_core() -> Result<String, String> {
 
     let (_, ver) = check_singbox_version();
     Ok(ver)
+    }
 }
 
+#[allow(unused_variables)]
 pub fn set_windows_system_proxy(enable: bool, port: u16) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -205,7 +237,7 @@ fn escape_regex(s: &str) -> String {
 }
 
 pub fn collect_exe_in_dir(dir: &std::path::Path, depth: u8, names: &mut Vec<String>) {
-    if depth > 2 || names.len() >= 64 {
+    if depth > 3 || names.len() >= 128 {
         return;
     }
     if let Ok(entries) = fs::read_dir(dir) {
@@ -452,15 +484,16 @@ pub fn get_rules_direct_path() -> PathBuf {
     get_app_data_dir().join("rules_direct.json")
 }
 
-pub fn build_ruleset_content(
-    processes: &[String],
-    domains: &[String],
-    ips: &[String],
-    is_proxy: bool,
-) -> Value {
-    let mut rules: Vec<Value> = Vec::new();
+pub fn get_rules_proxy_proc_path() -> PathBuf {
+    get_app_data_dir().join("rules_proxy_proc.json")
+}
 
-    // 1. Convert process rules into rule_set items (strip "outbound" property)
+pub fn get_rules_direct_proc_path() -> PathBuf {
+    get_app_data_dir().join("rules_direct_proc.json")
+}
+
+pub fn build_process_ruleset_content(processes: &[String], is_proxy: bool) -> Value {
+    let mut rules: Vec<Value> = Vec::new();
     let outbound_tag = if is_proxy { "proxy" } else { "direct" };
     let (proc_routes, _) = build_process_rules(processes, outbound_tag);
     for mut r in proc_routes {
@@ -469,8 +502,16 @@ pub fn build_ruleset_content(
             rules.push(r);
         }
     }
+    json!({
+        "version": 1,
+        "rules": rules
+    })
+}
 
-    // 2. Custom domains
+pub fn build_domain_ip_ruleset_content(domains: &[String], ips: &[String]) -> Value {
+    let mut rules: Vec<Value> = Vec::new();
+
+    // 1. Custom domains
     let mut domain_suffixes = Vec::new();
     let mut full_domains = Vec::new();
     for d in domains {
@@ -496,7 +537,7 @@ pub fn build_ruleset_content(
         rules.push(Value::Object(d_rule));
     }
 
-    // 3. Custom IPs / CIDRs
+    // 2. Custom IPs / CIDRs
     let mut cidrs = Vec::new();
     for ip in ips {
         let t = ip.trim();
@@ -518,30 +559,56 @@ pub fn build_ruleset_content(
     })
 }
 
+#[allow(dead_code)]
+pub fn build_ruleset_content(
+    processes: &[String],
+    domains: &[String],
+    ips: &[String],
+    is_proxy: bool,
+) -> Value {
+    let mut rules = build_process_ruleset_content(processes, is_proxy)["rules"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(dom_rules) = build_domain_ip_ruleset_content(domains, ips)["rules"].as_array() {
+        rules.extend(dom_rules.iter().cloned());
+    }
+    json!({
+        "version": 1,
+        "rules": rules
+    })
+}
+
 pub fn write_routing_rulesets(routing: &RoutingConfig) -> Result<(), String> {
     let proxy_path = get_rules_proxy_path();
     let direct_path = get_rules_direct_path();
+    let proxy_proc_path = get_rules_proxy_proc_path();
+    let direct_proc_path = get_rules_direct_proc_path();
+
+    let empty_ruleset = || json!({ "version": 1, "rules": [] });
+
+    let proxy_proc_content = if routing.split_tunneling {
+        build_process_ruleset_content(&routing.proxy_processes, true)
+    } else {
+        empty_ruleset()
+    };
+
+    let direct_proc_content = if routing.split_tunneling {
+        build_process_ruleset_content(&routing.direct_processes, false)
+    } else {
+        empty_ruleset()
+    };
 
     let proxy_content = if routing.split_tunneling {
-        build_ruleset_content(
-            &routing.proxy_processes,
-            &routing.proxy_domains,
-            &routing.proxy_ips,
-            true,
-        )
+        build_domain_ip_ruleset_content(&routing.proxy_domains, &routing.proxy_ips)
     } else {
-        json!({ "version": 1, "rules": [] })
+        empty_ruleset()
     };
 
     let direct_content = if routing.split_tunneling {
-        build_ruleset_content(
-            &routing.direct_processes,
-            &routing.direct_domains,
-            &routing.direct_ips,
-            false,
-        )
+        build_domain_ip_ruleset_content(&routing.direct_domains, &routing.direct_ips)
     } else {
-        json!({ "version": 1, "rules": [] })
+        empty_ruleset()
     };
 
     if let Some(parent) = proxy_path.parent() {
@@ -559,6 +626,8 @@ pub fn write_routing_rulesets(routing: &RoutingConfig) -> Result<(), String> {
         Ok(())
     };
 
+    write_and_sync(&proxy_proc_path, &proxy_proc_content, "rules_proxy_proc.json")?;
+    write_and_sync(&direct_proc_path, &direct_proc_content, "rules_direct_proc.json")?;
     write_and_sync(&proxy_path, &proxy_content, "rules_proxy.json")?;
     write_and_sync(&direct_path, &direct_content, "rules_direct.json")?;
 
@@ -1274,12 +1343,17 @@ pub fn generate_singbox_config_internal(
     }
 
     if routing.mode == "tun" {
+        let tun_mtu = if is_awg_protocol(&profile.protocol) {
+            1280
+        } else {
+            1400
+        };
         let mut tun_obj = json!({
             "type": "tun",
             "tag": "tun-in",
             "interface_name": "neuroveil-tun",
             "address": ["172.19.0.1/30"],
-            "mtu": 1400,
+            "mtu": tun_mtu,
             "auto_route": true,
             "strict_route": routing.kill_switch,
             "stack": "mixed",
@@ -1472,10 +1546,23 @@ pub fn generate_singbox_config_internal(
         route_obj.insert("default_domain_resolver".to_string(), json!("dns-direct"));
     } else {
         // Desktop Windows client: Dynamic local rule_set watching via fsnotify + selector outbound
+        // Process rulesets MUST be evaluated before domain/IP rulesets so adding an app (e.g. a game or launcher)
+        // to proxy_processes routes 100% of its traffic consistently instead of splitting .ru/.su domains direct
+        // and raw server IPs through VPN.
         let _ = write_routing_rulesets(routing);
-        let proxy_path_str = get_rules_proxy_path().to_string_lossy().to_string();
+        let direct_proc_path_str = get_rules_direct_proc_path().to_string_lossy().to_string();
+        let proxy_proc_path_str = get_rules_proxy_proc_path().to_string_lossy().to_string();
         let direct_path_str = get_rules_direct_path().to_string_lossy().to_string();
+        let proxy_path_str = get_rules_proxy_path().to_string_lossy().to_string();
 
+        route_rules.push(json!({
+            "rule_set": "direct-proc-rules",
+            "outbound": "direct"
+        }));
+        route_rules.push(json!({
+            "rule_set": "proxy-proc-rules",
+            "outbound": "proxy"
+        }));
         route_rules.push(json!({
             "rule_set": "direct-rules",
             "outbound": "direct"
@@ -1485,6 +1572,14 @@ pub fn generate_singbox_config_internal(
             "outbound": "proxy"
         }));
 
+        dns_rules.push(json!({
+            "rule_set": "direct-proc-rules",
+            "server": "dns-direct"
+        }));
+        dns_rules.push(json!({
+            "rule_set": "proxy-proc-rules",
+            "server": "dns-remote"
+        }));
         dns_rules.push(json!({
             "rule_set": "direct-rules",
             "server": "dns-direct"
@@ -1504,6 +1599,18 @@ pub fn generate_singbox_config_internal(
         route_obj.insert(
             "rule_set".to_string(),
             json!([
+                {
+                    "tag": "direct-proc-rules",
+                    "type": "local",
+                    "format": "source",
+                    "path": direct_proc_path_str
+                },
+                {
+                    "tag": "proxy-proc-rules",
+                    "type": "local",
+                    "format": "source",
+                    "path": proxy_proc_path_str
+                },
                 {
                     "tag": "direct-rules",
                     "type": "local",
@@ -1630,6 +1737,127 @@ pub fn generate_mobile_singbox_config(profile: &VpnProfile, routing: &RoutingCon
                 );
             }
             *inbounds = vec![Value::Object(tun_map)];
+        }
+    }
+    cfg
+}
+
+fn is_android_package_id(entry: &str) -> bool {
+    let t = entry.trim();
+    !t.is_empty()
+        && t.contains('.')
+        && !t.contains('\\')
+        && !t.contains('/')
+        && !t.to_ascii_lowercase().ends_with(".exe")
+        && !t.chars().any(char::is_whitespace)
+}
+
+pub fn generate_android_runtime_singbox_config(profile: &VpnProfile, routing: &RoutingConfig) -> Value {
+    let mut mobile_routing = routing.clone();
+    // On Android runtime, strip desktop .exe entries while keeping Android package names
+    let proxy_pkgs: Vec<String> = routing
+        .proxy_processes
+        .iter()
+        .filter(|s| is_android_package_id(s))
+        .map(|s| s.trim().to_string())
+        .collect();
+    let direct_pkgs: Vec<String> = routing
+        .direct_processes
+        .iter()
+        .filter(|s| is_android_package_id(s))
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    mobile_routing.proxy_processes.clear();
+    mobile_routing.direct_processes.clear();
+
+    let mut cfg = generate_singbox_config_internal(profile, &mobile_routing, None, true);
+    if let Some(obj) = cfg.as_object_mut() {
+        obj.remove("experimental");
+        if let Some(outbounds) = obj.get_mut("outbounds").and_then(|v| v.as_array_mut()) {
+            for ob in outbounds.iter_mut() {
+                if let Some(ob_obj) = ob.as_object_mut() {
+                    ob_obj.remove("inet4_bind_address");
+                }
+            }
+        }
+        if let Some(route) = obj.get_mut("route").and_then(|v| v.as_object_mut()) {
+            route.insert("override_android_vpn".to_string(), json!(true));
+            route.insert("auto_detect_interface".to_string(), json!(true));
+
+            if let Some(rules) = route.get_mut("rules").and_then(|v| v.as_array_mut()) {
+                // Dedicated local SOCKS/HTTP mixed inbound always routes via proxy for in-app speedtest/tunnel fallback
+                rules.insert(
+                    3.min(rules.len()),
+                    json!({
+                        "inbound": ["vpn-tunnel-in"],
+                        "outbound": "proxy"
+                    }),
+                );
+
+                // In whitelist mode with extra domain/IP rules, also route selected packages by package_name
+                if routing.split_tunneling
+                    && routing.default_outbound == "direct"
+                    && !proxy_pkgs.is_empty()
+                    && (!routing.proxy_domains.is_empty() || !routing.proxy_ips.is_empty())
+                {
+                    rules.push(json!({
+                        "package_name": proxy_pkgs,
+                        "outbound": "proxy"
+                    }));
+                }
+            }
+        }
+
+        if let Some(inbounds) = obj.get_mut("inbounds").and_then(|v| v.as_array_mut()) {
+            let mut tun_map = serde_json::Map::new();
+            tun_map.insert("type".to_string(), json!("tun"));
+            tun_map.insert("tag".to_string(), json!("tun-in"));
+            let tun_addrs = if routing.block_ipv6 {
+                json!(["172.19.0.1/28"])
+            } else {
+                json!(["172.19.0.1/28", "fdfe:dcba:9876::1/126"])
+            };
+            tun_map.insert("address".to_string(), tun_addrs);
+            let tun_mtu = if is_awg_protocol(&profile.protocol) {
+                1280
+            } else {
+                1400
+            };
+            tun_map.insert("mtu".to_string(), json!(tun_mtu));
+            tun_map.insert("auto_route".to_string(), json!(true));
+            tun_map.insert("strict_route".to_string(), json!(routing.kill_switch));
+            tun_map.insert("stack".to_string(), json!("gvisor"));
+            tun_map.insert("endpoint_independent_nat".to_string(), json!(true));
+            if profile.server.parse::<std::net::Ipv4Addr>().is_ok() {
+                tun_map.insert(
+                    "route_exclude_address".to_string(),
+                    json!([format!("{}/32", profile.server)]),
+                );
+            }
+
+            if routing.split_tunneling {
+                if routing.default_outbound == "direct" {
+                    if !proxy_pkgs.is_empty()
+                        && routing.proxy_domains.is_empty()
+                        && routing.proxy_ips.is_empty()
+                    {
+                        tun_map.insert("include_package".to_string(), json!(proxy_pkgs));
+                    }
+                } else if !direct_pkgs.is_empty() {
+                    tun_map.insert("exclude_package".to_string(), json!(direct_pkgs));
+                }
+            }
+
+            *inbounds = vec![
+                Value::Object(tun_map),
+                json!({
+                    "type": "mixed",
+                    "tag": "vpn-tunnel-in",
+                    "listen": "127.0.0.1",
+                    "listen_port": 2081
+                }),
+            ];
         }
     }
     cfg
@@ -4645,6 +4873,7 @@ extern "system" {
 /// Immediately drops pre-existing non-TUN TCP sockets (e.g. hung SYN_SENT / old sockets bound to 192.168.x.x)
 /// for Telegram, Discord, and other proxy_processes (excluding steam.exe so game downloads aren't interrupted),
 /// forcing them to reconnect through neuroveil-tun (172.19.0.1) in 0ms instead of waiting 21s for TCP SYN timeout.
+#[allow(unused_variables)]
 pub fn reset_stale_app_sockets(proxy_processes: &[String]) {
     #[cfg(target_os = "windows")]
     {
@@ -5245,6 +5474,155 @@ PersistentKeepalive = 25
                 "sing-box check failed for multi bundle:\nSTDOUT: {}\nSTDERR: {}",
                 String::from_utf8_lossy(&out_multi.stdout),
                 String::from_utf8_lossy(&out_multi.stderr)
+            );
+        }
+    }
+
+    #[test]
+    fn test_desktop_process_ruleset_precedence_and_awg_mtu() {
+        let mut routing = RoutingConfig::default();
+        routing.mode = "tun".to_string();
+        routing.split_tunneling = true;
+        routing.default_outbound = "direct".to_string();
+        routing.direct_domains = vec![".ru".to_string(), ".su".to_string()];
+        routing.proxy_processes = vec!["Tanki.exe".to_string()];
+        routing.direct_processes = vec!["lgc.exe".to_string()];
+
+        let awg_prof = VpnProfile {
+            id: "awg-vless-test".to_string(),
+            name: "AWG Reality Test".to_string(),
+            protocol: "awg_vless".to_string(),
+            server: "192.109.206.82".to_string(),
+            port: 34327,
+            vless_port: Some(443),
+            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            password: "vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=".to_string(),
+            awg_private_key: Some("vKYKrbcUQj34y1N3ZHwB+dNXJgk3b2oJZ5EuH0hqhLY=".to_string()),
+            awg_public_key: Some("fN7baW+3+uBNuwSQsO+lwD6GkP3oNucDfn5UW1EWphQ=".to_string()),
+            reality_public_key: Some("fN7baW-3-uBNuwSQsO-lwD6GkP3oNucDfn5UW1EWphQ".to_string()),
+            sni: "www.microsoft.com".to_string(),
+            ..Default::default()
+        };
+
+        let cfg = generate_singbox_config(&awg_prof, &routing);
+        let tun_in = cfg["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["tag"] == "tun-in")
+            .expect("tun-in must exist");
+        assert_eq!(tun_in["mtu"], json!(1280));
+
+        let route_rules = cfg["route"]["rules"].as_array().unwrap();
+        let pos_tag = |tag: &str| {
+            route_rules
+                .iter()
+                .position(|r| r.get("rule_set").and_then(|v| v.as_str()) == Some(tag))
+                .expect("rule_set must exist in route.rules")
+        };
+        let i_dproc = pos_tag("direct-proc-rules");
+        let i_pproc = pos_tag("proxy-proc-rules");
+        let i_ddom = pos_tag("direct-rules");
+        let i_pdom = pos_tag("proxy-rules");
+        assert!(i_dproc < i_pproc && i_pproc < i_ddom && i_ddom < i_pdom);
+
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        let dns_pos = |tag: &str| {
+            dns_rules
+                .iter()
+                .position(|r| r.get("rule_set").and_then(|v| v.as_str()) == Some(tag))
+                .expect("rule_set must exist in dns.rules")
+        };
+        assert!(dns_pos("direct-proc-rules") < dns_pos("proxy-proc-rules"));
+        assert!(dns_pos("proxy-proc-rules") < dns_pos("direct-rules"));
+        assert!(dns_pos("direct-rules") < dns_pos("proxy-rules"));
+
+        let proxy_proc_rs = serde_json::from_str::<Value>(
+            &std::fs::read_to_string(get_rules_proxy_proc_path()).unwrap(),
+        )
+        .unwrap();
+        let direct_rs = serde_json::from_str::<Value>(
+            &std::fs::read_to_string(get_rules_direct_path()).unwrap(),
+        )
+        .unwrap();
+        assert!(proxy_proc_rs["rules"].to_string().contains("Tanki.exe"));
+        assert!(!direct_rs["rules"].to_string().contains("lgc.exe"));
+        assert!(direct_rs["rules"].to_string().contains(".su"));
+
+        let singbox_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("data")
+            .join("bin")
+            .join("sing-box.exe");
+        if singbox_bin.exists() {
+            let temp_cfg = std::env::temp_dir().join("test_desktop_4rules_awg.json");
+            std::fs::write(&temp_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+            let out = std::process::Command::new(&singbox_bin)
+                .args(["check", "-c", temp_cfg.to_str().unwrap()])
+                .output()
+                .expect("Failed to run sing-box check");
+            let _ = std::fs::remove_file(&temp_cfg);
+            assert!(
+                out.status.success(),
+                "sing-box check failed for 4-ruleset desktop config:\nSTDOUT: {}\nSTDERR: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let mut vless_prof = awg_prof.clone();
+        vless_prof.protocol = "vless".to_string();
+        let vless_cfg = generate_singbox_config(&vless_prof, &routing);
+        let vless_tun = vless_cfg["inbounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["tag"] == "tun-in")
+            .unwrap();
+        assert_eq!(vless_tun["mtu"], json!(1400));
+    }
+
+    #[test]
+    fn test_android_runtime_config_omits_experimental_clash_api() {
+        let mut routing = RoutingConfig::default();
+        routing.mode = "tun".to_string();
+        routing.split_tunneling = false;
+
+        let prof = VpnProfile {
+            id: "android-vless-test".to_string(),
+            name: "Android Traffic Test".to_string(),
+            protocol: "vless".to_string(),
+            server: "192.109.206.82".to_string(),
+            port: 443,
+            uuid: Some("11111111-2222-3333-4444-555555555555".to_string()),
+            reality_public_key: Some("fN7baW-3-uBNuwSQsO-lwD6GkP3oNucDfn5UW1EWphQ".to_string()),
+            sni: "www.microsoft.com".to_string(),
+            ..Default::default()
+        };
+
+        let cfg = generate_android_runtime_singbox_config(&prof, &routing);
+        assert!(cfg.get("experimental").is_none());
+
+        let singbox_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("data")
+            .join("bin")
+            .join("sing-box.exe");
+        if singbox_bin.exists() {
+            let temp_cfg = std::env::temp_dir().join("test_android_no_clash_api_cfg.json");
+            std::fs::write(&temp_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+            let out = std::process::Command::new(&singbox_bin)
+                .args(["check", "-c", temp_cfg.to_str().unwrap()])
+                .output()
+                .expect("Failed to run sing-box check");
+            let _ = std::fs::remove_file(&temp_cfg);
+            assert!(
+                out.status.success(),
+                "sing-box check failed for Android config:\nSTDOUT: {}\nSTDERR: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
             );
         }
     }

@@ -66,6 +66,8 @@ import {
   Play,
   LogOut,
   Box,
+  Gauge,
+  MapPin,
 } from "lucide-react";
 import QRCode from "qrcode";
 import appIconLogo from "./assets/app-icon.png";
@@ -79,6 +81,7 @@ import {
   RoutingConfig,
   RoutingPreset,
   RunningProcessInfo,
+  SpeedTestProgressEvent,
   VpnProfile,
   VpnStatus,
   VpsAdminState,
@@ -89,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2020";
+const APP_BUILD = "2030";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -647,6 +650,70 @@ export default function App() {
   const loadedEditKeyRef = useRef<string | null>(null);
   const routingLoadedForPidRef = useRef<string | null>(null);
 
+  const initialIsAndroid =
+    typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
+  const [isMobilePlatform, setIsMobilePlatform] = useState<boolean>(initialIsAndroid);
+  const isMobilePlatformRef = useRef<boolean>(initialIsAndroid);
+  const mobilePopupStackRef = useRef<
+    { mode: string; profileId: string | null; submode: string | null }[]
+  >([]);
+
+  const openPopupWindow = async (
+    mode: string,
+    profileId?: string | null,
+    submode?: string | null
+  ) => {
+    if (isMobilePlatformRef.current) {
+      loadedQrKeyRef.current = null;
+      loadedEditKeyRef.current = null;
+      if (mode === "routing_rules") {
+        routingLoadedForPidRef.current = null;
+      }
+      const entry = {
+        mode,
+        profileId: profileId ?? null,
+        submode: submode ?? null,
+      };
+      mobilePopupStackRef.current = [...mobilePopupStackRef.current, entry];
+      setPopupParams(entry);
+      try {
+        window.history.pushState(
+          { neuroveilPopup: mode, depth: mobilePopupStackRef.current.length },
+          ""
+        );
+      } catch {}
+      return;
+    }
+    await invoke("open_popup_window", {
+      mode,
+      profileId: profileId ?? null,
+      submode: submode ?? null,
+    });
+  };
+
+  const closePopupWindow = async () => {
+    if (isMobilePlatformRef.current) {
+      const nextStack = mobilePopupStackRef.current.slice(0, -1);
+      mobilePopupStackRef.current = nextStack;
+      loadedQrKeyRef.current = null;
+      loadedEditKeyRef.current = null;
+      const top =
+        nextStack.length > 0
+          ? nextStack[nextStack.length - 1]
+          : { mode: null, profileId: null, submode: null };
+      setPopupParams(top);
+      return;
+    }
+    await invoke("app_close");
+  };
+
+  // Connection Speedtest & Diagnostics Modal State
+  const [speedTestRunning, setSpeedTestRunning] = useState(false);
+  const [speedTestUseVpn, setSpeedTestUseVpn] = useState(true);
+  const [speedTestData, setSpeedTestData] = useState<SpeedTestProgressEvent | null>(null);
+  const [speedTestError, setSpeedTestError] = useState<string | null>(null);
+  const [speedTestCopied, setSpeedTestCopied] = useState(false);
+
   // Sidebar Collapse state (persisted in localStorage)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
@@ -983,13 +1050,19 @@ export default function App() {
     setInstallingUpdate(true);
     showNotice(
       "info",
-      `Загрузка обновления NeuroVeil VPN v${updateInfo.latest_version} с GitHub... Приложение перезапустится автоматически.`
+      isMobilePlatform
+        ? `Загрузка APK обновления NeuroVeil VPN v${updateInfo.latest_version} с GitHub...`
+        : `Загрузка обновления NeuroVeil VPN v${updateInfo.latest_version} с GitHub... Приложение перезапустится автоматически.`
     );
     try {
-      await invoke<string>("download_and_install_update", {
+      const res = await invoke<string>("download_and_install_update", {
         downloadUrl: updateInfo.download_url,
         assetName: updateInfo.asset_name ?? null,
       });
+      setInstallingUpdate(false);
+      if (res) {
+        showNotice("success", res);
+      }
     } catch (err: any) {
       setInstallingUpdate(false);
       showNotice("error", `Не удалось установить обновление: ${String(err)}`);
@@ -1272,11 +1345,7 @@ export default function App() {
 
   const handleOpenEditModal = async (prof: VpnProfile, initialMode: "visual" | "text" = "visual") => {
     try {
-      await invoke("open_popup_window", {
-        mode: "edit",
-        profileId: prof.id,
-        submode: initialMode,
-      });
+      await openPopupWindow("edit", prof.id, initialMode);
     } catch (err: any) {
       showNotice("error", String(err));
     }
@@ -1397,7 +1466,7 @@ export default function App() {
         applyStatusUpdate(st);
       }
       if (popupParamsRef.current.mode === "edit") {
-        await invoke("app_close");
+        await closePopupWindow();
       }
     } catch (err: any) {
       showNotice("error", "Ошибка сохранения профиля: " + String(err));
@@ -1516,6 +1585,14 @@ export default function App() {
   useEffect(() => {
     async function init() {
       try {
+        invoke<{ platform?: string; is_mobile?: boolean }>("get_platform_info")
+          .then((info) => {
+            if (info?.is_mobile || info?.platform === "android") {
+              isMobilePlatformRef.current = true;
+              setIsMobilePlatform(true);
+            }
+          })
+          .catch(() => {});
         const appState = await invoke<AppPersistentState>("get_app_state");
         setProfiles(appState.profiles);
         const curParams = popupParamsRef.current;
@@ -1692,6 +1769,22 @@ export default function App() {
     };
     window.addEventListener("storage", syncPrefsFromStorage);
 
+    const handlePopState = () => {
+      if (!isMobilePlatformRef.current) return;
+      if (mobilePopupStackRef.current.length > 0) {
+        const nextStack = mobilePopupStackRef.current.slice(0, -1);
+        mobilePopupStackRef.current = nextStack;
+        loadedQrKeyRef.current = null;
+        loadedEditKeyRef.current = null;
+        const top =
+          nextStack.length > 0
+            ? nextStack[nextStack.length - 1]
+            : { mode: null, profileId: null, submode: null };
+        setPopupParams(top);
+      }
+    };
+    window.addEventListener("popstate", handlePopState);
+
     const unlistenUiPrefsPromise = listen("ui-prefs-updated", () => {
       syncPrefsFromStorage();
     });
@@ -1737,6 +1830,7 @@ export default function App() {
     return () => {
       clearInterval(interval);
       window.removeEventListener("storage", syncPrefsFromStorage);
+      window.removeEventListener("popstate", handlePopState);
       unlistenUiPrefsPromise.then((unlisten) => unlisten());
       unlistenPromise.then((unlisten) => unlisten());
       unlistenStatePromise.then((unlisten) => unlisten());
@@ -1798,6 +1892,82 @@ export default function App() {
     void loadRunningProcesses();
   }, [popupParams.mode, popupParams.submode]);
 
+  const handleRunSpeedTest = async (quickOnly = false, overrideUseVpn?: boolean) => {
+    const useVpn = overrideUseVpn !== undefined ? overrideUseVpn : speedTestUseVpn;
+    setSpeedTestRunning(true);
+    setSpeedTestError(null);
+    setSpeedTestCopied(false);
+    try {
+      const res = await invoke<SpeedTestProgressEvent>("run_connection_speed_test", {
+        useVpnTunnel: useVpn,
+        quickOnly,
+      });
+      setSpeedTestData(res);
+    } catch (e: any) {
+      setSpeedTestError(String(e));
+    } finally {
+      setSpeedTestRunning(false);
+    }
+  };
+
+  const handleStopSpeedTest = async () => {
+    try {
+      await invoke("cancel_connection_speed_test");
+    } catch {}
+  };
+
+  const handleCopySpeedTestReport = async () => {
+    if (!speedTestData) return;
+    const d = speedTestData;
+    const lines = [
+      `NeuroVeil VPN v${APP_VERSION} — Отчёт теста соединения`,
+      `Маршрут: ${
+        d.route_used === "vpn_tunnel"
+          ? `VPN-туннель (${status.active_profile_name || status.active_protocol || "SOCKS/TUN"})`
+          : d.route_used === "system_tun"
+          ? `Системный TUN (${status.active_profile_name || "VPN"})`
+          : "Прямое соединение (без VPN)"
+      }`,
+      d.external_ip ? `Внешний IP: ${d.external_ip}${d.country ? ` (${d.country}${d.city ? `, ${d.city}` : ""})` : ""}` : "",
+      d.isp ? `Провайдер / ASN: ${d.isp}` : "",
+      d.colo ? `Узел Cloudflare: ${d.colo}` : "",
+      `Пинг (мс): Мин ${d.ping_min_ms ?? "—"} | Сред ${d.ping_avg_ms ?? "—"} | Макс ${d.ping_max_ms ?? "—"} | Джиттер ${d.jitter_ms ?? "—"} | Потери ${d.packet_loss_pct ?? "—"}%`,
+      d.vps_rtt_ms != null ? `Пинг до VPS: ${d.vps_rtt_ms} мс` : "",
+      d.download_avg_mbps != null
+        ? `Скачивание (Мбит/с): Сред ${d.download_avg_mbps} | Мин ${d.download_min_mbps ?? "—"} | Макс ${d.download_max_mbps ?? "—"} (${(d.download_bytes / (1024 * 1024)).toFixed(1)} МБ)`
+        : "",
+      d.upload_avg_mbps != null
+        ? `Отдача (Мбит/с): Сред ${d.upload_avg_mbps} | Мин ${d.upload_min_mbps ?? "—"} | Макс ${d.upload_max_mbps ?? "—"} (${(d.upload_bytes / (1024 * 1024)).toFixed(1)} МБ)`
+        : "",
+      d.ipv6_reachable != null ? `IPv6: ${d.ipv6_reachable ? "Доступен" : "Не обнаружен / защищён"}` : "",
+      d.services.length > 0
+        ? `Сервисы: ${d.services
+            .map((s) => `${s.name}: ${s.reachable ? `${s.latency_ms ?? 0} мс` : "недоступен"}`)
+            .join(", ")}`
+        : "",
+    ].filter(Boolean);
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setSpeedTestCopied(true);
+      setTimeout(() => setSpeedTestCopied(false), 2000);
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (popupParams.mode !== "speedtest") return;
+    let active = true;
+    const unlistenPromise = listen<SpeedTestProgressEvent>("speedtest-progress", (ev) => {
+      if (active) setSpeedTestData(ev.payload);
+    });
+    // Auto-run lightweight ping + GeoIP + service check on modal open
+    void handleRunSpeedTest(true);
+    return () => {
+      active = false;
+      void invoke("cancel_connection_speed_test").catch(() => {});
+      unlistenPromise.then((u) => u());
+    };
+  }, [popupParams.mode]);
+
   useEffect(() => {
     if (popupParams.mode !== "routing_rules" && popupParams.mode !== "save_preset") return;
     if (!popupParams.profileId || profiles.length === 0) return;
@@ -1858,7 +2028,12 @@ export default function App() {
         profile: updated,
       });
       setProfiles(updatedList);
-      showNotice("success", `Профиль «${prof.name}» добавлен на этот ПК`);
+      showNotice(
+        "success",
+        isMobilePlatform
+          ? `Профиль «${prof.name}» добавлен в список`
+          : `Профиль «${prof.name}» добавлен на этот ПК`
+      );
     } catch (e: any) {
       console.error(e);
     }
@@ -1877,7 +2052,9 @@ export default function App() {
       }
       showNotice(
         "success",
-        `Мульти-протокол «${groupName}» (${items.length} шт.) добавлен на этот ПК`
+        isMobilePlatform
+          ? `Мульти-протокол «${groupName}» (${items.length} шт.) добавлен в список`
+          : `Мульти-протокол «${groupName}» (${items.length} шт.) добавлен на этот ПК`
       );
     } catch (e: any) {
       showNotice("error", String(e));
@@ -1902,6 +2079,7 @@ export default function App() {
   const handleQuickSwitchProfile = async (profileId: string) => {
     setSelectedProfileId(profileId);
     setRoutingProfileId(profileId);
+    void invoke("select_profile", { profileId }).catch(() => {});
     const target = profiles.find((p) => p.id === profileId);
     const targetRouting = { ...(target?.routing || routing), mode: routing.mode };
     setRouting(targetRouting);
@@ -2533,6 +2711,19 @@ export default function App() {
 
   const handleDownloadAwgConf = async (profile: VpnProfile) => {
     try {
+      const rawName = (profile.name || "vpn").split("—")[0].split("-")[0].trim();
+      const cleanName = rawName.replace(/[^\w\d_а-яА-Я]/g, "") || "vpn";
+      if (isMobilePlatform) {
+        const savedPath = await invoke<string | null>("export_awg_conf_file", {
+          profileId: profile.id,
+          profile,
+          filename: `${cleanName}.conf`,
+        });
+        if (savedPath) {
+          showNotice("success", `Конфигурация сохранена: ${savedPath}`);
+        }
+        return;
+      }
       const conf = await invoke<string>("export_awg_conf", {
         profileId: profile.id,
         profile,
@@ -2542,8 +2733,6 @@ export default function App() {
       const a = document.createElement("a");
       a.href = url;
       // Чистое имя устройства без черточек, дефисов и протоколов для корректного имени интерфейса WireGuard/Amnezia
-      const rawName = (profile.name || "vpn").split("—")[0].split("-")[0].trim();
-      const cleanName = rawName.replace(/[^\w\d_а-яА-Я]/g, "") || "vpn";
       a.download = `${cleanName}.conf`;
       a.click();
       URL.revokeObjectURL(url);
@@ -2666,10 +2855,7 @@ export default function App() {
       try {
         localStorage.setItem("neuroveil_qr_profile", JSON.stringify(profile));
       } catch {}
-      await invoke("open_popup_window", {
-        mode: "qr",
-        profileId: profile.id,
-      });
+      await openPopupWindow("qr", profile.id, null);
     } catch (err: any) {
       showNotice("error", String(err));
     }
@@ -3173,11 +3359,11 @@ export default function App() {
 
   const handleOpenProcessModal = async (target: "proxy" | "direct") => {
     try {
-      await invoke("open_popup_window", {
-        mode: "processes",
-        profileId: routingProfileId || popupParamsRef.current.profileId || selectedProfileId || null,
-        submode: target,
-      });
+      await openPopupWindow(
+        "processes",
+        routingProfileId || popupParamsRef.current.profileId || selectedProfileId || null,
+        target
+      );
     } catch (err: any) {
       showNotice("error", String(err));
     }
@@ -3323,7 +3509,7 @@ export default function App() {
         showNotice("success", `Предустановка «${newPreset.name}» успешно создана`);
       }
       if (popupParamsRef.current.mode === "save_preset") {
-        await invoke("app_close");
+        await closePopupWindow();
       }
     } catch (err: any) {
       showNotice("error", `Ошибка сохранения предустановки: ${String(err)}`);
@@ -3491,16 +3677,18 @@ export default function App() {
     "processes",
     "save_preset",
     "confirm_clean",
+    "speedtest",
   ];
 
-  if (popupMode && allPopupModes.includes(popupMode)) {
+  const renderPopupScreen = (overlayMode: boolean) => {
     const isPopupMaximizable =
       popupMode === "vps" ||
       popupMode === "vps_admin" ||
       popupMode === "logs" ||
       popupMode === "edit" ||
       popupMode === "routing_rules" ||
-      popupMode === "processes";
+      popupMode === "processes" ||
+      popupMode === "speedtest";
     const popupRulesTarget = popupParams.submode === "direct" ? "direct" : "proxy";
     const popupProcTarget = popupParams.submode === "direct" ? "direct" : "proxy";
     const popupPresetOutbound =
@@ -3518,9 +3706,11 @@ export default function App() {
         : popupMode === "vps_admin"
         ? "Управление VPS — Контейнеры и ключи"
         : popupMode === "logs"
-        ? "Журнал ядра sing-box"
+        ? isMobilePlatform
+          ? "Журнал ядра libbox"
+          : "Журнал ядра sing-box"
         : popupMode === "qr"
-        ? `QR-код: ${qrModalProfile?.name || "Подключение смартфона"}`
+        ? `QR-код: ${qrModalProfile?.name || "Подключение"}`
         : popupMode === "edit"
         ? `Редактирование: ${editingProfile?.name || "Конфигурация"}`
         : popupMode === "routing_rules"
@@ -3528,9 +3718,13 @@ export default function App() {
           ? "Только выбранное через VPN (Белый список)"
           : "Весь трафик через VPN (Черный список)"
         : popupMode === "processes"
-        ? "Выбор из запущенных процессов"
+        ? isMobilePlatform
+          ? "Выбор приложения Android"
+          : "Выбор из запущенных процессов"
         : popupMode === "save_preset"
         ? "Новая предустановка маршрутов"
+        : popupMode === "speedtest"
+        ? "Тест соединения — Скорость, Пинг и Диагностика"
         : "Подтвердите очистку сервера";
 
     return (
@@ -3539,53 +3733,79 @@ export default function App() {
         data-theme-mode={isLightTheme ? "light" : "dark"}
         style={{
           ...cssVarsStyle,
-          opacity: windowOpacity / 100,
+          opacity: overlayMode ? 1 : windowOpacity / 100,
         }}
-        className={`flex flex-col h-screen w-screen overflow-hidden ${
-          isLightTheme ? "text-slate-900" : "text-slate-100"
-        } select-none bg-[#090d16] border border-cyan-500/40 rounded-xl shadow-2xl relative`}
+        className={
+          overlayMode
+            ? `fixed inset-0 z-50 flex flex-col h-screen w-screen overflow-hidden mobile-safe-bottom ${
+                isLightTheme ? "text-slate-900" : "text-slate-100"
+              } select-none bg-[#090d16]`
+            : `flex flex-col h-screen w-screen overflow-hidden ${
+                isLightTheme ? "text-slate-900" : "text-slate-100"
+              } select-none bg-[#090d16] border border-cyan-500/40 rounded-xl shadow-2xl relative`
+        }
       >
-        {/* Draggable Top Titlebar for Floating Popup Window */}
-        <header className="h-9 w-full flex items-center justify-between px-3 pt-0.5 shrink-0 select-none cursor-default z-30 bg-transparent">
-          <div
-            className="flex-1 h-full flex items-center gap-2 min-w-0 cursor-default"
-            onMouseDown={handleMouseDownDrag}
-            onDoubleClick={isPopupMaximizable ? handleDoubleClickMaximize : undefined}
-            data-tauri-drag-region
-          >
-            <img
-              src={appIconLogo}
-              alt="NeuroVeil"
-              className="w-4 h-4 rounded object-cover pointer-events-none shrink-0"
-            />
-            <span className="text-xs font-bold tracking-tight text-white pointer-events-none truncate">
-              {popupHeaderTitle}
-            </span>
-          </div>
-
-          <div
-            className="flex items-center space-x-1 shrink-0 -mr-1 z-40 relative"
-            data-tauri-drag-region="false"
-            onMouseDown={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
+        {/* Top Titlebar: Mobile Fullscreen Overlay Header or Desktop Floating Popup Header */}
+        {overlayMode ? (
+          <header
+            style={{
+              backgroundColor: "var(--bg-sidebar)",
+              borderBottomColor: "var(--color-accent-border)",
+            }}
+            className="mobile-safe-top w-full flex items-center justify-between gap-2 px-3 pb-2.5 border-b shrink-0 select-none z-30"
           >
             <button
               type="button"
+              onClick={() => void closePopupWindow()}
+              className="w-8 h-8 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 flex items-center justify-center shrink-0 cursor-pointer transition"
+              title="Назад"
+            >
+              <ChevronLeft className="w-4 h-4" />
+            </button>
+            <div className="flex items-center gap-2 min-w-0 flex-1 justify-center">
+              <img
+                src={appIconLogo}
+                alt="NeuroVeil"
+                className="w-4 h-4 rounded object-cover pointer-events-none shrink-0"
+              />
+              <span className="text-xs font-bold tracking-tight text-white truncate">
+                {popupHeaderTitle}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void closePopupWindow()}
+              className="w-8 h-8 rounded-xl bg-slate-800/80 hover:bg-rose-600 text-slate-300 hover:text-white flex items-center justify-center shrink-0 cursor-pointer transition"
+              title="Закрыть"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </header>
+        ) : (
+          <header className="h-9 w-full flex items-center justify-between px-3 pt-0.5 shrink-0 select-none cursor-default z-30 bg-transparent">
+            <div
+              className="flex-1 h-full flex items-center gap-2 min-w-0 cursor-default"
+              onMouseDown={handleMouseDownDrag}
+              onDoubleClick={isPopupMaximizable ? handleDoubleClickMaximize : undefined}
+              data-tauri-drag-region
+            >
+              <img
+                src={appIconLogo}
+                alt="NeuroVeil"
+                className="w-4 h-4 rounded object-cover pointer-events-none shrink-0"
+              />
+              <span className="text-xs font-bold tracking-tight text-white pointer-events-none truncate">
+                {popupHeaderTitle}
+              </span>
+            </div>
+
+            <div
+              className="flex items-center space-x-1 shrink-0 -mr-1 z-40 relative"
               data-tauri-drag-region="false"
               onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await invoke("app_minimize");
-                } catch {}
-              }}
-              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
-              title="Свернуть"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
             >
-              <Minus className="w-3.5 h-3.5 pointer-events-none" />
-            </button>
-            {isPopupMaximizable && (
               <button
                 type="button"
                 data-tauri-drag-region="false"
@@ -3593,32 +3813,47 @@ export default function App() {
                 onClick={async (e) => {
                   e.stopPropagation();
                   try {
-                    await invoke("app_toggle_maximize");
+                    await invoke("app_minimize");
                   } catch {}
                 }}
                 className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
-                title="Развернуть"
+                title="Свернуть"
               >
-                <Square className="w-3 h-3 pointer-events-none" />
+                <Minus className="w-3.5 h-3.5 pointer-events-none" />
               </button>
-            )}
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await invoke("app_close");
-                } catch {}
-              }}
-              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
-              title="Закрыть окно"
-            >
-              <X className="w-3.5 h-3.5 pointer-events-none" />
-            </button>
-          </div>
-        </header>
+              {isPopupMaximizable && (
+                <button
+                  type="button"
+                  data-tauri-drag-region="false"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await invoke("app_toggle_maximize");
+                    } catch {}
+                  }}
+                  className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+                  title="Развернуть"
+                >
+                  <Square className="w-3 h-3 pointer-events-none" />
+                </button>
+              )}
+              <button
+                type="button"
+                data-tauri-drag-region="false"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  await closePopupWindow();
+                }}
+                className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
+                title="Закрыть окно"
+              >
+                <X className="w-3.5 h-3.5 pointer-events-none" />
+              </button>
+            </div>
+          </header>
+        )}
 
         {/* Toast Banner inside Popup Window */}
         {toast && (
@@ -3664,7 +3899,9 @@ export default function App() {
 
               <div className="p-4 rounded-2xl bg-[#111827] border border-slate-800 space-y-3">
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  Нажмите кнопку ниже, чтобы выбрать файл конфигурации на вашем компьютере. После импорта туннель автоматически появится в главном окне приложения.
+                  {isMobilePlatform
+                    ? "Нажмите кнопку ниже, чтобы выбрать файл конфигурации на вашем устройстве. После импорта туннель автоматически появится в главном окне приложения."
+                    : "Нажмите кнопку ниже, чтобы выбрать файл конфигурации на вашем компьютере. После импорта туннель автоматически появится в главном окне приложения."}
                 </p>
 
                 <button
@@ -3692,7 +3929,7 @@ export default function App() {
             <div className="flex justify-end pt-3 border-t border-slate-800/80">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
               >
                 Закрыть окно
@@ -3934,7 +4171,7 @@ export default function App() {
             <div className="flex justify-end pt-2 border-t border-slate-800/80">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
               >
                 Закрыть окно
@@ -4054,10 +4291,7 @@ export default function App() {
 
                   <button
                     onClick={() =>
-                      invoke("open_popup_window", {
-                        mode: "confirm_clean",
-                        submode: vpsCreds.host.trim() || "VPS",
-                      })
+                      void openPopupWindow("confirm_clean", null, vpsCreds.host.trim() || "VPS")
                     }
                     disabled={vpsBusy !== "idle"}
                     className="px-3 py-2 rounded-xl bg-rose-950/50 hover:bg-rose-900/60 border border-rose-500/30 disabled:opacity-50 text-xs font-semibold text-rose-300 flex items-center justify-center gap-1.5 cursor-pointer"
@@ -4242,7 +4476,500 @@ export default function App() {
             <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex justify-end shrink-0">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
+                className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
+              >
+                Закрыть окно
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* POPUP 4B: ТЕСТ СОЕДИНЕНИЯ, СКОРОСТЬ И ДИАГНОСТИКА */}
+        {popupMode === "speedtest" && (
+          <div className="flex-1 flex flex-col overflow-hidden bg-[#0b101d]">
+            {/* Top Controls & Route Bar */}
+            <div className="px-4 py-2.5 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                    status.connected
+                      ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                      : "bg-slate-500"
+                  }`}
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
+                    <span>
+                      {status.connected
+                        ? status.active_profile_name || "VPN подключён"
+                        : "VPN отключён (Прямой канал)"}
+                    </span>
+                    {status.connected && status.active_protocol && (
+                      <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[9px] font-mono uppercase text-cyan-300">
+                        {status.active_protocol}
+                      </span>
+                    )}
+                  </div>
+                  {status.connected && (
+                    <div className="flex items-center gap-1 mt-0.5">
+                      <button
+                        type="button"
+                        disabled={speedTestRunning}
+                        onClick={() => {
+                          setSpeedTestUseVpn(true);
+                          if (!speedTestRunning) void handleRunSpeedTest(true, true);
+                        }}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
+                          speedTestUseVpn
+                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                            : "text-slate-400 hover:text-slate-200 border border-transparent"
+                        }`}
+                      >
+                        Через VPN
+                      </button>
+                      <button
+                        type="button"
+                        disabled={speedTestRunning}
+                        onClick={() => {
+                          setSpeedTestUseVpn(false);
+                          if (!speedTestRunning) void handleRunSpeedTest(true, false);
+                        }}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
+                          !speedTestUseVpn
+                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                            : "text-slate-400 hover:text-slate-200 border border-transparent"
+                        }`}
+                      >
+                        Напрямую
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {speedTestRunning ? (
+                  <button
+                    type="button"
+                    onClick={handleStopSpeedTest}
+                    className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-bold text-rose-300 flex items-center gap-1.5 cursor-pointer transition"
+                  >
+                    <Square className="w-3.5 h-3.5 fill-current" />
+                    Остановить
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleRunSpeedTest(false)}
+                      className="px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      Полный тест
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRunSpeedTest(true)}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                      title="Быстрый замер пинга, джиттера, IP и доступности сервисов (без нагрузки на трафик)"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      Пинг
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  disabled={!speedTestData}
+                  onClick={handleCopySpeedTestReport}
+                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                  title="Скопировать отчёт в буфер обмена"
+                >
+                  {speedTestCopied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  ) : (
+                    <Copy className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar">
+              {/* Progress Indicator */}
+              {(speedTestRunning || (speedTestData && speedTestData.progress_pct > 0 && speedTestData.phase !== "idle")) && (
+                <div className="p-2.5 rounded-xl bg-[#070a12] border border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                      {speedTestRunning && <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />}
+                      {speedTestData?.phase === "ping"
+                        ? "Замер пинга, джиттера и потерь пакетов..."
+                        : speedTestData?.phase === "download"
+                        ? "Тест скорости скачивания (Download)..."
+                        : speedTestData?.phase === "upload"
+                        ? "Тест скорости отдачи (Upload)..."
+                        : speedTestData?.phase === "diagnostics"
+                        ? "Проверка IP, геолокации, IPv6 и сервисов..."
+                        : speedTestData?.phase === "cancelled"
+                        ? "Тест остановлен пользователем"
+                        : "Тест завершён"}
+                    </span>
+                    <span className="font-mono text-cyan-300 font-bold">
+                      {speedTestData?.progress_pct ?? 0}%
+                      {speedTestData?.elapsed_ms ? ` · ${(speedTestData.elapsed_ms / 1000).toFixed(1)}с` : ""}
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-cyan-500 transition-all duration-200"
+                      style={{ width: `${speedTestData?.progress_pct ?? 0}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {speedTestError && (
+                <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-300 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{speedTestError}</span>
+                </div>
+              )}
+
+              {/* Primary 3 Cards: Download, Upload, Ping/Jitter */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* DOWNLOAD CARD */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                      <Download className="w-3.5 h-3.5 text-emerald-400" />
+                      Скачивание
+                    </span>
+                    {speedTestData && speedTestData.download_bytes > 0 && (
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {(speedTestData.download_bytes / (1024 * 1024)).toFixed(1)} МБ
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-extrabold font-mono text-white">
+                      {speedTestData?.phase === "download"
+                        ? (speedTestData.download_current_mbps ?? 0).toFixed(1)
+                        : speedTestData?.download_avg_mbps != null
+                        ? speedTestData.download_avg_mbps.toFixed(1)
+                        : "—"}
+                    </span>
+                    <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
+                  </div>
+                  {/* Sparkline */}
+                  <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
+                    {(() => {
+                      const samples = speedTestData?.download_samples_mbps || [];
+                      if (samples.length === 0) {
+                        return <span className="text-[9px] text-slate-500 m-auto">Нажмите «Полный тест»</span>;
+                      }
+                      const peak = Math.max(...samples, 1);
+                      return samples.slice(-20).map((v, i) => (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-t bg-emerald-400/80 transition-all"
+                          style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
+                          title={`${v.toFixed(1)} Мбит/с`}
+                        />
+                      ));
+                    })()}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
+                    <div>
+                      <span className="text-slate-400">Мин: </span>
+                      <span className="font-mono font-bold text-slate-200">
+                        {speedTestData?.download_min_mbps != null
+                          ? `${speedTestData.download_min_mbps.toFixed(1)}`
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-slate-400">Макс: </span>
+                      <span className="font-mono font-bold text-emerald-300">
+                        {speedTestData?.download_max_mbps != null
+                          ? `${speedTestData.download_max_mbps.toFixed(1)}`
+                          : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* UPLOAD CARD */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                      <Upload className="w-3.5 h-3.5 text-cyan-400" />
+                      Отдача
+                    </span>
+                    {speedTestData && speedTestData.upload_bytes > 0 && (
+                      <span className="text-[10px] font-mono text-slate-400">
+                        {(speedTestData.upload_bytes / (1024 * 1024)).toFixed(1)} МБ
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-extrabold font-mono text-white">
+                      {speedTestData?.phase === "upload"
+                        ? (speedTestData.upload_current_mbps ?? 0).toFixed(1)
+                        : speedTestData?.upload_avg_mbps != null
+                        ? speedTestData.upload_avg_mbps.toFixed(1)
+                        : "—"}
+                    </span>
+                    <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
+                  </div>
+                  {/* Sparkline */}
+                  <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
+                    {(() => {
+                      const samples = speedTestData?.upload_samples_mbps || [];
+                      if (samples.length === 0) {
+                        return <span className="text-[9px] text-slate-500 m-auto">Ожидание теста</span>;
+                      }
+                      const peak = Math.max(...samples, 1);
+                      return samples.slice(-20).map((v, i) => (
+                        <div
+                          key={i}
+                          className="flex-1 rounded-t bg-cyan-400/80 transition-all"
+                          style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
+                          title={`${v.toFixed(1)} Мбит/с`}
+                        />
+                      ));
+                    })()}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
+                    <div>
+                      <span className="text-slate-400">Мин: </span>
+                      <span className="font-mono font-bold text-slate-200">
+                        {speedTestData?.upload_min_mbps != null
+                          ? `${speedTestData.upload_min_mbps.toFixed(1)}`
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-slate-400">Макс: </span>
+                      <span className="font-mono font-bold text-cyan-300">
+                        {speedTestData?.upload_max_mbps != null
+                          ? `${speedTestData.upload_max_mbps.toFixed(1)}`
+                          : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* PING, JITTER & LOSS CARD */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-amber-400" />
+                      Пинг
+                    </span>
+                    {speedTestData?.packet_loss_pct != null && (
+                      <span
+                        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                          speedTestData.packet_loss_pct === 0
+                            ? "bg-emerald-500/15 text-emerald-300"
+                            : "bg-rose-500/20 text-rose-300"
+                        }`}
+                      >
+                        Потери {speedTestData.packet_loss_pct}%
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-baseline gap-1.5">
+                    <span className="text-2xl font-extrabold font-mono text-white">
+                      {speedTestData?.ping_avg_ms != null
+                        ? Math.round(speedTestData.ping_avg_ms)
+                        : "—"}
+                    </span>
+                    <span className="text-[10px] font-semibold text-slate-400">мс (сред)</span>
+                  </div>
+                  {/* Ping Probes Bar Chart */}
+                  <div className="h-7 flex items-end gap-1 rounded bg-[#070a12]/70 p-1">
+                    {(() => {
+                      const samples = speedTestData?.ping_samples_ms || [];
+                      if (samples.length === 0) {
+                        return <span className="text-[9px] text-slate-500 m-auto">10 замеров RTT</span>;
+                      }
+                      const peak = Math.max(...samples, 20);
+                      return samples.map((v, i) => (
+                        <div
+                          key={i}
+                          className={`flex-1 rounded-t transition-all ${
+                            v < 80
+                              ? "bg-emerald-400/80"
+                              : v < 180
+                              ? "bg-amber-400/80"
+                              : "bg-rose-400/80"
+                          }`}
+                          style={{ height: `${Math.max(16, Math.round((v / peak) * 100))}%` }}
+                          title={`#${i + 1}: ${v.toFixed(1)} мс`}
+                        />
+                      ));
+                    })()}
+                  </div>
+                  <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800/80 text-[10px]">
+                    <div>
+                      <span className="text-slate-400">Мин: </span>
+                      <span className="font-mono font-bold text-emerald-300">
+                        {speedTestData?.ping_min_ms != null ? `${Math.round(speedTestData.ping_min_ms)}` : "—"}
+                      </span>
+                    </div>
+                    <div className="text-center">
+                      <span className="text-slate-400">Макс: </span>
+                      <span className="font-mono font-bold text-amber-300">
+                        {speedTestData?.ping_max_ms != null ? `${Math.round(speedTestData.ping_max_ms)}` : "—"}
+                      </span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-slate-400">Джит: </span>
+                      <span className="font-mono font-bold text-slate-200">
+                        {speedTestData?.jitter_ms != null ? `${speedTestData.jitter_ms.toFixed(1)}` : "—"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Useful Diagnostics Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {/* External IP, Geo, VPS RTT, IPv6 Leak Check */}
+                <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-cyan-400" />
+                      Внешний IP, Маршрут и Утечки
+                    </h4>
+                    {speedTestData?.colo && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-mono font-bold">
+                        CF {speedTestData.colo}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="space-y-1.5 text-[11px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Внешний IP:</span>
+                      <span className="font-mono font-bold text-white select-text">
+                        {speedTestData?.external_ip || "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Локация:</span>
+                      <span className="font-semibold text-slate-200 text-right truncate">
+                        {speedTestData?.country
+                          ? `${speedTestData.country}${speedTestData.city ? `, ${speedTestData.city}` : ""}`
+                          : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Провайдер / ASN:</span>
+                      <span className="font-medium text-slate-300 text-right truncate max-w-[200px]" title={speedTestData?.isp || ""}>
+                        {speedTestData?.isp || "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Пинг до узла VPS:</span>
+                      <span className="font-mono font-bold text-cyan-300">
+                        {speedTestData?.vps_rtt_ms != null ? `${speedTestData.vps_rtt_ms} мс` : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Проверка утечки IPv6:</span>
+                      {speedTestData?.ipv6_reachable == null ? (
+                        <span className="text-slate-400 font-mono">—</span>
+                      ) : speedTestData.ipv6_reachable ? (
+                        <span className="text-amber-300 font-semibold">Обнаружен IPv6</span>
+                      ) : (
+                        <span className="text-emerald-300 font-semibold flex items-center gap-1">
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          Защищён (нет утечки)
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-slate-400">Маршрут теста:</span>
+                      <span className="font-semibold text-slate-200">
+                        {speedTestData?.route_used === "vpn_tunnel"
+                          ? "Через VPN-туннель (SOCKS)"
+                          : speedTestData?.route_used === "system_tun"
+                          ? "Через системный TUN"
+                          : "Прямой канал (без VPN)"}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Popular Services Latency Matrix */}
+                <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                      Доступность сервисов и задержка
+                    </h4>
+                    <span className="text-[10px] text-slate-400">HTTPS RTT</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    {(!speedTestData || speedTestData.services.length === 0) ? (
+                      ["Cloudflare", "YouTube", "Google", "GitHub", "Discord", "Telegram"].map((name) => (
+                        <div
+                          key={name}
+                          className="px-2.5 py-2 rounded-xl bg-[#070a12]/70 border border-slate-800/70 flex items-center justify-between text-[11px]"
+                        >
+                          <span className="text-slate-300 font-medium">{name}</span>
+                          <span className="font-mono text-slate-500">—</span>
+                        </div>
+                      ))
+                    ) : (
+                      speedTestData.services.map((svc) => (
+                        <div
+                          key={svc.name}
+                          className="px-2.5 py-2 rounded-xl bg-[#070a12]/80 border border-slate-800/80 flex items-center justify-between text-[11px]"
+                          title={svc.error || `${svc.host}:${svc.port}`}
+                        >
+                          <span className="text-slate-200 font-semibold flex items-center gap-1.5 truncate">
+                            <span
+                              className={`w-2 h-2 rounded-full shrink-0 ${
+                                svc.reachable
+                                  ? "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                                  : "bg-rose-400 shadow-[0_0_6px_#f87171]"
+                              }`}
+                            />
+                            <span className="truncate">{svc.name}</span>
+                          </span>
+                          <span
+                            className={`font-mono font-bold shrink-0 ml-1 ${
+                              !svc.reachable
+                                ? "text-rose-400"
+                                : (svc.latency_ms ?? 0) < 100
+                                ? "text-emerald-300"
+                                : (svc.latency_ms ?? 0) < 220
+                                ? "text-amber-300"
+                                : "text-rose-300"
+                            }`}
+                          >
+                            {svc.reachable ? `${svc.latency_ms ?? 0} мс` : "Сбой"}
+                          </span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex items-center justify-between shrink-0">
+              <span className="text-[10px] text-slate-400">
+                Потоковый тест через Cloudflare CDN с замером мин/сред/макс в реальном времени
+              </span>
+              <button
+                type="button"
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
               >
                 Закрыть окно
@@ -4438,7 +5165,7 @@ export default function App() {
             <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex justify-end shrink-0">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
               >
                 Закрыть окно
@@ -5284,7 +6011,7 @@ export default function App() {
                 <div className="flex justify-end gap-2.5 px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] shrink-0">
                   <button
                     type="button"
-                    onClick={() => invoke("app_close")}
+                    onClick={() => void closePopupWindow()}
                     className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-300 transition cursor-pointer"
                   >
                     Отмена
@@ -5343,38 +6070,48 @@ export default function App() {
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
                         <Cpu className="w-3.5 h-3.5" />
-                        Приложения, процессы и папки ({proxyProcessesList.length})
+                        {isMobilePlatform
+                          ? `Приложения Android ЧЕРЕЗ VPN (${proxyProcessesList.length})`
+                          : `Приложения, процессы и папки (${proxyProcessesList.length})`}
                       </span>
                     </div>
 
                     <div className="flex flex-wrap gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => handlePickExeFile("proxy")}
-                        className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
-                      >
-                        <FileCode className="w-3 h-3" /> + Файл (.exe)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePickFolder("proxy")}
-                        className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
-                      >
-                        <FolderOpen className="w-3 h-3" /> + Папка
-                      </button>
+                      {!isMobilePlatform && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handlePickExeFile("proxy")}
+                            className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <FileCode className="w-3 h-3" /> + Файл (.exe)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handlePickFolder("proxy")}
+                            className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <FolderOpen className="w-3 h-3" /> + Папка
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleOpenProcessModal("proxy")}
                         className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 flex items-center gap-1 transition cursor-pointer"
                       >
-                        <Cpu className="w-3 h-3" /> + Из запущенных
+                        <Cpu className="w-3 h-3" /> {isMobilePlatform ? "+ Выбрать приложение" : "+ Из запущенных"}
                       </button>
                     </div>
 
                     <div className="flex gap-1.5">
                       <input
                         type="text"
-                        placeholder="Имя процесса (Discord.exe) или путь к папке..."
+                        placeholder={
+                          isMobilePlatform
+                            ? "ID пакета Android (например org.telegram.messenger)..."
+                            : "Имя процесса (Discord.exe) или путь к папке..."
+                        }
                         value={manualProxyProcInput}
                         onChange={(e) => setManualProxyProcInput(e.target.value)}
                         onKeyDown={(e) => {
@@ -5400,7 +6137,9 @@ export default function App() {
                     <div className="h-36 overflow-y-auto rounded-lg bg-[#050811] border border-slate-800/80 p-1.5 space-y-1">
                       {proxyProcessesList.length === 0 ? (
                         <div className="h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-3">
-                          Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов.
+                          {isMobilePlatform
+                            ? "Список пуст. Выберите приложение Android из установленных или введите ID пакета."
+                            : "Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов."}
                         </div>
                       ) : (
                         proxyProcessesList.map((item, idx) => {
@@ -5472,38 +6211,48 @@ export default function App() {
                     <div className="flex items-center justify-between">
                       <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center gap-1.5">
                         <Cpu className="w-3.5 h-3.5" />
-                        Приложения, процессы и папки МИМО VPN ({directProcessesList.length})
+                        {isMobilePlatform
+                          ? `Приложения Android МИМО VPN (${directProcessesList.length})`
+                          : `Приложения, процессы и папки МИМО VPN (${directProcessesList.length})`}
                       </span>
                     </div>
 
                     <div className="flex flex-wrap gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => handlePickExeFile("direct")}
-                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
-                      >
-                        <FileCode className="w-3 h-3" /> + Файл (.exe)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handlePickFolder("direct")}
-                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
-                      >
-                        <FolderOpen className="w-3 h-3" /> + Папка
-                      </button>
+                      {!isMobilePlatform && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handlePickExeFile("direct")}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <FileCode className="w-3 h-3" /> + Файл (.exe)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handlePickFolder("direct")}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
+                          >
+                            <FolderOpen className="w-3 h-3" /> + Папка
+                          </button>
+                        </>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleOpenProcessModal("direct")}
                         className="px-2.5 py-1 rounded-lg bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 flex items-center gap-1 transition cursor-pointer"
                       >
-                        <Cpu className="w-3 h-3" /> + Из запущенных
+                        <Cpu className="w-3 h-3" /> {isMobilePlatform ? "+ Выбрать приложение" : "+ Из запущенных"}
                       </button>
                     </div>
 
                     <div className="flex gap-1.5">
                       <input
                         type="text"
-                        placeholder="Имя процесса (cs2.exe) или путь к папке..."
+                        placeholder={
+                          isMobilePlatform
+                            ? "ID пакета Android (например com.whatsapp)..."
+                            : "Имя процесса (cs2.exe) или путь к папке..."
+                        }
                         value={manualDirectProcInput}
                         onChange={(e) => setManualDirectProcInput(e.target.value)}
                         onKeyDown={(e) => {
@@ -5529,7 +6278,9 @@ export default function App() {
                     <div className="h-36 overflow-y-auto rounded-lg bg-[#040b0b] border border-slate-800/80 p-1.5 space-y-1">
                       {directProcessesList.length === 0 ? (
                         <div className="h-full flex items-center justify-center text-[11px] text-slate-500 text-center px-3">
-                          Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов.
+                          {isMobilePlatform
+                            ? "Список пуст. Выберите приложение Android из установленных или введите ID пакета."
+                            : "Список пуст. Добавьте .exe файл, папку или выберите из запущенных процессов."}
                         </div>
                       ) : (
                         directProcessesList.map((item, idx) => {
@@ -5605,7 +6356,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => invoke("app_close")}
+                  onClick={() => void closePopupWindow()}
                   className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 cursor-pointer"
                 >
                   Закрыть
@@ -5614,7 +6365,7 @@ export default function App() {
                   type="button"
                   onClick={async () => {
                     await handleSaveRouting();
-                    await invoke("app_close");
+                    await closePopupWindow();
                   }}
                   className="px-3.5 py-1.5 rounded-lg bg-gradient-to-r from-cyan-600 to-indigo-600 hover:from-cyan-500 hover:to-indigo-500 text-xs font-bold text-white shadow-md shadow-cyan-600/20 cursor-pointer keep-white"
                 >
@@ -5625,14 +6376,16 @@ export default function App() {
           </div>
         )}
 
-        {/* POPUP 8: ВЫБОР ИЗ ЗАПУЩЕННЫХ ПРОЦЕССОВ */}
+        {/* POPUP 8: ВЫБОР ИЗ ЗАПУЩЕННЫХ ПРОЦЕССОВ / ПРИЛОЖЕНИЙ */}
         {popupMode === "processes" && (
           <div className="flex-1 flex flex-col overflow-hidden p-4 space-y-3">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-800 shrink-0">
               <div>
                 <h3 className="text-sm font-bold text-white flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-cyan-400" />
-                  Выбор из запущенных процессов и их папок
+                  {isMobilePlatform
+                    ? "Выбор установленных приложений Android"
+                    : "Выбор из запущенных процессов и их папок"}
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Добавление в список:{" "}
@@ -5654,7 +6407,11 @@ export default function App() {
               <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
               <input
                 type="text"
-                placeholder="Поиск по имени процесса или пути (например discord, steam, chrome)..."
+                placeholder={
+                  isMobilePlatform
+                    ? "Поиск по названию или ID пакета (например telegram, youtube, chrome)..."
+                    : "Поиск по имени процесса или пути (например discord, steam, chrome)..."
+                }
                 value={procSearch}
                 onChange={(e) => setProcSearch(e.target.value)}
                 className="w-full pl-9 pr-4 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white focus:border-cyan-500 focus:outline-none select-text"
@@ -5664,7 +6421,9 @@ export default function App() {
             <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
               {loadingProcs ? (
                 <div className="py-12 text-center text-xs text-slate-400">
-                  Сканирование запущенных процессов...
+                  {isMobilePlatform
+                    ? "Сканирование установленных приложений Android..."
+                    : "Сканирование запущенных процессов..."}
                 </div>
               ) : (
                 runningProcs
@@ -5674,9 +6433,10 @@ export default function App() {
                       p.path.toLowerCase().includes(procSearch.toLowerCase())
                   )
                   .map((proc, i) => {
-                    const folderPath = proc.path.includes("\\")
-                      ? proc.path.substring(0, proc.path.lastIndexOf("\\"))
-                      : "";
+                    const folderPath =
+                      !isMobilePlatform && proc.path.includes("\\")
+                        ? proc.path.substring(0, proc.path.lastIndexOf("\\"))
+                        : "";
                     return (
                       <div
                         key={i}
@@ -5692,17 +6452,22 @@ export default function App() {
                           <button
                             type="button"
                             onClick={async () => {
-                              await invoke("emit_window_event", {
-                                event: "process-picked",
-                                payload: { target: popupProcTarget, item: proc.name },
-                              });
-                              showNotice("info", `Добавлен процесс: ${proc.name}`);
+                              if (isMobilePlatform) {
+                                addProcessItem(popupProcTarget, proc.path);
+                                showNotice("info", `Добавлено приложение: ${proc.name} (${proc.path})`);
+                              } else {
+                                await invoke("emit_window_event", {
+                                  event: "process-picked",
+                                  payload: { target: popupProcTarget, item: proc.name },
+                                });
+                                showNotice("info", `Добавлен процесс: ${proc.name}`);
+                              }
                             }}
                             className="px-2.5 py-1 rounded-lg bg-indigo-500/20 hover:bg-indigo-500/30 border border-indigo-500/30 text-[11px] font-semibold text-indigo-300 cursor-pointer"
                           >
-                            + Имя ({proc.name})
+                            {isMobilePlatform ? "+ Выбрать" : `+ Имя (${proc.name})`}
                           </button>
-                          {folderPath && (
+                          {!isMobilePlatform && folderPath && (
                             <button
                               type="button"
                               onClick={async () => {
@@ -5728,7 +6493,7 @@ export default function App() {
             <div className="pt-2 border-t border-slate-800 flex justify-end shrink-0">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 transition cursor-pointer"
               >
                 Закрыть окно
@@ -5787,6 +6552,8 @@ export default function App() {
                   <span className="text-white font-semibold">
                     {popupPresetOutbound === "direct"
                       ? "Только выбранные через VPN"
+                      : isMobilePlatform
+                      ? "Весь трафик через VPN"
                       : "Весь трафик ПК через VPN"}
                   </span>
                 </div>
@@ -5803,7 +6570,7 @@ export default function App() {
             <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-800">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition cursor-pointer"
               >
                 Отмена
@@ -5836,7 +6603,7 @@ export default function App() {
             <div className="flex justify-end gap-2.5 pt-2 border-t border-slate-800">
               <button
                 type="button"
-                onClick={() => invoke("app_close")}
+                onClick={() => void closePopupWindow()}
                 className="px-4 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-medium text-slate-200 cursor-pointer"
               >
                 Отмена
@@ -5844,11 +6611,16 @@ export default function App() {
               <button
                 type="button"
                 onClick={async () => {
-                  await invoke("emit_window_event", {
-                    event: "confirm-clean-vps",
-                    payload: {},
-                  });
-                  await invoke("app_close");
+                  if (isMobilePlatform) {
+                    await closePopupWindow();
+                    void handleCleanVpsRef.current();
+                  } else {
+                    await invoke("emit_window_event", {
+                      event: "confirm-clean-vps",
+                      payload: {},
+                    });
+                    await closePopupWindow();
+                  }
                 }}
                 className="px-4 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white cursor-pointer keep-white"
               >
@@ -5983,7 +6755,7 @@ export default function App() {
                   <div className="flex items-center gap-1.5 shrink-0">
                     <button
                       type="button"
-                      onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                      onClick={() => void openPopupWindow("vps")}
                       className="px-2.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-[11px] font-semibold text-emerald-300 flex items-center gap-1 transition cursor-pointer"
                       title="Развернуть новый изолированный контейнер на этом или другом VPS"
                     >
@@ -6068,7 +6840,7 @@ export default function App() {
                           </div>
                           <button
                             type="button"
-                            onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                            onClick={() => void openPopupWindow("vps")}
                             className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-xs font-bold text-white cursor-pointer keep-white"
                           >
                             Развернуть мульти-контейнер на VPS
@@ -6082,7 +6854,7 @@ export default function App() {
                             </span>
                             <button
                               type="button"
-                              onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                              onClick={() => void openPopupWindow("vps")}
                               className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-[11px] font-bold text-white flex items-center gap-1.5 shrink-0 transition cursor-pointer keep-white shadow-sm shadow-emerald-600/20"
                               title="Развернуть новый изолированный мульти-протокольный контейнер на этом VPS"
                             >
@@ -6338,7 +7110,7 @@ export default function App() {
                                         )}
                                         {allPinnedOnPc && (
                                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
-                                            На этом ПК
+                                            {isMobilePlatform ? "В списке" : "На этом ПК"}
                                           </span>
                                         )}
                                       </div>
@@ -6422,10 +7194,10 @@ export default function App() {
                                             )
                                           }
                                           className="px-2 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
-                                          title="Добавить все ключи мульти-протокола на этот ПК"
+                                          title={isMobilePlatform ? "Добавить все ключи мульти-протокола в список" : "Добавить все ключи мульти-протокола на этот ПК"}
                                         >
                                           <Monitor className="w-3.5 h-3.5" />
-                                          <span>На ПК</span>
+                                          <span>{isMobilePlatform ? "Добавить" : "На ПК"}</span>
                                         </button>
                                       )}
 
@@ -6492,7 +7264,7 @@ export default function App() {
                                                 </span>
                                                 {subPinnedOnPc && (
                                                   <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
-                                                    На этом ПК
+                                                    {isMobilePlatform ? "В списке" : "На этом ПК"}
                                                   </span>
                                                 )}
                                               </div>
@@ -6562,10 +7334,10 @@ export default function App() {
                                                   type="button"
                                                   onClick={() => void handlePinProfileOnPc(sub.id)}
                                                   className="px-2 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[10.5px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
-                                                  title="Добавить этот ключ в список подключений на этом ПК"
+                                                  title={isMobilePlatform ? "Добавить этот ключ в список подключений" : "Добавить этот ключ в список подключений на этом ПК"}
                                                 >
                                                   <Monitor className="w-3 h-3" />
-                                                  <span>На ПК</span>
+                                                  <span>{isMobilePlatform ? "Добавить" : "На ПК"}</span>
                                                 </button>
                                               )}
 
@@ -6617,7 +7389,7 @@ export default function App() {
                                     )}
                                     {isPinnedOnPc && (
                                       <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
-                                        На этом ПК
+                                        {isMobilePlatform ? "В списке" : "На этом ПК"}
                                       </span>
                                     )}
                                   </div>
@@ -6685,10 +7457,10 @@ export default function App() {
                                       type="button"
                                       onClick={() => void handlePinProfileOnPc(p.id)}
                                       className="px-2 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/30 text-[11px] font-semibold text-cyan-300 flex items-center gap-1 transition cursor-pointer"
-                                      title="Добавить этот ключ в список подключений на этом ПК"
+                                      title={isMobilePlatform ? "Добавить этот ключ в список подключений" : "Добавить этот ключ в список подключений на этом ПК"}
                                     >
                                       <Monitor className="w-3.5 h-3.5" />
-                                      <span>На ПК</span>
+                                      <span>{isMobilePlatform ? "Добавить" : "На ПК"}</span>
                                     </button>
                                   )}
 
@@ -7096,6 +7868,10 @@ export default function App() {
         )}
       </div>
     );
+  };
+
+  if (!isMobilePlatform && popupMode && allPopupModes.includes(popupMode)) {
+    return renderPopupScreen(false);
   }
 
   return (
@@ -7104,294 +7880,383 @@ export default function App() {
       data-theme-mode={isLightTheme ? "light" : "dark"}
       style={{
         ...cssVarsStyle,
-        opacity: windowOpacity / 100,
+        opacity: isMobilePlatform ? 1 : windowOpacity / 100,
       }}
-      className={`flex h-screen w-screen overflow-hidden ${
+      className={`flex ${isMobilePlatform ? "flex-col" : ""} h-screen w-screen overflow-hidden ${
         isLightTheme ? "text-slate-900" : "text-slate-100"
       } select-none bg-[#090d16] transition-opacity duration-150 relative`}
     >
-      {/* Compact Left Sidebar - AmneziaVPN v2.0 Style Vertical Icon Column */}
-      <aside
-        style={{ borderRightColor: "var(--color-accent-border)" }}
-        className="w-[60px] px-1.5 bg-[#0d1322] border-r flex flex-col justify-between py-2.5 shrink-0 z-30 select-none"
-      >
-        <div className="flex flex-col items-center gap-2">
-          {/* App Brand Icon (Draggable) */}
-          <div
-            onMouseDown={handleMouseDownDrag}
-            data-tauri-drag-region
-            onClick={() => {
-              setActiveTab("dashboard");
-            }}
-            className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 cursor-pointer hover:border-cyan-400 transition"
-            title="NeuroVeil VPN 2.0 — Главная"
-          >
-            <img
-              src={appIconLogo}
-              alt="NeuroVeil VPN"
-              className="w-full h-full object-cover rounded-lg pointer-events-none"
-            />
-          </div>
-
-          <div className="w-7 h-px bg-slate-800/90 my-0.5" />
-
-          {/* Compact Vertical Icon Buttons Column (6 sections) */}
-          <nav className="relative flex flex-col items-center gap-1.5 w-full">
-            {/* Seamless Sliding Active Tab Connector (merges into Main Window) */}
+      {/* Compact Left Sidebar - Desktop Only */}
+      {!isMobilePlatform && (
+        <aside
+          style={{ borderRightColor: "var(--color-accent-border)" }}
+          className="w-[60px] px-1.5 bg-[#0d1322] border-r flex flex-col justify-between py-2.5 shrink-0 z-30 select-none"
+        >
+          <div className="flex flex-col items-center gap-2">
+            {/* App Brand Icon (Draggable) */}
             <div
-              style={{
-                transform: `translateY(${
-                  Math.max(
-                    0,
-                    ["dashboard", "profiles", "routing", "vps", "settings", "about"].indexOf(
-                      activeTab
-                    )
-                  ) * 46
-                }px)`,
-                transition: "transform 340ms cubic-bezier(0.22, 1, 0.36, 1)",
-              }}
-              className="pointer-events-none absolute top-0 left-0 -right-[7px] h-10 z-0"
-            >
-              {/* Single seamless SVG silhouette (no overlapping div/SVG borders, larger 18px rounding) */}
-              <svg
-                className="pointer-events-none absolute -top-[18px] left-0 w-full h-[76px] overflow-visible"
-                viewBox="0 0 54 76"
-                fill="none"
-                shapeRendering="geometricPrecision"
-              >
-                <path
-                  d="M54 0H53.5A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76H54V0Z"
-                  fill="var(--bg-app)"
-                />
-                <path
-                  d="M53.5 0A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76"
-                  stroke="var(--color-accent-border)"
-                  strokeWidth="1"
-                  strokeLinecap="butt"
-                />
-              </svg>
-            </div>
-
-            {/* 1. Подключение (Главная страница) */}
-            <button
-              type="button"
+              onMouseDown={handleMouseDownDrag}
+              data-tauri-drag-region
               onClick={() => {
                 setActiveTab("dashboard");
               }}
-              title="Подключение (Главная страница)"
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
-                activeTab === "dashboard"
-                  ? "text-cyan-300"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+              className="w-10 h-10 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-1 flex items-center justify-center shadow-lg shrink-0 cursor-pointer hover:border-cyan-400 transition"
+              title="NeuroVeil VPN 2.0 — Главная"
+            >
+              <img
+                src={appIconLogo}
+                alt="NeuroVeil VPN"
+                className="w-full h-full object-cover rounded-lg pointer-events-none"
+              />
+            </div>
+
+            <div className="w-7 h-px bg-slate-800/90 my-0.5" />
+
+            {/* Compact Vertical Icon Buttons Column (6 sections) */}
+            <nav className="relative flex flex-col items-center gap-1.5 w-full">
+              {/* Seamless Sliding Active Tab Connector (merges into Main Window) */}
+              <div
+                style={{
+                  transform: `translateY(${
+                    Math.max(
+                      0,
+                      ["dashboard", "profiles", "routing", "vps", "settings", "about"].indexOf(
+                        activeTab
+                      )
+                    ) * 46
+                  }px)`,
+                  transition: "transform 340ms cubic-bezier(0.22, 1, 0.36, 1)",
+                }}
+                className="pointer-events-none absolute top-0 left-0 -right-[7px] h-10 z-0"
+              >
+                {/* Single seamless SVG silhouette (no overlapping div/SVG borders, larger 18px rounding) */}
+                <svg
+                  className="pointer-events-none absolute -top-[18px] left-0 w-full h-[76px] overflow-visible"
+                  viewBox="0 0 54 76"
+                  fill="none"
+                  shapeRendering="geometricPrecision"
+                >
+                  <path
+                    d="M54 0H53.5A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76H54V0Z"
+                    fill="var(--bg-app)"
+                  />
+                  <path
+                    d="M53.5 0A18.5 18.5 0 0 1 35 18.5H18.5A18 18 0 0 0 0.5 36.5V39.5A18 18 0 0 0 18.5 57.5H35A18.5 18.5 0 0 1 53.5 76"
+                    stroke="var(--color-accent-border)"
+                    strokeWidth="1"
+                    strokeLinecap="butt"
+                  />
+                </svg>
+              </div>
+
+              {/* 1. Подключение (Главная страница) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("dashboard");
+                }}
+                title="Подключение (Главная страница)"
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                  activeTab === "dashboard"
+                    ? "text-cyan-300"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+                }`}
+              >
+                <Power className="w-4 h-4 shrink-0" />
+                <span
+                  className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ${
+                    status.connected
+                      ? status.is_handshaking
+                        ? "bg-amber-400 shadow-[0_0_6px_#fbbf24] animate-ping"
+                        : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                      : "bg-slate-600"
+                  }`}
+                />
+              </button>
+
+              {/* 2. Настройка конфигураций (Неактивна, если нет добавленных туннелей или VPS) */}
+              <button
+                type="button"
+                disabled={!hasTunnelsOrVps}
+                onClick={() => {
+                  if (!hasTunnelsOrVps) return;
+                  setActiveTab("profiles");
+                }}
+                title={
+                  hasTunnelsOrVps
+                    ? `Настройка конфигураций (${profiles.length})`
+                    : "Настройка конфигураций (Сначала добавьте туннель или VPS)"
+                }
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
+                  !hasTunnelsOrVps
+                    ? "text-slate-600 opacity-35 cursor-not-allowed"
+                    : activeTab === "profiles"
+                    ? "text-cyan-300 cursor-pointer"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
+                }`}
+              >
+                <Layers className="w-4 h-4 shrink-0" />
+                {profiles.length > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-cyan-600 text-[9px] font-bold text-white flex items-center justify-center border border-[#0d1322]">
+                    {profiles.length}
+                  </span>
+                )}
+              </button>
+
+              {/* 3. Раздельное туннелирование (Неактивна, если нет добавленных туннелей или VPS) */}
+              <button
+                type="button"
+                disabled={!hasTunnelsOrVps}
+                onClick={() => {
+                  if (!hasTunnelsOrVps) return;
+                  if (selectedProfileId) switchRoutingProfile(selectedProfileId);
+                  setActiveTab("routing");
+                }}
+                title={
+                  hasTunnelsOrVps
+                    ? "Раздельное туннелирование"
+                    : "Раздельное туннелирование (Сначала добавьте туннель или VPS)"
+                }
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
+                  !hasTunnelsOrVps
+                    ? "text-slate-600 opacity-35 cursor-not-allowed"
+                    : activeTab === "routing"
+                    ? "text-cyan-300 cursor-pointer"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
+                }`}
+              >
+                <Globe className="w-4 h-4 shrink-0" />
+                {hasTunnelsOrVps &&
+                  (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
+                  )}
+              </button>
+
+              {/* 4. Добавление и Автодеплой (Добавление конфиг-файлов, ключей и Автодеплой VPS) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("vps");
+                }}
+                title="Добавление конфигураций и Автодеплой VPS"
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                  activeTab === "vps"
+                    ? "text-cyan-300"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+                }`}
+              >
+                <Server className="w-4 h-4 shrink-0" />
+              </button>
+
+              {/* 5. Настройки */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("settings");
+                }}
+                title={t.navSettings}
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                  activeTab === "settings"
+                    ? "text-cyan-300"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+                }`}
+              >
+                <Settings className="w-4 h-4 shrink-0" />
+              </button>
+
+              {/* 6. О приложении */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("about");
+                }}
+                title={t.navAbout}
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                  activeTab === "about"
+                    ? "text-cyan-300"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+                }`}
+              >
+                <Info className="w-4 h-4 shrink-0" />
+                {updateInfo?.has_update && (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+                )}
+              </button>
+            </nav>
+          </div>
+
+          {/* Bottom Core Status Indicator & Connection Speedtest */}
+          <div className="flex flex-col items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void openPopupWindow("speedtest")}
+              className="w-10 h-10 rounded-xl bg-[#131c31]/80 border border-slate-800 hover:border-cyan-500/50 text-slate-300 hover:text-cyan-300 flex flex-col items-center justify-center cursor-pointer transition group"
+              title="Тест соединения: скорость (мин/макс), пинг, джиттер и диагностика"
+            >
+              <Gauge className="w-4 h-4 text-cyan-400 group-hover:scale-105 transition-transform" />
+              <span className="text-[7px] font-mono text-slate-400 mt-0.5 leading-none">ТЕСТ</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!status.singbox_installed) {
+                  handleDownloadCore();
+                } else {
+                  void openPopupWindow("logs");
+                }
+              }}
+              className="w-10 h-10 rounded-xl bg-[#131c31]/80 border border-slate-800 hover:border-slate-700 flex flex-col items-center justify-center cursor-pointer transition"
+              title={`Ядро sing-box: ${
+                status.singbox_installed
+                  ? "Готово (" + (status.singbox_version || "") + ") — Нажмите для просмотра логов"
+                  : "Не скачано — Нажмите для загрузки"
               }`}
             >
-              <Power className="w-4 h-4 shrink-0" />
               <span
-                className={`absolute top-1.5 right-1.5 w-2 h-2 rounded-full ${
-                  status.connected
-                    ? status.is_handshaking
-                      ? "bg-amber-400 shadow-[0_0_6px_#fbbf24] animate-ping"
-                      : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
-                    : "bg-slate-600"
+                className={`w-2.5 h-2.5 rounded-full ${
+                  status.singbox_installed
+                    ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                    : "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-pulse"
                 }`}
               />
-            </button>
-
-            {/* 2. Настройка конфигураций (Неактивна, если нет добавленных туннелей или VPS) */}
-            <button
-              type="button"
-              disabled={!hasTunnelsOrVps}
-              onClick={() => {
-                if (!hasTunnelsOrVps) return;
-                setActiveTab("profiles");
-              }}
-              title={
-                hasTunnelsOrVps
-                  ? `Настройка конфигураций (${profiles.length})`
-                  : "Настройка конфигураций (Сначала добавьте туннель или VPS)"
-              }
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
-                !hasTunnelsOrVps
-                  ? "text-slate-600 opacity-35 cursor-not-allowed"
-                  : activeTab === "profiles"
-                  ? "text-cyan-300 cursor-pointer"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
-              }`}
-            >
-              <Layers className="w-4 h-4 shrink-0" />
-              {profiles.length > 0 && (
-                <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-cyan-600 text-[9px] font-bold text-white flex items-center justify-center border border-[#0d1322]">
-                  {profiles.length}
-                </span>
-              )}
-            </button>
-
-            {/* 3. Раздельное туннелирование (Неактивна, если нет добавленных туннелей или VPS) */}
-            <button
-              type="button"
-              disabled={!hasTunnelsOrVps}
-              onClick={() => {
-                if (!hasTunnelsOrVps) return;
-                if (selectedProfileId) switchRoutingProfile(selectedProfileId);
-                setActiveTab("routing");
-              }}
-              title={
-                hasTunnelsOrVps
-                  ? "Раздельное туннелирование"
-                  : "Раздельное туннелирование (Сначала добавьте туннель или VPS)"
-              }
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
-                !hasTunnelsOrVps
-                  ? "text-slate-600 opacity-35 cursor-not-allowed"
-                  : activeTab === "routing"
-                  ? "text-cyan-300 cursor-pointer"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50 cursor-pointer"
-              }`}
-            >
-              <Globe className="w-4 h-4 shrink-0" />
-              {hasTunnelsOrVps &&
-                (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) && (
-                  <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_6px_#22d3ee]" />
-                )}
-            </button>
-
-            {/* 4. Добавление и Автодеплой (Добавление конфиг-файлов, ключей и Автодеплой VPS) */}
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("vps");
-              }}
-              title="Добавление конфигураций и Автодеплой VPS"
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
-                activeTab === "vps"
-                  ? "text-cyan-300"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
-              }`}
-            >
-              <Server className="w-4 h-4 shrink-0" />
-            </button>
-
-            {/* 5. Настройки */}
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("settings");
-              }}
-              title={t.navSettings}
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
-                activeTab === "settings"
-                  ? "text-cyan-300"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
-              }`}
-            >
-              <Settings className="w-4 h-4 shrink-0" />
-            </button>
-
-            {/* 6. О приложении */}
-            <button
-              type="button"
-              onClick={() => {
-                setActiveTab("about");
-              }}
-              title={t.navAbout}
-              className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
-                activeTab === "about"
-                  ? "text-cyan-300"
-                  : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
-              }`}
-            >
-              <Info className="w-4 h-4 shrink-0" />
-              {updateInfo?.has_update && (
-                <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-              )}
-            </button>
-          </nav>
-        </div>
-
-        {/* Bottom Core Status Indicator */}
-        <div className="flex flex-col items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => {
-              if (!status.singbox_installed) {
-                handleDownloadCore();
-              } else {
-                invoke("open_popup_window", { mode: "logs" });
-              }
-            }}
-            className="w-10 h-10 rounded-xl bg-[#131c31]/80 border border-slate-800 hover:border-slate-700 flex flex-col items-center justify-center cursor-pointer transition"
-            title={`Ядро sing-box: ${
-              status.singbox_installed
-                ? "Готово (" + (status.singbox_version || "") + ") — Нажмите для просмотра логов"
-                : "Не скачано — Нажмите для загрузки"
-            }`}
-          >
-            <span
-              className={`w-2.5 h-2.5 rounded-full ${
-                status.singbox_installed
-                  ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
-                  : "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-pulse"
-              }`}
-            />
-            <span className="text-[8px] font-mono text-slate-400 mt-1">v2.0</span>
-          </button>
-        </div>
-      </aside>
-
-      {/* Main Content Area (Compact AmneziaVPN Window Layout) */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative bg-[#090d16]">
-        {/* Seamless Transparent Drag Bar + Window Controls */}
-        <header className="h-7 w-full flex items-center justify-end px-2.5 pt-1 shrink-0 select-none cursor-default z-30 bg-transparent">
-          <div
-            className="flex-1 h-full min-w-0 cursor-default"
-            onMouseDown={handleMouseDownDrag}
-            data-tauri-drag-region
-          />
-
-          {/* Window Control Buttons */}
-          <div
-            className="flex items-center space-x-1 shrink-0 -mr-1 z-40 relative"
-            data-tauri-drag-region="false"
-            onMouseDown={(e) => e.stopPropagation()}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await invoke("app_minimize");
-                } catch (err) {
-                  console.error("Minimize error:", err);
-                }
-              }}
-              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
-              title={t.minimize}
-            >
-              <Minus className="w-3.5 h-3.5 pointer-events-none" />
-            </button>
-            <button
-              type="button"
-              data-tauri-drag-region="false"
-              onMouseDown={(e) => e.stopPropagation()}
-              onClick={async (e) => {
-                e.stopPropagation();
-                try {
-                  await invoke("app_close");
-                } catch (err) {
-                  console.error("Close error:", err);
-                }
-              }}
-              className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
-              title={t.close}
-            >
-              <X className="w-3.5 h-3.5 pointer-events-none" />
+              <span className="text-[8px] font-mono text-slate-400 mt-1">v2.0</span>
             </button>
           </div>
-        </header>
+        </aside>
+      )}
+
+      {/* Main Content Area (Desktop Window or Mobile Screen) */}
+      <main className="flex-1 flex flex-col min-h-0 h-full overflow-hidden relative bg-[#090d16]">
+        {/* Mobile Top Header Bar */}
+        {isMobilePlatform && (
+          <header
+            style={{
+              backgroundColor: "var(--bg-sidebar)",
+              borderBottomColor: "var(--color-accent-border)",
+            }}
+            className="mobile-safe-top px-3 pb-2 border-b flex items-center justify-between gap-2 shrink-0 select-none z-30"
+          >
+            <div
+              onClick={() => setActiveTab("dashboard")}
+              className="flex items-center gap-2 min-w-0 cursor-pointer"
+            >
+              <div className="w-8 h-8 rounded-xl overflow-hidden bg-[#0c1220] border border-cyan-500/40 p-0.5 flex items-center justify-center shrink-0">
+                <img
+                  src={appIconLogo}
+                  alt="NeuroVeil VPN"
+                  className="w-full h-full object-cover rounded-lg pointer-events-none"
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-extrabold tracking-tight text-white truncate">
+                    NeuroVeil VPN
+                  </span>
+                  <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-bold shrink-0">
+                    v{APP_VERSION}
+                  </span>
+                </div>
+                <div className="text-[10px] text-slate-400 flex items-center gap-1.5 truncate">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                      status.connected
+                        ? status.is_handshaking
+                          ? "bg-amber-400 animate-ping"
+                          : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                        : "bg-slate-500"
+                    }`}
+                  />
+                  <span className="truncate">
+                    {status.connected
+                      ? status.is_handshaking
+                        ? "Рукопожатие..."
+                        : status.active_profile_name || "Подключён"
+                      : selectedProfile?.name || "Отключён"}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => void openPopupWindow("speedtest")}
+                className="px-2 py-1.5 rounded-xl bg-[#131c31]/90 border border-slate-800 hover:border-cyan-500/50 text-cyan-300 flex items-center gap-1 text-[10px] font-bold cursor-pointer transition"
+                title="Тест соединения"
+              >
+                <Gauge className="w-3.5 h-3.5 text-cyan-400" />
+                <span>ТЕСТ</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void openPopupWindow("logs")}
+                className="px-2 py-1.5 rounded-xl bg-[#131c31]/90 border border-slate-800 hover:border-slate-700 text-slate-300 flex items-center gap-1 text-[10px] font-mono cursor-pointer transition"
+                title="Журнал ядра libbox"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full shrink-0 ${
+                    status.singbox_installed
+                      ? "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                      : "bg-amber-400 animate-pulse"
+                  }`}
+                />
+                <span>libbox</span>
+              </button>
+            </div>
+          </header>
+        )}
+
+        {/* Seamless Transparent Drag Bar + Window Controls (Desktop Only) */}
+        {!isMobilePlatform && (
+          <header className="h-7 w-full flex items-center justify-end px-2.5 pt-1 shrink-0 select-none cursor-default z-30 bg-transparent">
+            <div
+              className="flex-1 h-full min-w-0 cursor-default"
+              onMouseDown={handleMouseDownDrag}
+              data-tauri-drag-region
+            />
+
+            {/* Window Control Buttons */}
+            <div
+              className="flex items-center space-x-1 shrink-0 -mr-1 z-40 relative"
+              data-tauri-drag-region="false"
+              onMouseDown={(e) => e.stopPropagation()}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                data-tauri-drag-region="false"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  try {
+                    await invoke("app_minimize");
+                  } catch (err) {
+                    console.error("Minimize error:", err);
+                  }
+                }}
+                className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-white/10 transition cursor-pointer"
+                title={t.minimize}
+              >
+                <Minus className="w-3.5 h-3.5 pointer-events-none" />
+              </button>
+              <button
+                type="button"
+                data-tauri-drag-region="false"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  await closePopupWindow();
+                }}
+                className="w-7 h-6 flex items-center justify-center rounded-md text-slate-400 hover:text-white hover:bg-rose-600 transition cursor-pointer"
+                title={t.close}
+              >
+                <X className="w-3.5 h-3.5 pointer-events-none" />
+              </button>
+            </div>
+          </header>
+        )}
 
         {/* Toast Banner - Compact & High Contrast */}
         {toast && (
@@ -7459,14 +8324,20 @@ export default function App() {
             </div>
           </div>
         ) : (
-        <div className="flex-1 flex flex-col p-3.5 gap-3 overflow-hidden h-full min-h-0">
+        <div
+          className={
+            isMobilePlatform
+              ? "flex-1 flex flex-col p-3 gap-2.5 overflow-y-auto mobile-scroll-touch min-h-0"
+              : "flex-1 flex flex-col p-3.5 gap-3 overflow-hidden h-full min-h-0"
+          }
+        >
           {/* Missing Core Warning Banner (if sing-box is not downloaded yet) */}
           {!status.singbox_installed && (
             <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/40 flex items-center justify-between gap-2 shrink-0">
               <div className="flex items-center gap-2 min-w-0">
                 <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
                 <span className="text-[11px] font-semibold text-amber-200 truncate">
-                  Требуется ядро sing-box.exe
+                  {isMobilePlatform ? "Требуется ядро libbox" : "Требуется ядро sing-box.exe"}
                 </span>
               </div>
               <button
@@ -7717,7 +8588,7 @@ export default function App() {
               </div>
 
               <div
-                onClick={() => invoke("open_popup_window", { mode: "logs" })}
+                onClick={() => void openPopupWindow("logs")}
                 className="px-2 py-1.5 rounded-xl bg-[#0b101d] border border-slate-800/70 hover:border-cyan-500/35 flex items-center gap-2 min-w-0 cursor-pointer transition"
                 title="Всего передано трафика по выбранному туннелю (нажмите для открытия журнала ядра)"
               >
@@ -7769,6 +8640,8 @@ export default function App() {
                         ? `Активно: ${
                             routingPresets.find((p) => p.id === activePresetId)?.name || "Выборочный обход"
                           }`
+                        : isMobilePlatform
+                        ? "Весь трафик устройства идет через VPN"
                         : "Весь трафик ПК идет через VPN"}
                     </div>
                   </div>
@@ -7815,7 +8688,11 @@ export default function App() {
           </div>
 
           {/* 4. ADDED TUNNELS LIST (Добавленные туннели) */}
-          <div className="flex-1 flex flex-col p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block min-h-0 overflow-hidden">
+          <div
+            className={`flex-1 flex flex-col p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block overflow-hidden ${
+              isMobilePlatform ? "min-h-[220px]" : "min-h-0"
+            }`}
+          >
             <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-800/80 shrink-0">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5 text-cyan-400" />
@@ -7846,7 +8723,9 @@ export default function App() {
             {!selectedProfile ? (
               <div className="flex-1 flex flex-col items-center justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2.5">
                 <p className="text-xs text-slate-400">
-                  Нет добавленных туннелей на этом ПК. Импортируйте файл/ключ или разверните свой VPS.
+                  {isMobilePlatform
+                    ? "Нет добавленных туннелей на этом устройстве. Импортируйте файл/ключ или разверните свой VPS."
+                    : "Нет добавленных туннелей на этом ПК. Импортируйте файл/ключ или разверните свой VPS."}
                 </p>
                 <button
                   onClick={() => setActiveTab("vps")}
@@ -8012,7 +8891,9 @@ export default function App() {
                         Добавить из файла
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
-                        Выбрать файл конфигурации (.conf, .json, .txt) в Проводнике Windows
+                        {isMobilePlatform
+                          ? "Выбрать файл конфигурации (.conf, .json, .txt) на устройстве"
+                          : "Выбрать файл конфигурации (.conf, .json, .txt) в Проводнике Windows"}
                       </div>
                     </div>
                   </div>
@@ -8030,7 +8911,7 @@ export default function App() {
                 {/* 2. Добавить VPS -> Цветной (Emerald) */}
                 <button
                   type="button"
-                  onClick={() => invoke("open_popup_window", { mode: "vps" })}
+                  onClick={() => void openPopupWindow("vps")}
                   className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-emerald-950/30 border border-emerald-500/40 hover:border-emerald-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-emerald-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -8060,7 +8941,7 @@ export default function App() {
                 {/* 3. Вставить ключ -> Цветной (Violet) */}
                 <button
                   type="button"
-                  onClick={() => invoke("open_popup_window", { mode: "key" })}
+                  onClick={() => void openPopupWindow("key")}
                   className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-violet-950/30 border border-violet-500/40 hover:border-violet-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-violet-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -8090,7 +8971,7 @@ export default function App() {
                 {/* 4. Управление VPS -> Цветной */}
                 <button
                   type="button"
-                  onClick={() => invoke("open_popup_window", { mode: "vps_admin" })}
+                  onClick={() => void openPopupWindow("vps_admin")}
                   className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-amber-950/30 border border-amber-500/40 hover:border-amber-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-amber-500/10"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -9140,7 +10021,13 @@ export default function App() {
                               : "bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/70"
                           }`}
                         >
-                          {selectedProfileId === prof.id ? "Выбран на ПК" : "Выбрать на ПК"}
+                          {selectedProfileId === prof.id
+                            ? isMobilePlatform
+                              ? "Выбран"
+                              : "Выбран на ПК"
+                            : isMobilePlatform
+                            ? "Выбрать"
+                            : "Выбрать на ПК"}
                         </button>
 
                         <div className="flex items-center gap-[3px] flex-nowrap justify-end shrink-0">
@@ -9468,11 +10355,11 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        invoke("open_popup_window", {
-                          mode: "save_preset",
-                          profileId: routingProfileId || selectedProfileId || null,
-                          submode: routing.default_outbound || "direct",
-                        });
+                        void openPopupWindow(
+                          "save_preset",
+                          routingProfileId || selectedProfileId || null,
+                          routing.default_outbound || "direct"
+                        );
                       }}
                       className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-[10px] font-semibold text-cyan-200 flex items-center gap-1 transition cursor-pointer"
                     >
@@ -9606,11 +10493,11 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() =>
-                          invoke("open_popup_window", {
-                            mode: "routing_rules",
-                            profileId: routingProfileId || selectedProfileId || null,
-                            submode: "proxy",
-                          })
+                          void openPopupWindow(
+                            "routing_rules",
+                            routingProfileId || selectedProfileId || null,
+                            "proxy"
+                          )
                         }
                         className="routing-mode-config-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
                       >
@@ -9719,11 +10606,11 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() =>
-                          invoke("open_popup_window", {
-                            mode: "routing_rules",
-                            profileId: routingProfileId || selectedProfileId || null,
-                            submode: "direct",
-                          })
+                          void openPopupWindow(
+                            "routing_rules",
+                            routingProfileId || selectedProfileId || null,
+                            "direct"
+                          )
                         }
                         className="routing-mode-config-btn px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer"
                       >
@@ -9802,59 +10689,84 @@ export default function App() {
             </div>
 
             {/* NETWORK OPERATING MODE SECTION */}
-            <div
-              className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
-              style={{ backgroundColor: currentTheme.styles.cardBg }}
-            >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
-                  <div>
-                    <h3 className="text-xs font-bold text-white">Режим работы сети</h3>
-                    <p className="text-[10px] text-slate-400">
-                      Выбор способа перехвата сетевого трафика в Windows
-                    </p>
-                  </div>
-                </div>
-                <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
-                  {routing.mode === "tun" ? "TUN-режим" : "System Proxy"}
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => handleQuickSwitchMode("system_proxy")}
-                  className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
-                    routing.mode === "system_proxy" ? "is-active" : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-bold">System Proxy</span>
+            {isMobilePlatform ? (
+              <div
+                className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2.5 ${currentTheme.styles.cardBorder}`}
+                style={{ backgroundColor: currentTheme.styles.cardBg }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
                     <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                    <div>
+                      <h3 className="text-xs font-bold text-white">Режим работы сети</h3>
+                      <p className="text-[10px] text-slate-400">
+                        Системный VpnService (Layer-3 TUN через libbox)
+                      </p>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Легкий режим без прав администратора (браузеры, Telegram, Discord).
-                  </p>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleQuickSwitchMode("tun")}
-                  className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
-                    routing.mode === "tun" ? "is-active" : ""
-                  }`}
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
-                    <Zap className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
-                  </div>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Перехватывает весь трафик ПК, включая игры и любые приложения.
-                  </p>
-                </button>
+                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
+                    Android TUN
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  На Android весь трафик выбранных приложений и доменов перехватывается через системный интерфейс VpnService без root-прав.
+                </p>
               </div>
-            </div>
+            ) : (
+              <div
+                className={`p-4 rounded-2xl border soft-edge-block transition-all duration-300 space-y-3 ${currentTheme.styles.cardBorder}`}
+                style={{ backgroundColor: currentTheme.styles.cardBg }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                    <div>
+                      <h3 className="text-xs font-bold text-white">Режим работы сети</h3>
+                      <p className="text-[10px] text-slate-400">
+                        Выбор способа перехвата сетевого трафика в Windows
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[9px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
+                    {routing.mode === "tun" ? "TUN-режим" : "System Proxy"}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickSwitchMode("system_proxy")}
+                    className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
+                      routing.mode === "system_proxy" ? "is-active" : ""
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold">System Proxy</span>
+                      <Globe className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Легкий режим без прав администратора (браузеры, Telegram, Discord).
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleQuickSwitchMode("tun")}
+                    className={`network-mode-card p-3 rounded-xl text-left transition-all cursor-pointer ${
+                      routing.mode === "tun" ? "is-active" : ""
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-xs font-bold">TUN-режим (Вирт. адаптер)</span>
+                      <Zap className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
+                    </div>
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Перехватывает весь трафик ПК, включая игры и любые приложения.
+                    </p>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* SECURITY & KILL SWITCH SECTION (Compact) */}
             <div
@@ -9889,7 +10801,9 @@ export default function App() {
                       </span>
                     </div>
                     <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
-                      Блокирует исходящий трафик в Windows при обрыве VPN
+                      {isMobilePlatform
+                        ? "Изолирует маршруты и блокирует утечку трафика мимо туннеля при обрыве VPN"
+                        : "Блокирует исходящий трафик в Windows при обрыве VPN"}
                     </div>
                   </div>
                   <div
@@ -10034,6 +10948,48 @@ export default function App() {
               </div>
             </div>
 
+            {/* MOBILE QUICK SETTINGS TILE SECTION */}
+            {isMobilePlatform && (
+              <div
+                className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
+                style={{ backgroundColor: currentTheme.styles.cardBg }}
+              >
+                <div className="flex items-center gap-2">
+                  <Sliders className={`w-3.5 h-3.5 shrink-0 ${currentTheme.styles.accentText}`} />
+                  <div>
+                    <h3 className="text-[11px] font-bold text-white">
+                      Значок в верхней панели Android
+                    </h3>
+                    <p className="text-[9.5px] text-slate-400">
+                      Переключатель туннеля вкл/выкл прямо в верхней шторке быстрых настроек
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const res = await invoke<{ status?: string; message?: string }>(
+                        "request_add_android_tile"
+                      );
+                      showNotice(
+                        res?.status === "added" || res?.status === "already_added"
+                          ? "success"
+                          : "info",
+                        res?.message || "Проверьте панель быстрых настроек Android."
+                      );
+                    } catch (err: any) {
+                      showNotice("error", String(err));
+                    }
+                  }}
+                  className="w-full py-2 px-3 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-[11px] font-bold text-cyan-200 flex items-center justify-center gap-2 transition cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5 text-cyan-300" />
+                  <span>Добавить значок туннеля в верхнюю панель</span>
+                </button>
+              </div>
+            )}
+
             {/* SYSTEM AUTOSTART & TRAY BEHAVIOR SECTION (Compact) */}
             <div
               className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
@@ -10042,101 +10998,113 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Monitor className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
                 <div>
-                  <h3 className="text-[11px] font-bold text-white">{t.systemSectionTitle}</h3>
-                  <p className="text-[9.5px] text-slate-400">{t.systemSectionSubtitle}</p>
+                  <h3 className="text-[11px] font-bold text-white">
+                    {isMobilePlatform ? "Поведение при запуске" : t.systemSectionTitle}
+                  </h3>
+                  <p className="text-[9.5px] text-slate-400">
+                    {isMobilePlatform
+                      ? "Автоматическое подключение к активному профилю при открытии приложения"
+                      : t.systemSectionSubtitle}
+                  </p>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 gap-1.5 pt-0.5">
-                {/* Autostart Toggle */}
-                <div
-                  onClick={() => handleUpdateSystemSettings({ autostart: !autostart })}
-                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
-                >
-                  <div className="min-w-0 pr-1">
-                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
-                      {t.autostartTitle}
-                    </div>
-                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
-                      {t.autostartDesc}
-                    </div>
-                  </div>
+                {/* Autostart Toggle (Windows only) */}
+                {!isMobilePlatform && (
                   <div
-                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
-                      autostart
-                        ? "theme-toggle-on"
-                        : isLightTheme
-                        ? "bg-slate-300 border border-slate-400/40"
-                        : "bg-slate-700 border border-white/10"
-                    }`}
+                    onClick={() => handleUpdateSystemSettings({ autostart: !autostart })}
+                    className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                   >
+                    <div className="min-w-0 pr-1">
+                      <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
+                        {t.autostartTitle}
+                      </div>
+                      <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                        {t.autostartDesc}
+                      </div>
+                    </div>
                     <div
-                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
-                        autostart ? "translate-x-4" : "translate-x-0"
+                      className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                        autostart
+                          ? "theme-toggle-on"
+                          : isLightTheme
+                          ? "bg-slate-300 border border-slate-400/40"
+                          : "bg-slate-700 border border-white/10"
                       }`}
-                    />
+                    >
+                      <div
+                        className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                          autostart ? "translate-x-4" : "translate-x-0"
+                        }`}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
-                {/* Start Minimized Toggle */}
-                <div
-                  onClick={() => handleUpdateSystemSettings({ startMinimized: !startMinimized })}
-                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
-                >
-                  <div className="min-w-0 pr-1">
-                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
-                      {t.startMinimizedTitle}
-                    </div>
-                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
-                      {t.startMinimizedDesc}
-                    </div>
-                  </div>
+                {/* Start Minimized Toggle (Windows only) */}
+                {!isMobilePlatform && (
                   <div
-                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
-                      startMinimized
-                        ? "theme-toggle-on"
-                        : isLightTheme
-                        ? "bg-slate-300 border border-slate-400/40"
-                        : "bg-slate-700 border border-white/10"
-                    }`}
+                    onClick={() => handleUpdateSystemSettings({ startMinimized: !startMinimized })}
+                    className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                   >
+                    <div className="min-w-0 pr-1">
+                      <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
+                        {t.startMinimizedTitle}
+                      </div>
+                      <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                        {t.startMinimizedDesc}
+                      </div>
+                    </div>
                     <div
-                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
-                        startMinimized ? "translate-x-4" : "translate-x-0"
+                      className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                        startMinimized
+                          ? "theme-toggle-on"
+                          : isLightTheme
+                          ? "bg-slate-300 border border-slate-400/40"
+                          : "bg-slate-700 border border-white/10"
                       }`}
-                    />
+                    >
+                      <div
+                        className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                          startMinimized ? "translate-x-4" : "translate-x-0"
+                        }`}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
-                {/* Close to Tray Toggle */}
-                <div
-                  onClick={() => handleUpdateSystemSettings({ closeToTray: !closeToTray })}
-                  className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
-                >
-                  <div className="min-w-0 pr-1">
-                    <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
-                      {t.closeToTrayTitle}
-                    </div>
-                    <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
-                      {t.closeToTrayDesc}
-                    </div>
-                  </div>
+                {/* Close to Tray Toggle (Windows only) */}
+                {!isMobilePlatform && (
                   <div
-                    className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
-                      closeToTray
-                        ? "theme-toggle-on"
-                        : isLightTheme
-                        ? "bg-slate-300 border border-slate-400/40"
-                        : "bg-slate-700 border border-white/10"
-                    }`}
+                    onClick={() => handleUpdateSystemSettings({ closeToTray: !closeToTray })}
+                    className="p-2 px-2.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 cursor-pointer flex items-center justify-between gap-2.5 transition group"
                   >
+                    <div className="min-w-0 pr-1">
+                      <div className="text-[11px] font-bold text-white group-hover:text-cyan-200 transition">
+                        {t.closeToTrayTitle}
+                      </div>
+                      <div className="text-[9.5px] text-slate-400 mt-0.5 leading-snug">
+                        {t.closeToTrayDesc}
+                      </div>
+                    </div>
                     <div
-                      className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
-                        closeToTray ? "translate-x-4" : "translate-x-0"
+                      className={`w-9 h-5 rounded-full transition-all p-0.5 shrink-0 ${
+                        closeToTray
+                          ? "theme-toggle-on"
+                          : isLightTheme
+                          ? "bg-slate-300 border border-slate-400/40"
+                          : "bg-slate-700 border border-white/10"
                       }`}
-                    />
+                    >
+                      <div
+                        className={`w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform ${
+                          closeToTray ? "translate-x-4" : "translate-x-0"
+                        }`}
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Auto-connect on startup Toggle */}
                 <div
@@ -10369,40 +11337,42 @@ export default function App() {
                 })}
               </div>
 
-              {/* Window Opacity Slider (Внешний вид и прозрачность окна) */}
-              <div className="pt-2.5 border-t border-slate-800/80 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Sliders className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
-                    <div>
-                      <h4 className="text-[11px] font-bold text-white">Прозрачность окна приложения</h4>
+              {/* Window Opacity Slider (Внешний вид и прозрачность окна) — только для Desktop */}
+              {!isMobilePlatform && (
+                <div className="pt-2.5 border-t border-slate-800/80 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sliders className={`w-3.5 h-3.5 ${currentTheme.styles.accentText}`} />
+                      <div>
+                        <h4 className="text-[11px] font-bold text-white">Прозрачность окна приложения</h4>
+                      </div>
                     </div>
+                    <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
+                      {windowOpacity}%
+                    </span>
                   </div>
-                  <span className="text-[11px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                    {windowOpacity}%
-                  </span>
-                </div>
 
-                <div className="flex items-center gap-2 pt-0.5">
-                  <span className="text-[10px] text-slate-400 font-mono">70%</span>
-                  <input
-                    type="range"
-                    min={70}
-                    max={100}
-                    step={1}
-                    value={windowOpacity}
-                    onChange={(e) => handleUpdateOpacity(parseInt(e.target.value, 10))}
-                    className="flex-1 cursor-pointer h-1.5 rounded-lg appearance-none"
-                  />
-                  <span className="text-[10px] text-slate-400 font-mono">100%</span>
-                  <button
-                    onClick={() => handleUpdateOpacity(100)}
-                    className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-[10px] font-medium text-slate-300 transition"
-                  >
-                    100%
-                  </button>
+                  <div className="flex items-center gap-2 pt-0.5">
+                    <span className="text-[10px] text-slate-400 font-mono">70%</span>
+                    <input
+                      type="range"
+                      min={70}
+                      max={100}
+                      step={1}
+                      value={windowOpacity}
+                      onChange={(e) => handleUpdateOpacity(parseInt(e.target.value, 10))}
+                      className="flex-1 cursor-pointer h-1.5 rounded-lg appearance-none"
+                    />
+                    <span className="text-[10px] text-slate-400 font-mono">100%</span>
+                    <button
+                      onClick={() => handleUpdateOpacity(100)}
+                      className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-[10px] font-medium text-slate-300 transition"
+                    >
+                      100%
+                    </button>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             {/* SYSTEM & CORE SECTION */}
@@ -10414,7 +11384,11 @@ export default function App() {
                 <Cpu className={`w-4 h-4 ${currentTheme.styles.accentText}`} />
                 <div>
                   <h3 className="text-xs font-bold text-white">{t.coreSectionTitle}</h3>
-                  <p className="text-[10px] text-slate-400">{t.coreSectionSubtitle}</p>
+                  <p className="text-[10px] text-slate-400">
+                    {isMobilePlatform
+                      ? "Встроенное ядро libbox (sing-box) и журнал событий VPN-сервиса"
+                      : t.coreSectionSubtitle}
+                  </p>
                 </div>
               </div>
 
@@ -10431,20 +11405,32 @@ export default function App() {
                   <span className="text-[10px] text-slate-400">{t.coreDriverLabel}</span>
                   <div className="text-xs font-mono font-semibold text-white flex items-center gap-2">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-                    wintun.dll (High-performance Layer-3 TUN)
+                    {isMobilePlatform
+                      ? "Android VpnService (libbox Layer-3 TUN)"
+                      : "wintun.dll (High-performance Layer-3 TUN)"}
                   </div>
                 </div>
               </div>
 
               <div className="flex flex-wrap gap-2 pt-1">
+                {!isMobilePlatform && (
+                  <button
+                    type="button"
+                    onClick={handleDownloadCore}
+                    disabled={downloadingCore}
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 flex items-center gap-1.5 transition"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${downloadingCore ? "animate-spin" : ""}`} />
+                    {downloadingCore ? "Проверка..." : t.reinstallCoreBtn}
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={handleDownloadCore}
-                  disabled={downloadingCore}
-                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 border border-slate-700 flex items-center gap-1.5 transition"
+                  onClick={() => void openPopupWindow("logs")}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-cyan-300 border border-slate-700 flex items-center gap-1.5 transition cursor-pointer"
                 >
-                  <RefreshCw className={`w-3.5 h-3.5 ${downloadingCore ? "animate-spin" : ""}`} />
-                  {downloadingCore ? "Проверка..." : t.reinstallCoreBtn}
+                  <Terminal className="w-3.5 h-3.5" />
+                  Журнал ядра
                 </button>
                 <button
                   type="button"
@@ -10452,7 +11438,7 @@ export default function App() {
                     await invoke("clear_core_logs");
                     showNotice("info", "Журнал логов ядра очищен");
                   }}
-                  className="px-3 py-1.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/60 text-xs font-medium text-slate-400 hover:text-slate-200 transition"
+                  className="px-3 py-1.5 rounded-xl bg-slate-800/60 hover:bg-slate-700/60 text-xs font-medium text-slate-400 hover:text-slate-200 transition cursor-pointer"
                 >
                   {t.clearLogsBtn}
                 </button>
@@ -10779,10 +11765,18 @@ export default function App() {
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-teal-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-teal-400" />
-                    Драйвер WinTun L3 & System Proxy
+                    {isMobilePlatform ? "Android VpnService & libbox" : "Драйвер WinTun L3 & System Proxy"}
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Два режима перехвата трафика: виртуальный сетевой адаптер уровня ядра <code>wintun.dll</code> (для всех игр и UDP-приложений) и легкий системный прокси Windows.
+                    {isMobilePlatform ? (
+                      <>
+                        Нативный системный TUN-интерфейс <code>Android VpnService</code> на базе встроенного ядра <code>libbox</code> (sing-box) с маршрутизацией по приложениям, доменам и IP.
+                      </>
+                    ) : (
+                      <>
+                        Два режима перехвата трафика: виртуальный сетевой адаптер уровня ядра <code>wintun.dll</code> (для всех игр и UDP-приложений) и легкий системный прокси Windows.
+                      </>
+                    )}
                   </p>
                 </div>
               </div>
@@ -10941,6 +11935,11 @@ export default function App() {
                       <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700 font-mono">
                         v{updateInfo.latest_version}
                       </span>
+                      {updateInfo.asset_name ? (
+                        <span className="text-[10px] text-cyan-300 font-mono">
+                          • {updateInfo.asset_name}
+                        </span>
+                      ) : null}
                       {updateInfo.asset_size ? (
                         <span className="text-[10px] text-slate-400">
                           • {formatBytes(updateInfo.asset_size)}
@@ -10972,7 +11971,163 @@ export default function App() {
           </div>
         )}
 
+        {/* Mobile Bottom Navigation Bar */}
+        {isMobilePlatform && (
+          <nav
+            style={{
+              backgroundColor: "var(--bg-sidebar)",
+              borderTopColor: "var(--color-accent-border)",
+            }}
+            className="mobile-safe-bottom border-t px-1.5 pt-1.5 grid grid-cols-6 gap-0.5 shrink-0 z-30 select-none"
+          >
+            <button
+              type="button"
+              onClick={() => setActiveTab("dashboard")}
+              style={
+                activeTab === "dashboard"
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition cursor-pointer ${
+                activeTab === "dashboard" ? "font-bold" : "text-slate-400"
+              }`}
+            >
+              <div className="relative">
+                <Power className="w-4 h-4 shrink-0" />
+                <span
+                  className={`absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full ${
+                    status.connected
+                      ? status.is_handshaking
+                        ? "bg-amber-400 animate-ping"
+                        : "bg-emerald-400 shadow-[0_0_5px_#34d399]"
+                      : "bg-slate-600"
+                  }`}
+                />
+              </div>
+              <span className="text-[9.5px] leading-none truncate">Связь</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!hasTunnelsOrVps}
+              onClick={() => {
+                if (!hasTunnelsOrVps) return;
+                setActiveTab("profiles");
+              }}
+              style={
+                activeTab === "profiles" && hasTunnelsOrVps
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition ${
+                !hasTunnelsOrVps
+                  ? "text-slate-600 opacity-35 cursor-not-allowed"
+                  : activeTab === "profiles"
+                  ? "font-bold cursor-pointer"
+                  : "text-slate-400 cursor-pointer"
+              }`}
+            >
+              <div className="relative">
+                <Layers className="w-4 h-4 shrink-0" />
+                {profiles.length > 0 && (
+                  <span className="absolute -top-1.5 -right-2 min-w-[14px] h-[14px] px-0.5 rounded-full bg-cyan-600 text-[8px] font-bold text-white flex items-center justify-center">
+                    {profiles.length}
+                  </span>
+                )}
+              </div>
+              <span className="text-[9.5px] leading-none truncate">Профили</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={!hasTunnelsOrVps}
+              onClick={() => {
+                if (!hasTunnelsOrVps) return;
+                if (selectedProfileId) switchRoutingProfile(selectedProfileId);
+                setActiveTab("routing");
+              }}
+              style={
+                activeTab === "routing" && hasTunnelsOrVps
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition ${
+                !hasTunnelsOrVps
+                  ? "text-slate-600 opacity-35 cursor-not-allowed"
+                  : activeTab === "routing"
+                  ? "font-bold cursor-pointer"
+                  : "text-slate-400 cursor-pointer"
+              }`}
+            >
+              <div className="relative">
+                <Globe className="w-4 h-4 shrink-0" />
+                {hasTunnelsOrVps &&
+                  (selectedProfile?.routing?.split_tunneling ?? routing.split_tunneling) && (
+                    <span className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-[0_0_5px_#22d3ee]" />
+                  )}
+              </div>
+              <span className="text-[9.5px] leading-none truncate">Обход</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("vps")}
+              style={
+                activeTab === "vps"
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition cursor-pointer ${
+                activeTab === "vps" ? "font-bold" : "text-slate-400"
+              }`}
+            >
+              <Server className="w-4 h-4 shrink-0" />
+              <span className="text-[9.5px] leading-none truncate">VPS/+</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("settings")}
+              style={
+                activeTab === "settings"
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition cursor-pointer ${
+                activeTab === "settings" ? "font-bold" : "text-slate-400"
+              }`}
+            >
+              <Settings className="w-4 h-4 shrink-0" />
+              <span className="text-[9.5px] leading-none truncate">Опции</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("about")}
+              style={
+                activeTab === "about"
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition cursor-pointer ${
+                activeTab === "about" ? "font-bold" : "text-slate-400"
+              }`}
+            >
+              <div className="relative">
+                <Info className="w-4 h-4 shrink-0" />
+                {updateInfo?.has_update && (
+                  <span className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full bg-amber-400 animate-ping" />
+                )}
+              </div>
+              <span className="text-[9.5px] leading-none truncate">О нас</span>
+            </button>
+          </nav>
+        )}
+
       </main>
+
+      {/* Mobile Full-Screen Popup Overlay */}
+      {isMobilePlatform && popupMode && allPopupModes.includes(popupMode) && renderPopupScreen(true)}
     </div>
   );
 }

@@ -738,3 +738,48 @@ pub struct AppUpdateInfo {
     pub asset_size: Option<u64>,
     pub repo_url: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeedTestServiceCheck {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub reachable: bool,
+    pub latency_ms: Option<u32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeedTestProgressEvent {
+    pub phase: String,
+    pub progress_pct: u8,
+    pub ping_samples_ms: Vec<f64>,
+    pub ping_min_ms: Option<f64>,
+    pub ping_avg_ms: Option<f64>,
+    pub ping_max_ms: Option<f64>,
+    pub jitter_ms: Option<f64>,
+    pub packet_loss_pct: Option<f64>,
+    pub vps_rtt_ms: Option<u32>,
+    pub download_samples_mbps: Vec<f64>,
+    pub download_current_mbps: Option<f64>,
+    pub download_min_mbps: Option<f64>,
+    pub download_avg_mbps: Option<f64>,
+    pub download_max_mbps: Option<f64>,
+    pub download_bytes: u64,
+    pub upload_samples_mbps: Vec<f64>,
+    pub upload_current_mbps: Option<f64>,
+    pub upload_min_mbps: Option<f64>,
+    pub upload_avg_mbps: Option<f64>,
+    pub upload_max_mbps: Option<f64>,
+    pub upload_bytes: u64,
+    pub external_ip: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub isp: Option<String>,
+    pub colo: Option<String>,
+    pub ipv6_reachable: Option<bool>,
+    pub route_used: String,
+    pub services: Vec<SpeedTestServiceCheck>,
+    pub elapsed_ms: u64,
+    pub error: Option<String>,
+}

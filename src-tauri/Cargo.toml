@@ -1,26 +1,33 @@
 [package]
 name = "neuroveil-vpn-v2"
-version = "2.0.2"
+version = "2.0.3"
 description = "NeuroVeil VPN Client 2.0 (AmneziaWG 3.1, VLESS Reality & QUIC over sing-box)"
 authors = ["vlad"]
 edition = "2021"
+
+[lib]
+name = "neuroveil_vpn_v2_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 russh = { version = "0.65", default-features = false, features = ["flate2", "ring", "rsa"] }
 tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros", "sync"] }
 uuid = { version = "1", features = ["v4"] }
-ureq = { version = "2.10", features = ["json", "native-tls"] }
+ureq = { version = "2.10", default-features = false, features = ["json", "tls", "socks-proxy"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 url = "2.5"
 chrono = "0.4"
 dirs = "5.0"
 base64 = "0.22"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2.5.5"
 
 [profile.dev]

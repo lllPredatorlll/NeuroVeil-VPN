@@ -274,3 +274,46 @@ export interface AppUpdateInfo {
   asset_size?: number | null;
   repo_url: string;
 }
+
+export interface SpeedTestServiceCheck {
+  name: string;
+  host: string;
+  port: number;
+  reachable: boolean;
+  latency_ms?: number | null;
+  error?: string | null;
+}
+
+export interface SpeedTestProgressEvent {
+  phase: "idle" | "ping" | "download" | "upload" | "diagnostics" | "done" | "cancelled" | "error" | string;
+  progress_pct: number;
+  ping_samples_ms: number[];
+  ping_min_ms?: number | null;
+  ping_avg_ms?: number | null;
+  ping_max_ms?: number | null;
+  jitter_ms?: number | null;
+  packet_loss_pct?: number | null;
+  vps_rtt_ms?: number | null;
+  download_samples_mbps: number[];
+  download_current_mbps?: number | null;
+  download_min_mbps?: number | null;
+  download_avg_mbps?: number | null;
+  download_max_mbps?: number | null;
+  download_bytes: number;
+  upload_samples_mbps: number[];
+  upload_current_mbps?: number | null;
+  upload_min_mbps?: number | null;
+  upload_avg_mbps?: number | null;
+  upload_max_mbps?: number | null;
+  upload_bytes: number;
+  external_ip?: string | null;
+  country?: string | null;
+  city?: string | null;
+  isp?: string | null;
+  colo?: string | null;
+  ipv6_reachable?: boolean | null;
+  route_used: string;
+  services: SpeedTestServiceCheck[];
+  elapsed_ms: number;
+  error?: string | null;
+}
