@@ -92,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2030";
+const APP_BUILD = "2040";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";

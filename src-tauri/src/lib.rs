@@ -4504,7 +4504,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2030)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2040)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4517,12 +4517,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2030).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2040).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2030).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2040).",
                         current_version
                     )
                 };
@@ -4530,7 +4530,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2030)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2040)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -6228,30 +6228,56 @@ pub fn run() {
                 .await;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-            let auto_connect_profile = {
-                if let Ok(rt) = auto_connect_state.lock() {
-                    if rt.persistent.auto_connect && !rt.persistent.profiles.is_empty() {
-                        let prof_id = rt
-                            .persistent
-                            .selected_profile_id
-                            .clone()
-                            .or_else(|| rt.persistent.profiles.first().map(|p| p.id.clone()));
-                        prof_id.map(|id| {
-                            (
-                                id,
-                                rt.persistent.routing.mode.clone(),
-                                rt.persistent.routing.split_tunneling,
-                            )
-                        })
+            #[cfg(target_os = "android")]
+            let already_connected = match crate::android_vpn::get_vpn_status(&app_handle_for_connect) {
+                Ok(mob) if mob.connected => {
+                    if let Ok(mut rt) = auto_connect_state.lock() {
+                        rt.android_connected = true;
+                        if rt.active_profile_id.is_none() {
+                            if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
+                                rt.active_profile_id = Some(pid);
+                            }
+                            if let Some(pname) = mob.profile_name.clone().filter(|s| !s.is_empty()) {
+                                rt.active_profile_name = Some(pname);
+                            }
+                            if let Some(proto) = mob.protocol.clone().filter(|s| !s.is_empty()) {
+                                rt.active_protocol = Some(proto);
+                            }
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            };
+            #[cfg(not(target_os = "android"))]
+            let already_connected = false;
+
+            if !already_connected {
+                let auto_connect_profile = {
+                    if let Ok(rt) = auto_connect_state.lock() {
+                        if rt.persistent.auto_connect && !rt.persistent.profiles.is_empty() {
+                            let prof_id = rt
+                                .persistent
+                                .selected_profile_id
+                                .clone()
+                                .or_else(|| rt.persistent.profiles.first().map(|p| p.id.clone()));
+                            prof_id.map(|id| {
+                                (
+                                    id,
+                                    rt.persistent.routing.mode.clone(),
+                                    rt.persistent.routing.split_tunneling,
+                                )
+                            })
+                        } else {
+                            None
+                        }
                     } else {
                         None
                     }
-                } else {
-                    None
+                };
+                if let Some((pid, mode, split)) = auto_connect_profile {
+                    let _ = connect_vpn(pid, mode, split, Some(true), app_handle_for_connect.state()).await;
                 }
-            };
-            if let Some((pid, mode, split)) = auto_connect_profile {
-                let _ = connect_vpn(pid, mode, split, Some(true), app_handle_for_connect.state()).await;
             }
         });
 
