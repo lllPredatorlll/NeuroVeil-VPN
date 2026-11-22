@@ -25,6 +25,10 @@ pub struct MobileVpnStatus {
     #[serde(default)]
     pub connected: bool,
     #[serde(default)]
+    pub connecting: bool,
+    #[serde(default)]
+    pub socks_port: u16,
+    #[serde(default)]
     pub up_bytes: u64,
     #[serde(default)]
     pub down_bytes: u64,
@@ -44,6 +48,30 @@ pub struct MobileVpnStatus {
     pub profile_name: Option<String>,
     #[serde(default)]
     pub protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct StartVpnResult {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub connected: bool,
+    #[serde(default)]
+    pub connecting: bool,
+    #[serde(default)]
+    pub socks_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BatteryOptResult {
+    #[serde(default)]
+    pub ignored: bool,
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,11 +152,11 @@ pub fn start_vpn<R: Runtime>(
     profile_name: String,
     profile_id: String,
     protocol: String,
-) -> Result<(), String> {
+) -> Result<StartVpnResult, String> {
     let state = app.state::<AndroidVpnHandle<R>>();
-    let _: serde_json::Value = state
+    state
         .0
-        .run_mobile_plugin(
+        .run_mobile_plugin::<StartVpnResult>(
             "startVpn",
             StartVpnPayload {
                 config_json,
@@ -137,8 +165,29 @@ pub fn start_vpn<R: Runtime>(
                 protocol,
             },
         )
-        .map_err(|e| format!("Android VPN error: {}", e))?;
-    Ok(())
+        .map_err(|e| format!("Android VPN error: {}", e))
+}
+
+pub fn is_battery_optimization_ignored<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+    let state = app.state::<AndroidVpnHandle<R>>();
+    let res: BatteryOptResult = state
+        .0
+        .run_mobile_plugin("isBatteryOptimizationIgnored", serde_json::json!({}))
+        .map_err(|e| format!("Battery optimization check error: {}", e))?;
+    Ok(res.ignored)
+}
+
+pub fn request_battery_optimization_exemption<R: Runtime>(
+    app: &AppHandle<R>,
+) -> Result<BatteryOptResult, String> {
+    let state = app.state::<AndroidVpnHandle<R>>();
+    state
+        .0
+        .run_mobile_plugin::<BatteryOptResult>(
+            "requestBatteryOptimizationExemption",
+            serde_json::json!({}),
+        )
+        .map_err(|e| format!("Ошибка открытия настроек оптимизации батареи: {}", e))
 }
 
 pub fn stop_vpn<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {

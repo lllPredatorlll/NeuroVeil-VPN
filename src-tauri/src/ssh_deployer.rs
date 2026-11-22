@@ -234,26 +234,19 @@ async fn connect_via_http_connect(
     Ok(stream)
 }
 
-async fn detect_active_tunnel_proxy() -> Option<&'static str> {
-    if tokio::time::timeout(
-        Duration::from_millis(250),
-        TcpStream::connect("127.0.0.1:2081"),
-    )
-    .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
-    {
-        return Some("socks5://127.0.0.1:2081");
-    }
-    if tokio::time::timeout(
-        Duration::from_millis(250),
-        TcpStream::connect("127.0.0.1:2080"),
-    )
-    .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
-    {
-        return Some("socks5://127.0.0.1:2080");
+async fn detect_active_tunnel_proxy() -> Option<String> {
+    for port in [2081u16, 2082, 2083, 2084, 2080] {
+        let addr = format!("127.0.0.1:{}", port);
+        if tokio::time::timeout(
+            Duration::from_millis(220),
+            TcpStream::connect(&addr),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
+        {
+            return Some(format!("socks5://{}", addr));
+        }
     }
     None
 }
@@ -402,7 +395,7 @@ async fn connect_ssh_endpoint(
                         port,
                         username,
                         password,
-                        tunnel_proxy,
+                        &tunnel_proxy,
                     )
                     .await
                     {

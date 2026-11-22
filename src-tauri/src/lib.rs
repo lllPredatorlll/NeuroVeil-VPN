@@ -41,6 +41,8 @@ struct RuntimeState {
     persistent: AppPersistentState,
     child: Option<Child>,
     android_connected: bool,
+    android_socks_port: Option<u16>,
+    last_android_error_logged: Option<String>,
     app_handle: Option<AppHandle>,
     active_profile_id: Option<String>,
     active_profile_name: Option<String>,
@@ -264,6 +266,8 @@ fn stop_singbox_internal(rt: &mut RuntimeState) {
             let _ = crate::android_vpn::stop_vpn(app);
         }
         rt.android_connected = false;
+        rt.android_socks_port = None;
+        rt.last_android_error_logged = None;
         save_persistent_state(&rt.persistent);
         if was_connected {
             push_log(&mut rt.logs, "Android VpnService (libbox) остановлен.".to_string());
@@ -314,6 +318,13 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
                     }
                 }
                 if mob.connected {
+                    let was_connected = rt.android_connected;
+                    rt.last_android_error_logged = None;
+                    rt.android_socks_port = if mob.socks_port > 0 {
+                        Some(mob.socks_port)
+                    } else {
+                        None
+                    };
                     if rt.active_profile_id.is_none() {
                         let matched_prof = mob
                             .profile_id
@@ -331,6 +342,11 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
                             rt.active_profile_name = Some(p.name.clone());
                             rt.active_protocol = Some(p.protocol.clone());
                             rt.active_port = Some(p.port);
+                            rt.active_listen_port = if is_awg_protocol(&p.protocol) {
+                                p.listen_port
+                            } else {
+                                None
+                            };
                         } else {
                             if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
                                 rt.active_profile_id = Some(pid);
@@ -360,28 +376,47 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
                             }
                         }
                     }
+                    if !was_connected {
+                        let proto_is_awg = rt
+                            .active_protocol
+                            .as_deref()
+                            .map(is_awg_protocol)
+                            .unwrap_or(false);
+                        if proto_is_awg && mob.down_bytes == 0 && mob.down_speed == 0 {
+                            rt.is_handshaking = true;
+                            rt.handshake_status = Some(
+                                "Установка соединения (рукопожатие WireGuard)...".to_string(),
+                            );
+                        }
+                    }
                     if rt.is_handshaking && (mob.down_bytes > 0 || mob.down_speed > 0) {
                         rt.is_handshaking = false;
                         rt.handshake_status = None;
                     }
                     rt.android_connected = true;
-                } else if rt.android_connected {
-                    rt.android_connected = false;
-                    rt.active_profile_id = None;
-                    rt.active_profile_name = None;
-                    rt.active_protocol = None;
-                    rt.active_port = None;
-                    rt.active_listen_port = None;
-                    rt.port_hunting_status = None;
-                    rt.is_handshaking = false;
-                    rt.handshake_status = None;
-                    rt.up_bytes = 0;
-                    rt.down_bytes = 0;
-                    rt.up_speed = 0;
-                    rt.down_speed = 0;
-                    if let Some(err) = mob.last_error {
-                        if !err.is_empty() {
-                            push_log(&mut rt.logs, format!("[Android VPN] {}", err));
+                } else {
+                    if rt.android_connected {
+                        rt.android_connected = false;
+                        rt.android_socks_port = None;
+                        rt.active_profile_id = None;
+                        rt.active_profile_name = None;
+                        rt.active_protocol = None;
+                        rt.active_port = None;
+                        rt.active_listen_port = None;
+                        rt.port_hunting_status = None;
+                        rt.is_handshaking = false;
+                        rt.handshake_status = None;
+                        rt.up_bytes = 0;
+                        rt.down_bytes = 0;
+                        rt.up_speed = 0;
+                        rt.down_speed = 0;
+                    }
+                    if !mob.connecting {
+                        if let Some(err) = mob.last_error.filter(|s| !s.trim().is_empty()) {
+                            if rt.last_android_error_logged.as_deref() != Some(err.as_str()) {
+                                rt.last_android_error_logged = Some(err.clone());
+                                push_log(&mut rt.logs, format!("[Android VPN] {}", err));
+                            }
                         }
                     }
                 }
@@ -732,7 +767,7 @@ fn spawn_and_monitor_singbox(
                 .ok_or_else(|| "Android AppHandle не инициализирован".to_string())?
         };
 
-        crate::android_vpn::start_vpn(
+        let start_res = crate::android_vpn::start_vpn(
             &app_handle,
             config_str,
             profile.name.clone(),
@@ -740,37 +775,94 @@ fn spawn_and_monitor_singbox(
             profile.protocol.clone(),
         )?;
 
-        let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-        if let Some(msg) = custom_log {
-            push_log(&mut rt.logs, msg);
-        } else {
-            push_log(
-                &mut rt.logs,
-                format!(
-                    "Запуск libbox VPN: профиль '{}' ({}), Split Tunneling: {}",
-                    profile.name,
-                    profile.protocol.to_uppercase(),
-                    if routing_snapshot.split_tunneling { "ВКЛ" } else { "ВЫКЛ" }
-                ),
-            );
+        let mob_opt = crate::android_vpn::get_vpn_status(&app_handle).ok();
+        let is_connected = mob_opt
+            .as_ref()
+            .map(|m| m.connected)
+            .unwrap_or(start_res.connected);
+        let is_connecting = mob_opt
+            .as_ref()
+            .map(|m| m.connecting)
+            .unwrap_or(start_res.connecting);
+        let mob_err = mob_opt
+            .as_ref()
+            .and_then(|m| m.last_error.clone())
+            .filter(|s| !s.trim().is_empty());
+
+        if !is_connected && !is_connecting {
+            return Err(mob_err.unwrap_or_else(|| {
+                "Не удалось запустить VPN-туннель Android".to_string()
+            }));
         }
-        rt.android_connected = true;
-        rt.active_profile_id = Some(profile.id.clone());
-        rt.active_profile_name = Some(profile.name.clone());
-        rt.active_protocol = Some(profile.protocol.clone());
-        rt.active_port = Some(active_port);
-        rt.port_hunting_status = None;
-        rt.up_bytes = 0;
-        rt.down_bytes = 0;
+
+        let resolved_socks_port = mob_opt
+            .as_ref()
+            .map(|m| m.socks_port)
+            .filter(|&p| p > 0)
+            .or_else(|| (start_res.socks_port > 0).then_some(start_res.socks_port));
+
         let is_awg = is_awg_protocol(&profile.protocol);
-        rt.active_listen_port = if is_awg { profile.listen_port } else { None };
-        if is_awg {
-            rt.is_handshaking = true;
-            rt.handshake_status = Some("Установка соединения (рукопожатие WireGuard)...".to_string());
-        } else {
-            rt.is_handshaking = false;
-            rt.handshake_status = None;
+
+        {
+            let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            if let Some(msg) = custom_log {
+                push_log(&mut rt.logs, msg);
+            } else {
+                push_log(
+                    &mut rt.logs,
+                    format!(
+                        "Запуск libbox VPN: профиль '{}' ({}), Split Tunneling: {}",
+                        profile.name,
+                        profile.protocol.to_uppercase(),
+                        if routing_snapshot.split_tunneling { "ВКЛ" } else { "ВЫКЛ" }
+                    ),
+                );
+            }
+            rt.android_connected = is_connected;
+            rt.android_socks_port = resolved_socks_port;
+            rt.last_android_error_logged = None;
+            rt.up_bytes = 0;
+            rt.down_bytes = 0;
+            if is_connected || is_connecting {
+                rt.active_profile_id = Some(profile.id.clone());
+                rt.active_profile_name = Some(profile.name.clone());
+                rt.active_protocol = Some(profile.protocol.clone());
+                rt.active_port = Some(active_port);
+                rt.port_hunting_status = None;
+                rt.active_listen_port = if is_awg { profile.listen_port } else { None };
+            } else {
+                rt.active_profile_id = None;
+                rt.active_profile_name = None;
+                rt.active_protocol = None;
+                rt.active_port = None;
+                rt.active_listen_port = None;
+                rt.port_hunting_status = None;
+            }
+            if is_connected && is_awg {
+                rt.is_handshaking = true;
+                rt.handshake_status = Some("Установка соединения (рукопожатие WireGuard)...".to_string());
+            } else {
+                rt.is_handshaking = false;
+                rt.handshake_status = None;
+            }
         }
+
+        if is_connected && is_awg {
+            if let Some(probe_port) = resolved_socks_port {
+                thread::spawn(move || {
+                    thread::sleep(Duration::from_millis(350));
+                    if let Ok(proxy) = ureq::Proxy::new(format!("http://127.0.0.1:{}", probe_port)) {
+                        let client = ureq::AgentBuilder::new()
+                            .timeout(Duration::from_millis(3000))
+                            .proxy(proxy)
+                            .build();
+                        let _ = client.get("http://cp.cloudflare.com/generate_204").call();
+                    }
+                });
+            }
+        }
+
+        let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
         return Ok(build_vpn_status(&mut rt));
     }
 
@@ -2038,9 +2130,9 @@ async fn ping_profile(id: String, state: State<'_, SharedState>) -> Result<u32, 
         let ms = if direct_res.is_some() {
             start.elapsed().as_millis() as u32
         } else {
-            // Fallback: try through active VPN tunnel (127.0.0.1:2081 or 127.0.0.1:2080) via SOCKS5
+            // Fallback: try through active VPN tunnel (127.0.0.1:2081..2084 or 2080) via SOCKS5
             let mut tunnel_ms = None;
-            for proxy_port in [2081u16, 2080u16] {
+            for proxy_port in [2081u16, 2082, 2083, 2084, 2080] {
                 let proxy_addr: SocketAddr = format!("127.0.0.1:{}", proxy_port).parse().unwrap();
                 if let Ok(mut sock) = TcpStream::connect_timeout(&proxy_addr, Duration::from_millis(300)) {
                     let _ = sock.set_read_timeout(Some(Duration::from_millis(2500)));
@@ -4036,7 +4128,7 @@ const GITHUB_REPO_OWNER_NAME: &str = "lllPredatorlll/NeuroVeil-VPN";
 const GITHUB_REPO_URL: &str = "https://github.com/lllPredatorlll/NeuroVeil-VPN";
 
 fn active_local_tunnel_socks_port() -> Option<u16> {
-    for port in [2081u16, 2080u16] {
+    for port in [2081u16, 2082, 2083, 2084, 2080] {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         if TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok() {
             return Some(port);
@@ -4504,7 +4596,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2040)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2050)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4517,12 +4609,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2040).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2050).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2040).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2050).",
                         current_version
                     )
                 };
@@ -4530,7 +4622,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2040)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2050)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4780,6 +4872,47 @@ async fn request_add_android_tile(
         Ok(serde_json::json!({
             "status": "unsupported",
             "message": "Плитка быстрых настроек доступна только на Android."
+        }))
+    }
+}
+
+#[tauri::command]
+async fn is_battery_optimization_ignored(app: AppHandle) -> Result<bool, String> {
+    #[cfg(target_os = "android")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            crate::android_vpn::is_battery_optimization_ignored(&app)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(true)
+    }
+}
+
+#[tauri::command]
+async fn request_battery_optimization_exemption(
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let res = tauri::async_runtime::spawn_blocking(move || {
+            crate::android_vpn::request_battery_optimization_exemption(&app)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        return serde_json::to_value(res).map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(serde_json::json!({
+            "ignored": true,
+            "requested": false,
+            "message": "Оптимизация батареи применима только к Android."
         }))
     }
 }
@@ -6084,6 +6217,8 @@ pub fn run() {
             persistent,
             child: None,
             android_connected: false,
+            android_socks_port: None,
+            last_android_error_logged: None,
             app_handle: Some(app.handle().clone()),
             active_profile_id: None,
             active_profile_name: None,
@@ -6230,9 +6365,14 @@ pub fn run() {
             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
             #[cfg(target_os = "android")]
             let already_connected = match crate::android_vpn::get_vpn_status(&app_handle_for_connect) {
-                Ok(mob) if mob.connected => {
+                Ok(mob) if mob.connected || mob.connecting => {
                     if let Ok(mut rt) = auto_connect_state.lock() {
-                        rt.android_connected = true;
+                        rt.android_connected = mob.connected;
+                        rt.android_socks_port = if mob.socks_port > 0 {
+                            Some(mob.socks_port)
+                        } else {
+                            None
+                        };
                         if rt.active_profile_id.is_none() {
                             if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
                                 rt.active_profile_id = Some(pid);
@@ -6391,6 +6531,8 @@ pub fn run() {
             download_and_install_update,
             open_external_url,
             request_add_android_tile,
+            is_battery_optimization_ignored,
+            request_battery_optimization_exemption,
             run_connection_speed_test,
             cancel_connection_speed_test
         ])

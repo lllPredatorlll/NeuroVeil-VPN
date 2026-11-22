@@ -92,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2040";
+const APP_BUILD = "2050";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -654,6 +654,8 @@ export default function App() {
     typeof navigator !== "undefined" && /Android/i.test(navigator.userAgent);
   const [isMobilePlatform, setIsMobilePlatform] = useState<boolean>(initialIsAndroid);
   const isMobilePlatformRef = useRef<boolean>(initialIsAndroid);
+  const [batteryOptIgnored, setBatteryOptIgnored] = useState<boolean>(true);
+  const [batteryBannerDismissed, setBatteryBannerDismissed] = useState<boolean>(false);
   const mobilePopupStackRef = useRef<
     { mode: string; profileId: string | null; submode: string | null }[]
   >([]);
@@ -1590,6 +1592,9 @@ export default function App() {
             if (info?.is_mobile || info?.platform === "android") {
               isMobilePlatformRef.current = true;
               setIsMobilePlatform(true);
+              invoke<boolean>("is_battery_optimization_ignored")
+                .then((ignored) => setBatteryOptIgnored(Boolean(ignored)))
+                .catch(() => {});
             }
           })
           .catch(() => {});
@@ -1827,8 +1832,19 @@ export default function App() {
       }
     });
 
+    const refreshBatteryOptStatus = () => {
+      if (!isMobilePlatformRef.current) return;
+      invoke<boolean>("is_battery_optimization_ignored")
+        .then((ignored) => setBatteryOptIgnored(Boolean(ignored)))
+        .catch(() => {});
+    };
+    window.addEventListener("focus", refreshBatteryOptStatus);
+    document.addEventListener("visibilitychange", refreshBatteryOptStatus);
+
     return () => {
       clearInterval(interval);
+      window.removeEventListener("focus", refreshBatteryOptStatus);
+      document.removeEventListener("visibilitychange", refreshBatteryOptStatus);
       window.removeEventListener("storage", syncPrefsFromStorage);
       window.removeEventListener("popstate", handlePopState);
       unlistenUiPrefsPromise.then((unlisten) => unlisten());
@@ -2116,12 +2132,19 @@ export default function App() {
           preserveListenPort: true,
         });
         applyStatusUpdate(st);
-        showNotice(
-          "success",
-          st.active_listen_port
-            ? `Переключено на ${target?.name || "профиль"} (ListenPort: ${st.active_listen_port})`
-            : `Переключено на ${target?.name || "профиль"}`
-        );
+        if (!st.connected) {
+          showNotice(
+            "info",
+            `Переключение на ${target?.name || "профиль"}... Ожидание подтверждения от системы`
+          );
+        } else {
+          showNotice(
+            st.is_handshaking ? "info" : "success",
+            st.active_listen_port
+              ? `Переключено на ${target?.name || "профиль"} (ListenPort: ${st.active_listen_port})`
+              : `Переключено на ${target?.name || "профиль"}`
+          );
+        }
       } catch (err: any) {
         showNotice("error", String(err));
       } finally {
@@ -2295,7 +2318,12 @@ export default function App() {
         });
         applyStatusUpdate(st);
         const lpSuffix = st.active_listen_port ? ` (ListenPort: ${st.active_listen_port})` : "";
-        if (st.is_handshaking) {
+        if (!st.connected) {
+          showNotice(
+            "info",
+            `Запуск туннеля ${selectedProfile.name}... Ожидание подтверждения от системы`
+          );
+        } else if (st.is_handshaking) {
           showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}. Ожидание рукопожатия WireGuard...`);
         } else {
           showNotice("success", `Подключено к ${selectedProfile.name}${lpSuffix}`);
@@ -2322,13 +2350,18 @@ export default function App() {
         splitTunneling: profRouting.split_tunneling,
       });
       applyStatusUpdate(st);
-      if (st.active_listen_port) {
+      if (!st.connected) {
+        showNotice("info", `Переподключение ${st.active_profile_name || ""}... Ожидание запуска туннеля`);
+      } else if (st.active_listen_port) {
         showNotice(
           st.is_handshaking ? "info" : "success",
           `Переподключено • Новый порт прослушивания (ListenPort): ${st.active_listen_port}`
         );
       } else {
-        showNotice("success", `Туннель ${st.active_profile_name || ""} переподключен!`);
+        showNotice(
+          st.is_handshaking ? "info" : "success",
+          `Туннель ${st.active_profile_name || ""} переподключен!`
+        );
       }
     } catch (err: any) {
       showNotice("error", String(err));
@@ -8351,6 +8384,45 @@ export default function App() {
             </div>
           )}
 
+          {/* Android Battery Optimization Warning Banner */}
+          {isMobilePlatform && !batteryOptIgnored && !batteryBannerDismissed && (
+            <div className="p-2.5 rounded-xl bg-amber-500/12 border border-amber-500/40 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="text-[10.5px] font-semibold text-amber-200 leading-tight">
+                  Ограничение батареи может отключать VPN в фоне
+                </span>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const res = await invoke<{ ignored?: boolean; message?: string }>(
+                        "request_battery_optimization_exemption"
+                      );
+                      if (res?.ignored) setBatteryOptIgnored(true);
+                      if (res?.message) showNotice("info", res.message);
+                    } catch (err: any) {
+                      showNotice("error", String(err));
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10.5px] transition cursor-pointer"
+                >
+                  Разрешить
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBatteryBannerDismissed(true)}
+                  className="p-1 rounded-lg text-amber-300/70 hover:text-amber-100 hover:bg-amber-500/20 transition cursor-pointer"
+                  title="Скрыть"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 1. POWER / CONNECT BUTTON CARD */}
           <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0 shadow-md">
             {(() => {
@@ -8502,7 +8574,7 @@ export default function App() {
                     />
                     {powerProfile && (
                       <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
-                        {routing.mode === "tun" ? "TUN" : "Proxy"}
+                        {isMobilePlatform || routing.mode === "tun" ? "TUN" : "Proxy"}
                       </span>
                     )}
                   </div>
@@ -10987,6 +11059,61 @@ export default function App() {
                   <Plus className="w-3.5 h-3.5 text-cyan-300" />
                   <span>Добавить значок туннеля в верхнюю панель</span>
                 </button>
+              </div>
+            )}
+
+            {/* MOBILE BATTERY OPTIMIZATION EXEMPTION */}
+            {isMobilePlatform && (
+              <div
+                className={`p-3 rounded-2xl border soft-edge-block transition-all duration-300 space-y-2 ${currentTheme.styles.cardBorder}`}
+                style={{ backgroundColor: currentTheme.styles.cardBg }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ShieldCheck
+                      className={`w-3.5 h-3.5 shrink-0 ${
+                        batteryOptIgnored ? "text-emerald-400" : "text-amber-400"
+                      }`}
+                    />
+                    <div>
+                      <h3 className="text-[11px] font-bold text-white">
+                        Фоновая работа (оптимизация батареи)
+                      </h3>
+                      <p className="text-[9.5px] text-slate-400">
+                        Защита от автоматического отключения VPN системой Android / OneUI в фоне
+                      </p>
+                    </div>
+                  </div>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[9.5px] font-bold shrink-0 border ${
+                      batteryOptIgnored
+                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/35"
+                        : "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                    }`}
+                  >
+                    {batteryOptIgnored ? "Без ограничений" : "Ограничено"}
+                  </span>
+                </div>
+                {!batteryOptIgnored && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const res = await invoke<{ ignored?: boolean; message?: string }>(
+                          "request_battery_optimization_exemption"
+                        );
+                        if (res?.ignored) setBatteryOptIgnored(true);
+                        if (res?.message) showNotice("info", res.message);
+                      } catch (err: any) {
+                        showNotice("error", String(err));
+                      }
+                    }}
+                    className="w-full py-2 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/40 text-[11px] font-bold text-amber-200 flex items-center justify-center gap-2 transition cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Отключить ограничение батареи для NeuroVeil VPN</span>
+                  </button>
+                )}
               </div>
             )}
 
