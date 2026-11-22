@@ -669,6 +669,8 @@ pub struct VpnStatus {
     pub is_handshaking: bool,
     #[serde(default)]
     pub handshake_status: Option<String>,
+    #[serde(default)]
+    pub is_connecting: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -217,6 +217,7 @@ export interface VpnStatus {
   port_hunting_status?: string | null;
   is_handshaking?: boolean;
   handshake_status?: string | null;
+  is_connecting?: boolean;
 }
 
 export interface PortProbeResult {

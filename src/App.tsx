@@ -92,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2050";
+const APP_BUILD = "2060";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -897,7 +897,12 @@ export default function App() {
     singbox_version: "Проверка...",
     singbox_path: "",
     logs: [],
+    is_handshaking: false,
+    handshake_status: null,
+    is_connecting: false,
   });
+  const prevConnectingStatusRef = useRef<boolean>(false);
+  const lastStatusLogsLenRef = useRef<number>(0);
 
   function getRandomInt(min: number, max: number): number {
     return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -1355,6 +1360,24 @@ export default function App() {
 
   const applyStatusUpdate = (st: VpnStatus) => {
     setStatus(st);
+    const wasConnectingBg = prevConnectingStatusRef.current;
+    const isConnectingBg = !st.connected && Boolean(st.is_connecting);
+    prevConnectingStatusRef.current = isConnectingBg;
+
+    const prevLogLen = lastStatusLogsLenRef.current;
+    const curLogs = st.logs || [];
+    lastStatusLogsLenRef.current = curLogs.length;
+
+    if (wasConnectingBg && !st.connected && !isConnectingBg && curLogs.length > prevLogLen) {
+      const fresh = curLogs.slice(prevLogLen);
+      const errLine = [...fresh]
+        .reverse()
+        .find((l) => l.includes("[Android VPN]") || l.includes("Ошибка запуска ядра"));
+      if (errLine) {
+        showNotice("error", errLine.replace(/^\[[^\]]+\]\s*/, ""));
+      }
+    }
+
     if (st.connected && st.active_profile_id && st.active_listen_port) {
       const lp = st.active_listen_port;
       const pid = st.active_profile_id;
@@ -1857,6 +1880,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!status.is_connecting && !status.is_handshaking) return;
+    let cancelled = false;
+    let busy = false;
+    const fastTimer = setInterval(async () => {
+      if (cancelled || busy) return;
+      busy = true;
+      try {
+        const st = await invoke<VpnStatus>("get_vpn_status");
+        if (!cancelled) applyStatusUpdate(st);
+      } catch {
+      } finally {
+        busy = false;
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearInterval(fastTimer);
+    };
+  }, [status.is_connecting, status.is_handshaking]);
+
+  useEffect(() => {
     vpsLogEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [vpsLogs]);
 
@@ -2133,10 +2177,11 @@ export default function App() {
         });
         applyStatusUpdate(st);
         if (!st.connected) {
-          showNotice(
-            "info",
-            `Переключение на ${target?.name || "профиль"}... Ожидание подтверждения от системы`
-          );
+          if (st.is_connecting) {
+            showNotice("info", `Переключение на ${target?.name || "профиль"}...`);
+          } else {
+            showNotice("error", `Не удалось переключиться на ${target?.name || "профиль"}`);
+          }
         } else {
           showNotice(
             st.is_handshaking ? "info" : "success",
@@ -2276,7 +2321,7 @@ export default function App() {
     if ((connecting && !autoPortHunting) || reconnectCooldown) return;
     setConnecting(true);
     try {
-      if (status.connected) {
+      if (status.connected || status.is_connecting) {
         setReconnectCooldown(true);
         setTimeout(() => setReconnectCooldown(false), 2000);
         const st = await invoke<VpnStatus>("disconnect_vpn");
@@ -2319,10 +2364,11 @@ export default function App() {
         applyStatusUpdate(st);
         const lpSuffix = st.active_listen_port ? ` (ListenPort: ${st.active_listen_port})` : "";
         if (!st.connected) {
-          showNotice(
-            "info",
-            `Запуск туннеля ${selectedProfile.name}... Ожидание подтверждения от системы`
-          );
+          if (st.is_connecting) {
+            showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}...`);
+          } else {
+            showNotice("error", `Не удалось запустить туннель ${selectedProfile.name}`);
+          }
         } else if (st.is_handshaking) {
           showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}. Ожидание рукопожатия WireGuard...`);
         } else {
@@ -2351,7 +2397,11 @@ export default function App() {
       });
       applyStatusUpdate(st);
       if (!st.connected) {
-        showNotice("info", `Переподключение ${st.active_profile_name || ""}... Ожидание запуска туннеля`);
+        if (st.is_connecting) {
+          showNotice("info", `Переподключение ${st.active_profile_name || ""}...`);
+        } else {
+          showNotice("error", `Не удалось переподключить ${st.active_profile_name || ""}`);
+        }
       } else if (st.active_listen_port) {
         showNotice(
           st.is_handshaking ? "info" : "success",
@@ -2411,9 +2461,10 @@ export default function App() {
 
         let established = false;
         let finalSt = st;
+        let connectedTicks = st.connected ? 1 : 0;
 
-        // Ожидаем до ~4.2 сек подтверждения рукопожатия / входящего трафика на текущем порту
-        for (let tick = 0; tick < 12; tick++) {
+        // Ожидаем подтверждения рукопожатия / входящего трафика на текущем порту
+        for (let tick = 0; tick < 16; tick++) {
           if (autoPortStopRef.current) break;
           await new Promise((r) => setTimeout(r, 350));
           if (autoPortStopRef.current) break;
@@ -2423,10 +2474,17 @@ export default function App() {
           finalSt = pollSt;
 
           if (!pollSt.connected) {
+            if (pollSt.is_connecting) {
+              continue;
+            }
             break;
           }
-          if (!pollSt.is_handshaking && (tick >= 2 || pollSt.down_bytes > 0)) {
+          connectedTicks++;
+          if (!pollSt.is_handshaking && (connectedTicks >= 3 || pollSt.down_bytes > 0)) {
             established = true;
+            break;
+          }
+          if (connectedTicks >= 12) {
             break;
           }
         }
@@ -8002,6 +8060,8 @@ export default function App() {
                       ? status.is_handshaking
                         ? "bg-amber-400 shadow-[0_0_6px_#fbbf24] animate-ping"
                         : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                      : status.is_connecting
+                      ? "bg-amber-400 shadow-[0_0_6px_#fbbf24] animate-ping"
                       : "bg-slate-600"
                   }`}
                 />
@@ -8197,6 +8257,8 @@ export default function App() {
                         ? status.is_handshaking
                           ? "bg-amber-400 animate-ping"
                           : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                        : status.is_connecting
+                        ? "bg-amber-400 animate-ping"
                         : "bg-slate-500"
                     }`}
                   />
@@ -8205,6 +8267,8 @@ export default function App() {
                       ? status.is_handshaking
                         ? "Рукопожатие..."
                         : status.active_profile_name || "Подключён"
+                      : status.is_connecting
+                      ? "Подключение..."
                       : selectedProfile?.name || "Отключён"}
                   </span>
                 </div>
@@ -8427,16 +8491,22 @@ export default function App() {
           <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0 shadow-md">
             {(() => {
               const powerProfile =
-                (status.connected && status.active_profile_id
+                ((status.connected || status.is_connecting) && status.active_profile_id
                   ? profiles.find((p) => p.id === status.active_profile_id)
                   : null) || selectedProfile;
               const powerProtoMeta = powerProfile
                 ? getProtocolMeta(powerProfile.protocol, powerProfile.awg_version)
                 : null;
               const powerTheme = powerProtoMeta ? getProtocolPowerTheme(powerProtoMeta) : null;
-              const isHandshaking = status.connected && status.is_handshaking;
+              const isConnectingBg = !status.connected && Boolean(status.is_connecting);
+              const effectiveConnecting = connecting || isConnectingBg;
+              const isHandshaking = status.connected && Boolean(status.is_handshaking);
+              const isWarmStage =
+                isHandshaking ||
+                isConnectingBg ||
+                (connecting && !status.connected && !reconnectCooldown);
 
-              const buttonStyle: React.CSSProperties | undefined = isHandshaking
+              const buttonStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
                 : powerTheme
                 ? status.connected
@@ -8452,7 +8522,7 @@ export default function App() {
                     }
                 : undefined;
 
-              const iconBoxStyle: React.CSSProperties | undefined = isHandshaking
+              const iconBoxStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
                 : powerTheme
                 ? status.connected
@@ -8463,7 +8533,7 @@ export default function App() {
                     }
                 : undefined;
 
-              const dotStyle: React.CSSProperties | undefined = isHandshaking
+              const dotStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
                 : powerTheme
                 ? status.connected
@@ -8483,7 +8553,7 @@ export default function App() {
                   disabled={(connecting && !autoPortHunting) || reconnectCooldown}
                   style={buttonStyle}
                   className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white hover:brightness-110 ${
-                    isHandshaking
+                    isWarmStage
                       ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25"
                       : !powerTheme
                       ? status.connected
@@ -8492,15 +8562,15 @@ export default function App() {
                       : "text-white"
                   }`}
                 >
-                  {status.connected && (
+                  {(status.connected || isWarmStage) && (
                     <div
                       style={
-                        !isHandshaking && powerTheme
+                        !isWarmStage && powerTheme
                           ? { background: powerTheme.pulseOverlay }
                           : undefined
                       }
                       className={`absolute inset-0 ${
-                        isHandshaking ? "bg-amber-400/15" : !powerTheme ? "bg-emerald-400/10" : ""
+                        isWarmStage ? "bg-amber-400/15" : !powerTheme ? "bg-emerald-400/10" : ""
                       } animate-pulse pointer-events-none`}
                     />
                   )}
@@ -8509,7 +8579,7 @@ export default function App() {
                     <div
                       style={iconBoxStyle}
                       className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner text-white ${
-                        isHandshaking
+                        isWarmStage
                           ? "bg-amber-500 shadow-amber-700/50"
                           : !powerTheme
                           ? status.connected
@@ -8518,7 +8588,7 @@ export default function App() {
                           : ""
                       }`}
                     >
-                      {connecting || autoPortHunting ? (
+                      {effectiveConnecting || autoPortHunting ? (
                         <RefreshCw className="w-6 h-6 animate-spin text-white" />
                       ) : status.connected ? (
                         isHandshaking ? (
@@ -8537,6 +8607,8 @@ export default function App() {
                           ? `Автоподбор порта (#${autoPortAttempt})`
                           : connecting
                           ? "Подождите..."
+                          : isConnectingBg
+                          ? "Запуск туннеля..."
                           : reconnectCooldown
                           ? "Защитная пауза WireGuard"
                           : status.connected
@@ -8550,6 +8622,8 @@ export default function App() {
                       <div className="text-lg font-extrabold tracking-wide text-white leading-tight truncate mt-0.5">
                         {connecting && !autoPortHunting
                           ? "ПОДКЛЮЧЕНИЕ..."
+                          : isConnectingBg
+                          ? "ОТМЕНИТЬ"
                           : reconnectCooldown
                           ? "ПАУЗА..."
                           : status.connected
@@ -8563,7 +8637,7 @@ export default function App() {
                     <span
                       style={dotStyle}
                       className={`w-3 h-3 rounded-full ${
-                        isHandshaking
+                        isWarmStage
                           ? "bg-amber-300 animate-ping"
                           : !powerTheme
                           ? status.connected
@@ -8582,8 +8656,8 @@ export default function App() {
               );
             })()}
 
-            {/* Quick Reconnect & Auto Port Hunt bar when connected */}
-            {(status.connected || autoPortHunting) && (
+            {/* Quick Reconnect & Auto Port Hunt bar when connected or connecting */}
+            {(status.connected || connecting || Boolean(status.is_connecting) || autoPortHunting) && (
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
@@ -8606,7 +8680,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleAutoPortHunt}
-                  disabled={reconnectCooldown && !autoPortHunting}
+                  disabled={(connecting && !autoPortHunting) || (reconnectCooldown && !autoPortHunting)}
                   className={`w-full py-1.5 px-2.5 rounded-xl border text-[11px] font-semibold flex items-center justify-between gap-1 transition cursor-pointer disabled:opacity-50 min-w-0 ${
                     autoPortHunting
                       ? "bg-amber-500/20 hover:bg-rose-500/25 border-amber-400/60 text-amber-200 animate-pulse"
@@ -12127,6 +12201,8 @@ export default function App() {
                       ? status.is_handshaking
                         ? "bg-amber-400 animate-ping"
                         : "bg-emerald-400 shadow-[0_0_5px_#34d399]"
+                      : status.is_connecting
+                      ? "bg-amber-400 animate-ping"
                       : "bg-slate-600"
                   }`}
                 />

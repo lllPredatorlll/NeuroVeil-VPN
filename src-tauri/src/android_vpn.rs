@@ -27,6 +27,8 @@ pub struct MobileVpnStatus {
     #[serde(default)]
     pub connecting: bool,
     #[serde(default)]
+    pub tunnel_rx_confirmed: bool,
+    #[serde(default)]
     pub socks_port: u16,
     #[serde(default)]
     pub up_bytes: u64,
@@ -59,6 +61,8 @@ pub struct StartVpnResult {
     pub connected: bool,
     #[serde(default)]
     pub connecting: bool,
+    #[serde(default)]
+    pub tunnel_rx_confirmed: bool,
     #[serde(default)]
     pub socks_port: u16,
 }
