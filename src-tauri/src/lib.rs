@@ -259,13 +259,11 @@ fn pick_random_free_udp_port(exclude: &[u16]) -> u16 {
     10000 + (fallback_raw % 55000) as u16
 }
 
-fn stop_singbox_internal(rt: &mut RuntimeState) {
+fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
     #[cfg(target_os = "android")]
     {
         let was_connected = rt.android_connected || rt.android_connecting;
-        if let Some(ref app) = rt.app_handle {
-            let _ = crate::android_vpn::stop_vpn(app);
-        }
+        let app_opt = rt.app_handle.clone();
         rt.android_connected = false;
         rt.android_connecting = false;
         rt.android_socks_port = None;
@@ -274,200 +272,242 @@ fn stop_singbox_internal(rt: &mut RuntimeState) {
         if was_connected {
             push_log(&mut rt.logs, "Android VpnService (libbox) остановлен.".to_string());
         }
+        rt.active_profile_id = None;
+        rt.active_profile_name = None;
+        rt.active_protocol = None;
+        rt.active_port = None;
+        rt.active_listen_port = None;
+        rt.port_hunting_status = None;
+        rt.is_handshaking = false;
+        rt.handshake_status = None;
+        rt.up_speed = 0;
+        rt.down_speed = 0;
+        return app_opt;
     }
-    if let Some(mut child) = rt.child.take() {
-        let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
-        let _ = child.kill();
-        let _ = child.wait();
-        #[cfg(target_os = "windows")]
-        {
-            let mut flush_cmd = Command::new("ipconfig");
-            flush_cmd.arg("/flushdns").creation_flags(CREATE_NO_WINDOW);
-            let _ = flush_cmd.output();
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Some(mut child) = rt.child.take() {
+            let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
+            let _ = child.kill();
+            let _ = child.wait();
+            #[cfg(target_os = "windows")]
+            {
+                let mut flush_cmd = Command::new("ipconfig");
+                flush_cmd.arg("/flushdns").creation_flags(CREATE_NO_WINDOW);
+                let _ = flush_cmd.output();
+            }
+            save_persistent_state(&rt.persistent);
+            push_log(&mut rt.logs, "Процесс sing-box остановлен.".to_string());
         }
-        save_persistent_state(&rt.persistent);
-        push_log(&mut rt.logs, "Процесс sing-box остановлен.".to_string());
+        rt.active_profile_id = None;
+        rt.active_profile_name = None;
+        rt.active_protocol = None;
+        rt.active_port = None;
+        rt.active_listen_port = None;
+        rt.port_hunting_status = None;
+        rt.is_handshaking = false;
+        rt.handshake_status = None;
+        rt.up_speed = 0;
+        rt.down_speed = 0;
+        None
     }
-    rt.active_profile_id = None;
-    rt.active_profile_name = None;
-    rt.active_protocol = None;
-    rt.active_port = None;
-    rt.active_listen_port = None;
-    rt.port_hunting_status = None;
-    rt.is_handshaking = false;
-    rt.handshake_status = None;
-    rt.up_speed = 0;
-    rt.down_speed = 0;
 }
 
-fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
+#[cfg(not(target_os = "android"))]
+fn stop_singbox_internal(rt: &mut RuntimeState) {
+    let _ = stop_singbox_in_memory(rt);
+}
+
+async fn stop_android_vpn_if_needed(stop_app: Option<AppHandle>) {
     #[cfg(target_os = "android")]
-    {
-        if let Some(ref app) = rt.app_handle {
-            if let Ok(mob) = crate::android_vpn::get_vpn_status(app) {
-                if !mob.libbox_version.trim().is_empty() {
-                    rt.singbox_version = mob.libbox_version.clone();
-                }
-                if !mob.logs.is_empty() {
-                    for line in &mob.logs {
-                        if !rt.logs.contains(line) {
-                            rt.logs.push(line.clone());
-                        }
-                    }
-                    if rt.logs.len() > 250 {
-                        let excess = rt.logs.len() - 250;
-                        rt.logs.drain(0..excess);
-                    }
-                }
-                if mob.connected {
-                    let was_connected = rt.android_connected;
-                    rt.android_connecting = false;
-                    rt.last_android_error_logged = None;
-                    rt.android_socks_port = if mob.socks_port > 0 {
-                        Some(mob.socks_port)
-                    } else {
-                        None
-                    };
-                    if rt.active_profile_id.is_none() {
-                        let matched_prof = mob
-                            .profile_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .and_then(|pid| rt.persistent.profiles.iter().find(|p| p.id == pid))
-                            .or_else(|| {
-                                mob.profile_name
-                                    .as_deref()
-                                    .filter(|s| !s.is_empty())
-                                    .and_then(|pname| rt.persistent.profiles.iter().find(|p| p.name == pname))
-                            });
-                        if let Some(p) = matched_prof {
-                            rt.active_profile_id = Some(p.id.clone());
-                            rt.active_profile_name = Some(p.name.clone());
-                            rt.active_protocol = Some(p.protocol.clone());
-                            rt.active_port = Some(p.port);
-                            rt.active_listen_port = if is_awg_protocol(&p.protocol) {
-                                p.listen_port
-                            } else {
-                                None
-                            };
-                        } else {
-                            if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
-                                rt.active_profile_id = Some(pid);
-                            }
-                            if let Some(pname) = mob.profile_name.clone().filter(|s| !s.is_empty()) {
-                                rt.active_profile_name = Some(pname);
-                            }
-                            if let Some(proto) = mob.protocol.clone().filter(|s| !s.is_empty()) {
-                                rt.active_protocol = Some(proto);
-                            }
-                        }
-                    }
-                    let delta_up = mob.up_bytes.saturating_sub(rt.up_bytes);
-                    let delta_down = mob.down_bytes.saturating_sub(rt.down_bytes);
-                    rt.up_bytes = mob.up_bytes;
-                    rt.down_bytes = mob.down_bytes;
-                    rt.up_speed = mob.up_speed;
-                    rt.down_speed = mob.down_speed;
-                    if delta_up > 0 || delta_down > 0 {
-                        if let Some(active_id) = rt.active_profile_id.clone() {
-                            if let Some(prof) =
-                                rt.persistent.profiles.iter_mut().find(|p| p.id == active_id)
-                            {
-                                prof.total_up_bytes = prof.total_up_bytes.saturating_add(delta_up);
-                                prof.total_down_bytes =
-                                    prof.total_down_bytes.saturating_add(delta_down);
-                            }
-                        }
-                    }
-                    if !was_connected {
-                        let proto_is_awg = rt
-                            .active_protocol
-                            .as_deref()
-                            .map(is_awg_protocol)
-                            .unwrap_or(false);
-                        if proto_is_awg && !mob.tunnel_rx_confirmed {
-                            rt.is_handshaking = true;
-                            rt.handshake_status = Some(
-                                "Установка соединения (рукопожатие WireGuard)...".to_string(),
-                            );
-                        }
-                    }
-                    if rt.is_handshaking && mob.tunnel_rx_confirmed {
-                        rt.is_handshaking = false;
-                        rt.handshake_status = None;
-                    }
-                    rt.android_connected = true;
-                } else if mob.connecting {
-                    rt.android_connected = false;
-                    rt.android_connecting = true;
-                    rt.android_socks_port = None;
-                    rt.is_handshaking = false;
-                    rt.handshake_status = Some("Запуск VPN-туннеля...".to_string());
-                    rt.up_bytes = 0;
-                    rt.down_bytes = 0;
-                    rt.up_speed = 0;
-                    rt.down_speed = 0;
-                    if rt.active_profile_id.is_none() {
-                        let matched_prof = mob
-                            .profile_id
-                            .as_deref()
-                            .filter(|s| !s.is_empty())
-                            .and_then(|pid| rt.persistent.profiles.iter().find(|p| p.id == pid))
-                            .or_else(|| {
-                                mob.profile_name
-                                    .as_deref()
-                                    .filter(|s| !s.is_empty())
-                                    .and_then(|pname| rt.persistent.profiles.iter().find(|p| p.name == pname))
-                            });
-                        if let Some(p) = matched_prof {
-                            rt.active_profile_id = Some(p.id.clone());
-                            rt.active_profile_name = Some(p.name.clone());
-                            rt.active_protocol = Some(p.protocol.clone());
-                            rt.active_port = Some(p.port);
-                            rt.active_listen_port = if is_awg_protocol(&p.protocol) {
-                                p.listen_port
-                            } else {
-                                None
-                            };
-                        } else {
-                            if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
-                                rt.active_profile_id = Some(pid);
-                            }
-                            if let Some(pname) = mob.profile_name.clone().filter(|s| !s.is_empty()) {
-                                rt.active_profile_name = Some(pname);
-                            }
-                            if let Some(proto) = mob.protocol.clone().filter(|s| !s.is_empty()) {
-                                rt.active_protocol = Some(proto);
-                            }
-                        }
-                    }
+    if let Some(app) = stop_app {
+        let _ = tauri::async_runtime::spawn_blocking(move || crate::android_vpn::stop_vpn(&app)).await;
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = stop_app;
+}
+
+#[cfg(target_os = "android")]
+fn apply_mobile_vpn_status_in_memory(
+    rt: &mut RuntimeState,
+    mob: crate::android_vpn::MobileVpnStatus,
+) {
+    if !mob.libbox_version.trim().is_empty() {
+        rt.singbox_version = mob.libbox_version.clone();
+    }
+    if !mob.logs.is_empty() {
+        for line in &mob.logs {
+            if !rt.logs.contains(line) {
+                rt.logs.push(line.clone());
+            }
+        }
+        if rt.logs.len() > 250 {
+            let excess = rt.logs.len() - 250;
+            rt.logs.drain(0..excess);
+        }
+    }
+    if mob.connected {
+        let was_connected = rt.android_connected;
+        rt.android_connecting = false;
+        rt.last_android_error_logged = None;
+        rt.android_socks_port = if mob.socks_port > 0 {
+            Some(mob.socks_port)
+        } else {
+            None
+        };
+        let mob_pid_mismatch = mob
+            .profile_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some_and(|s| rt.active_profile_id.as_deref() != Some(s));
+        if rt.active_profile_id.is_none() || mob_pid_mismatch {
+            let matched_prof = mob
+                .profile_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(|pid| rt.persistent.profiles.iter().find(|p| p.id == pid))
+                .or_else(|| {
+                    mob.profile_name
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .and_then(|pname| rt.persistent.profiles.iter().find(|p| p.name == pname))
+                });
+            if let Some(p) = matched_prof {
+                rt.active_profile_id = Some(p.id.clone());
+                rt.active_profile_name = Some(p.name.clone());
+                rt.active_protocol = Some(p.protocol.clone());
+                rt.active_port = Some(p.port);
+                rt.active_listen_port = if is_awg_protocol(&p.protocol) && p.protocol != "awg_vless" {
+                    p.listen_port
                 } else {
-                    if rt.android_connected || rt.android_connecting || rt.active_profile_id.is_some() {
-                        rt.android_connected = false;
-                        rt.android_connecting = false;
-                        rt.android_socks_port = None;
-                        rt.active_profile_id = None;
-                        rt.active_profile_name = None;
-                        rt.active_protocol = None;
-                        rt.active_port = None;
-                        rt.active_listen_port = None;
-                        rt.port_hunting_status = None;
-                        rt.is_handshaking = false;
-                        rt.handshake_status = None;
-                        rt.up_bytes = 0;
-                        rt.down_bytes = 0;
-                        rt.up_speed = 0;
-                        rt.down_speed = 0;
-                    }
-                    if let Some(err) = mob.last_error.filter(|s| !s.trim().is_empty()) {
-                        if rt.last_android_error_logged.as_deref() != Some(err.as_str()) {
-                            rt.last_android_error_logged = Some(err.clone());
-                            push_log(&mut rt.logs, format!("[Android VPN] {}", err));
-                        }
-                    }
+                    None
+                };
+            } else {
+                if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
+                    rt.active_profile_id = Some(pid);
+                }
+                if let Some(pname) = mob.profile_name.clone().filter(|s| !s.is_empty()) {
+                    rt.active_profile_name = Some(pname);
+                }
+                if let Some(proto) = mob.protocol.clone().filter(|s| !s.is_empty()) {
+                    rt.active_protocol = Some(proto);
                 }
             }
         }
+        let delta_up = mob.up_bytes.saturating_sub(rt.up_bytes);
+        let delta_down = mob.down_bytes.saturating_sub(rt.down_bytes);
+        rt.up_bytes = mob.up_bytes;
+        rt.down_bytes = mob.down_bytes;
+        rt.up_speed = mob.up_speed;
+        rt.down_speed = mob.down_speed;
+        if delta_up > 0 || delta_down > 0 {
+            if let Some(active_id) = rt.active_profile_id.clone() {
+                if let Some(prof) =
+                    rt.persistent.profiles.iter_mut().find(|p| p.id == active_id)
+                {
+                    prof.total_up_bytes = prof.total_up_bytes.saturating_add(delta_up);
+                    prof.total_down_bytes =
+                        prof.total_down_bytes.saturating_add(delta_down);
+                }
+            }
+        }
+        if !was_connected {
+            let proto_is_awg = rt
+                .active_protocol
+                .as_deref()
+                .map(is_awg_protocol)
+                .unwrap_or(false);
+            if proto_is_awg && !mob.tunnel_rx_confirmed {
+                rt.is_handshaking = true;
+                rt.handshake_status = Some(
+                    "Установка соединения (рукопожатие WireGuard)...".to_string(),
+                );
+            }
+        }
+        if rt.is_handshaking && mob.tunnel_rx_confirmed {
+            rt.is_handshaking = false;
+            rt.handshake_status = None;
+        }
+        rt.android_connected = true;
+    } else if mob.connecting {
+        rt.android_connected = false;
+        rt.android_connecting = true;
+        rt.android_socks_port = None;
+        rt.is_handshaking = false;
+        rt.handshake_status = Some("Запуск VPN-туннеля...".to_string());
+        rt.up_bytes = 0;
+        rt.down_bytes = 0;
+        rt.up_speed = 0;
+        rt.down_speed = 0;
+        let mob_pid_mismatch = mob
+            .profile_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .is_some_and(|s| rt.active_profile_id.as_deref() != Some(s));
+        if rt.active_profile_id.is_none() || mob_pid_mismatch {
+            let matched_prof = mob
+                .profile_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .and_then(|pid| rt.persistent.profiles.iter().find(|p| p.id == pid))
+                .or_else(|| {
+                    mob.profile_name
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .and_then(|pname| rt.persistent.profiles.iter().find(|p| p.name == pname))
+                });
+            if let Some(p) = matched_prof {
+                rt.active_profile_id = Some(p.id.clone());
+                rt.active_profile_name = Some(p.name.clone());
+                rt.active_protocol = Some(p.protocol.clone());
+                rt.active_port = Some(p.port);
+                rt.active_listen_port = if is_awg_protocol(&p.protocol) && p.protocol != "awg_vless" {
+                    p.listen_port
+                } else {
+                    None
+                };
+            } else {
+                if let Some(pid) = mob.profile_id.clone().filter(|s| !s.is_empty()) {
+                    rt.active_profile_id = Some(pid);
+                }
+                if let Some(pname) = mob.profile_name.clone().filter(|s| !s.is_empty()) {
+                    rt.active_profile_name = Some(pname);
+                }
+                if let Some(proto) = mob.protocol.clone().filter(|s| !s.is_empty()) {
+                    rt.active_protocol = Some(proto);
+                }
+            }
+        }
+    } else {
+        if rt.android_connected || rt.android_connecting || rt.active_profile_id.is_some() {
+            rt.android_connected = false;
+            rt.android_connecting = false;
+            rt.android_socks_port = None;
+            rt.active_profile_id = None;
+            rt.active_profile_name = None;
+            rt.active_protocol = None;
+            rt.active_port = None;
+            rt.active_listen_port = None;
+            rt.port_hunting_status = None;
+            rt.is_handshaking = false;
+            rt.handshake_status = None;
+            rt.up_bytes = 0;
+            rt.down_bytes = 0;
+            rt.up_speed = 0;
+            rt.down_speed = 0;
+        }
+        if let Some(err) = mob.last_error.filter(|s| !s.trim().is_empty()) {
+            if rt.last_android_error_logged.as_deref() != Some(err.as_str()) {
+                rt.last_android_error_logged = Some(err.clone());
+                push_log(&mut rt.logs, format!("[Android VPN] {}", err));
+            }
+        }
+    }
+}
+
+fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
+    #[cfg(target_os = "android")]
+    {
         rt.singbox_installed = true;
         if rt.singbox_version.is_empty() || rt.singbox_version == "Не установлен" {
             rt.singbox_version = "libbox 1.14.4-lx (встроено)".to_string();
@@ -558,6 +598,39 @@ fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+fn build_vpn_status(rt: &mut RuntimeState) -> VpnStatus {
+    build_vpn_status_snapshot(rt)
+}
+
+async fn fetch_and_build_vpn_status(state: SharedState) -> Result<VpnStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        let app_opt = {
+            let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+            rt.app_handle.clone()
+        };
+        let mob_opt = if let Some(app) = app_opt {
+            tauri::async_runtime::spawn_blocking(move || crate::android_vpn::get_vpn_status(&app).ok())
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        if let Some(mob) = mob_opt {
+            apply_mobile_vpn_status_in_memory(&mut rt, mob);
+        }
+        return Ok(build_vpn_status_snapshot(&mut rt));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        Ok(build_vpn_status_snapshot(&mut rt))
+    }
+}
+
 fn sync_android_tile_from_state(rt: &RuntimeState) {
     #[cfg(target_os = "android")]
     {
@@ -615,9 +688,8 @@ fn select_profile(profile_id: String, state: State<'_, SharedState>) -> Result<(
 }
 
 #[tauri::command]
-fn get_vpn_status(state: State<'_, SharedState>) -> Result<VpnStatus, String> {
-    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    Ok(build_vpn_status(&mut rt))
+async fn get_vpn_status(state: State<'_, SharedState>) -> Result<VpnStatus, String> {
+    fetch_and_build_vpn_status(state.inner().clone()).await
 }
 
 #[tauri::command]
@@ -803,6 +875,11 @@ fn spawn_and_monitor_singbox(
     {
         let mut prof_with_port = profile.clone();
         prof_with_port.port = active_port;
+        if prof_with_port.protocol == "hysteria2"
+            && active_port != prof_with_port.original_port.unwrap_or(active_port)
+        {
+            prof_with_port.hop_ports = None;
+        }
         let config_json = generate_android_runtime_singbox_config(&prof_with_port, routing_snapshot);
         let config_str = serde_json::to_string_pretty(&config_json).map_err(|e| e.to_string())?;
         let config_path = get_app_data_dir().join("active_config.json");
@@ -851,7 +928,7 @@ fn spawn_and_monitor_singbox(
 
         let is_awg = is_awg_protocol(&profile.protocol);
 
-        {
+        let snapshot = {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
             if let Some(msg) = custom_log {
                 push_log(&mut rt.logs, msg);
@@ -865,6 +942,20 @@ fn spawn_and_monitor_singbox(
                         if routing_snapshot.split_tunneling { "ВКЛ" } else { "ВЫКЛ" }
                     ),
                 );
+            }
+            if let Some(mob) = mob_opt.as_ref() {
+                if !mob.libbox_version.trim().is_empty() {
+                    rt.singbox_version = mob.libbox_version.clone();
+                }
+                for line in &mob.logs {
+                    if !rt.logs.contains(line) {
+                        rt.logs.push(line.clone());
+                    }
+                }
+                if rt.logs.len() > 250 {
+                    let excess = rt.logs.len() - 250;
+                    rt.logs.drain(0..excess);
+                }
             }
             let rx_confirmed = mob_opt
                 .as_ref()
@@ -882,7 +973,11 @@ fn spawn_and_monitor_singbox(
                 rt.active_protocol = Some(profile.protocol.clone());
                 rt.active_port = Some(active_port);
                 rt.port_hunting_status = None;
-                rt.active_listen_port = if is_awg { profile.listen_port } else { None };
+                rt.active_listen_port = if is_awg && profile.protocol != "awg_vless" {
+                    profile.listen_port
+                } else {
+                    None
+                };
             } else {
                 rt.active_profile_id = None;
                 rt.active_profile_name = None;
@@ -901,7 +996,8 @@ fn spawn_and_monitor_singbox(
                 rt.is_handshaking = false;
                 rt.handshake_status = None;
             }
-        }
+            build_vpn_status_snapshot(&mut rt)
+        };
 
         if is_connected && is_awg {
             if let Some(probe_port) = resolved_socks_port {
@@ -918,8 +1014,7 @@ fn spawn_and_monitor_singbox(
             }
         }
 
-        let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-        return Ok(build_vpn_status(&mut rt));
+        return Ok(snapshot);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1311,9 +1406,13 @@ fn hot_reload_or_restart_singbox(
             profile.id.clone(),
             profile.protocol.clone(),
         )?;
+        let mob_opt = crate::android_vpn::get_vpn_status(&app_handle).ok();
         let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+        if let Some(mob) = mob_opt {
+            apply_mobile_vpn_status_in_memory(&mut rt, mob);
+        }
         push_log(&mut rt.logs, format!("{} (Конфигурация Android VPN обновлена)", log_msg));
-        return Ok(build_vpn_status(&mut rt));
+        return Ok(build_vpn_status_snapshot(&mut rt));
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1670,6 +1769,40 @@ async fn connect_vpn_internal(
             }
         }
 
+        // 1.9. Hysteria2 automatic UDP server port rotation across hop_ports on reconnect/auto-hunt
+        if !preserve_listen_port && profile.protocol == "hysteria2" {
+            let candidates = get_profile_candidate_ports(&profile, None, Some(vec![profile.port]), 24);
+            if !candidates.is_empty() {
+                let idx = (Uuid::new_v4().as_u128() as usize) % candidates.len();
+                let new_port = candidates[idx];
+                if new_port > 0 && new_port != profile.port {
+                    let old_port = profile.port;
+                    if profile.original_port.is_none() || profile.original_port == Some(0) {
+                        profile.original_port = Some(old_port);
+                    }
+                    profile.port = new_port;
+                    profile.uri = build_profile_uri(&profile);
+                    if let Ok(mut rt) = state_clone.lock() {
+                        if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile.id) {
+                            if p.original_port.is_none() || p.original_port == Some(0) {
+                                p.original_port = Some(old_port);
+                            }
+                            p.port = new_port;
+                            p.uri = profile.uri.clone();
+                        }
+                        save_persistent_state(&rt.persistent);
+                        push_log(
+                            &mut rt.logs,
+                            format!(
+                                "[Hysteria2] Порт подключения изменен при переподключении: {} → {}",
+                                old_port, new_port
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
         // 2. Direct fast launch of sing-box without blocking loops (< 50ms)
         let active_port = profile.port;
         {
@@ -1807,9 +1940,19 @@ async fn reconnect_vpn(
 async fn disconnect_vpn(state: State<'_, SharedState>) -> Result<VpnStatus, String> {
     let state_clone = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-        stop_singbox_internal(&mut rt);
-        Ok(build_vpn_status(&mut rt))
+        let (stop_app, snapshot) = {
+            let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            let app_opt = stop_singbox_in_memory(&mut rt);
+            let snap = build_vpn_status_snapshot(&mut rt);
+            (app_opt, snap)
+        };
+        #[cfg(target_os = "android")]
+        if let Some(app) = stop_app {
+            let _ = crate::android_vpn::stop_vpn(&app);
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = stop_app;
+        Ok(snapshot)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1991,7 +2134,7 @@ async fn apply_routing_preset(
             &mut rt.logs,
             format!("Выбрана предустановка «{}».", preset.name),
         );
-        Ok(build_vpn_status(&mut rt))
+        Ok(build_vpn_status_snapshot(&mut rt))
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
@@ -2061,7 +2204,7 @@ async fn apply_routing_on_the_fly(
         }
 
         let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-        Ok(build_vpn_status(&mut rt))
+        Ok(build_vpn_status_snapshot(&mut rt))
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))??;
@@ -2156,20 +2299,24 @@ fn parse_profile_text(text: String) -> Result<VpnProfile, String> {
 }
 
 #[tauri::command]
-fn delete_profile(app: AppHandle, id: String, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
+async fn delete_profile(app: AppHandle, id: String, state: State<'_, SharedState>) -> Result<Vec<VpnProfile>, String> {
     use tauri::Emitter;
-    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    if rt.active_profile_id.as_deref() == Some(&id) {
-        stop_singbox_internal(&mut rt);
-    }
-    rt.persistent.profiles.retain(|p| p.id != id);
-    if rt.persistent.selected_profile_id.as_deref() == Some(&id) {
-        rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
-    }
-    save_persistent_state(&rt.persistent);
-    sync_android_tile_from_state(&rt);
-    let res = rt.persistent.profiles.clone();
-    drop(rt);
+    let (stop_app, res) = {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        let stop_app = if rt.active_profile_id.as_deref() == Some(&id) {
+            stop_singbox_in_memory(&mut rt)
+        } else {
+            None
+        };
+        rt.persistent.profiles.retain(|p| p.id != id);
+        if rt.persistent.selected_profile_id.as_deref() == Some(&id) {
+            rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
+        }
+        save_persistent_state(&rt.persistent);
+        sync_android_tile_from_state(&rt);
+        (stop_app, rt.persistent.profiles.clone())
+    };
+    stop_android_vpn_if_needed(stop_app).await;
     let _ = app.emit("state-updated", ());
     Ok(res)
 }
@@ -2727,15 +2874,21 @@ fn set_network_mode(
 }
 
 #[tauri::command]
-fn clear_core_logs(
+async fn clear_core_logs(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<(), String> {
-    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-    rt.logs.clear();
+    {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        rt.logs.clear();
+    }
     #[cfg(target_os = "android")]
     {
-        let _ = crate::android_vpn::clear_logs(&app);
+        let app_clone = app.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            let _ = crate::android_vpn::clear_logs(&app_clone);
+        })
+        .await;
     }
     #[cfg(not(target_os = "android"))]
     let _ = app;
@@ -3345,6 +3498,7 @@ async fn manage_vps_container_cmd(
     let msg = ssh_deployer::manage_vps_container(&app, &creds, &container_id, &action).await?;
 
     if action == "delete" {
+        let mut stop_app = None;
         if let Ok(mut rt) = state.lock() {
             let host_trimmed = creds.host.trim().to_string();
             let active_in_deleted = rt.active_profile_id.as_ref().is_some_and(|aid| {
@@ -3355,7 +3509,7 @@ async fn manage_vps_container_cmd(
                 })
             });
             if active_in_deleted {
-                stop_singbox_internal(&mut rt);
+                stop_app = stop_singbox_in_memory(&mut rt);
             }
             rt.persistent.profiles.retain(|p| {
                 !(p.server == host_trimmed
@@ -3369,6 +3523,7 @@ async fn manage_vps_container_cmd(
             }
             save_persistent_state(&rt.persistent);
         }
+        stop_android_vpn_if_needed(stop_app).await;
         use tauri::Emitter;
         let _ = app.emit("state-updated", ());
     }
@@ -3387,11 +3542,13 @@ async fn delete_vps_device_cmd(
         ssh_deployer::delete_vps_device(&app, &creds, &profile).await?;
     }
 
-    let res = {
+    let (stop_app, res) = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-        if rt.active_profile_id.as_deref() == Some(&profile.id) {
-            stop_singbox_internal(&mut rt);
-        }
+        let stop_app = if rt.active_profile_id.as_deref() == Some(&profile.id) {
+            stop_singbox_in_memory(&mut rt)
+        } else {
+            None
+        };
         rt.persistent.profiles.retain(|p| {
             let same_id = p.id == profile.id;
             let same_creds = p.server == profile.server
@@ -3409,8 +3566,9 @@ async fn delete_vps_device_cmd(
             }
         }
         save_persistent_state(&rt.persistent);
-        rt.persistent.profiles.clone()
+        (stop_app, rt.persistent.profiles.clone())
     };
+    stop_android_vpn_if_needed(stop_app).await;
     {
         use tauri::Emitter;
         let _ = app.emit("state-updated", ());
@@ -3438,7 +3596,7 @@ async fn delete_vps_multi_group_cmd(
         .await?;
     }
 
-    let res = {
+    let (stop_app, res) = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
         let matches_target = |p: &VpnProfile| -> bool {
             if let Some(ref gid) = group_id {
@@ -3454,9 +3612,10 @@ async fn delete_vps_multi_group_cmd(
                         && ((!t.password.is_empty() && p.password == t.password) || p.name == t.name))
             })
         };
+        let mut stop_app = None;
         if let Some(ref aid) = rt.active_profile_id {
             if rt.persistent.profiles.iter().any(|p| p.id == *aid && matches_target(p)) {
-                stop_singbox_internal(&mut rt);
+                stop_app = stop_singbox_in_memory(&mut rt);
             }
         }
         rt.persistent.profiles.retain(|p| !matches_target(p));
@@ -3466,8 +3625,9 @@ async fn delete_vps_multi_group_cmd(
             }
         }
         save_persistent_state(&rt.persistent);
-        rt.persistent.profiles.clone()
+        (stop_app, rt.persistent.profiles.clone())
     };
+    stop_android_vpn_if_needed(stop_app).await;
     {
         use tauri::Emitter;
         let _ = app.emit("state-updated", ());
@@ -4670,7 +4830,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2060)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2070)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4683,12 +4843,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2060).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2070).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2060).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2070).",
                         current_version
                     )
                 };
@@ -4696,7 +4856,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2060)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2070)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -5180,12 +5340,15 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     let autostart_flag = restored_state.autostart;
     let start_min_flag = restored_state.start_minimized;
 
-    {
+    let stop_app = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-        stop_singbox_internal(&mut rt);
+        let stop_app = stop_singbox_in_memory(&mut rt);
         rt.persistent = restored_state.clone();
         save_persistent_state(&rt.persistent);
-    }
+        sync_android_tile_from_state(&rt);
+        stop_app
+    };
+    stop_android_vpn_if_needed(stop_app).await;
 
     let _ = set_windows_autostart(autostart_flag, start_min_flag);
     let _ = app.emit("state-updated", ());
@@ -5198,7 +5361,7 @@ if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 }
 
 #[tauri::command]
-fn factory_reset_app(
+async fn factory_reset_app(
     app: AppHandle,
     state: State<'_, SharedState>,
 ) -> Result<AppPersistentState, String> {
@@ -5206,9 +5369,9 @@ fn factory_reset_app(
     let dir = get_app_data_dir();
     let default_state = AppPersistentState::default();
 
-    {
+    let stop_app = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-        stop_singbox_internal(&mut rt);
+        let stop_app = stop_singbox_in_memory(&mut rt);
         rt.logs.clear();
         rt.persistent = default_state.clone();
 
@@ -5226,7 +5389,9 @@ fn factory_reset_app(
         }
         save_persistent_state(&rt.persistent);
         sync_android_tile_from_state(&rt);
-    }
+        stop_app
+    };
+    stop_android_vpn_if_needed(stop_app).await;
 
     let _ = set_windows_autostart(false, false);
     let _ = app.emit("state-updated", ());

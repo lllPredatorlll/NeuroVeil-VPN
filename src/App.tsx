@@ -92,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2060";
+const APP_BUILD = "2070";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -1089,10 +1089,13 @@ export default function App() {
     null
   );
   const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [reconnectingBusy, setReconnectingBusy] = useState(false);
   const [reconnectCooldown, setReconnectCooldown] = useState(false);
   const [autoPortHunting, setAutoPortHunting] = useState(false);
   const [autoPortAttempt, setAutoPortAttempt] = useState(0);
   const autoPortStopRef = useRef(false);
+  const connectAttemptGenRef = useRef(0);
   const [showAwgAdvanced, setShowAwgAdvanced] = useState(false);
   const [downloadingCore, setDownloadingCore] = useState(false);
   const [uriInput, setUriInput] = useState("");
@@ -1378,19 +1381,30 @@ export default function App() {
       }
     }
 
-    if (st.connected && st.active_profile_id && st.active_listen_port) {
-      const lp = st.active_listen_port;
+    if ((st.connected || st.is_connecting) && st.active_profile_id) {
+      const lp = st.active_listen_port ?? null;
+      const ap = st.active_port ?? null;
       const pid = st.active_profile_id;
-      setProfiles((prev) =>
-        prev.some((p) => p.id === pid && p.listen_port !== lp)
-          ? prev.map((p) => (p.id === pid ? { ...p, listen_port: lp } : p))
-          : prev
-      );
-      setSyncedServerProfiles((prev) =>
-        prev.some((p) => p.id === pid && p.listen_port !== lp)
-          ? prev.map((p) => (p.id === pid ? { ...p, listen_port: lp } : p))
-          : prev
-      );
+      if (lp || ap) {
+        const updateList = (prev: VpnProfile[]) =>
+          prev.some(
+            (p) =>
+              p.id === pid &&
+              ((lp != null && p.listen_port !== lp) || (ap != null && p.port !== ap))
+          )
+            ? prev.map((p) =>
+                p.id === pid
+                  ? {
+                      ...p,
+                      ...(lp != null ? { listen_port: lp } : {}),
+                      ...(ap != null ? { port: ap } : {}),
+                    }
+                  : p
+              )
+            : prev;
+        setProfiles(updateList);
+        setSyncedServerProfiles(updateList);
+      }
     }
   };
 
@@ -1621,7 +1635,20 @@ export default function App() {
             }
           })
           .catch(() => {});
-        const appState = await invoke<AppPersistentState>("get_app_state");
+        let appState: AppPersistentState | null = null;
+        let lastInitErr: unknown = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            appState = await invoke<AppPersistentState>("get_app_state");
+            break;
+          } catch (e) {
+            lastInitErr = e;
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+        if (!appState) {
+          throw lastInitErr || new Error("Не удалось загрузить состояние приложения");
+        }
         setProfiles(appState.profiles);
         const curParams = popupParamsRef.current;
         const initialPid =
@@ -2314,79 +2341,112 @@ export default function App() {
 
   // Actions
   const handleToggleConnect = async () => {
+    if (disconnecting || reconnectCooldown) return;
     if (autoPortHunting) {
       autoPortStopRef.current = true;
       setAutoPortHunting(false);
     }
-    if ((connecting && !autoPortHunting) || reconnectCooldown) return;
-    setConnecting(true);
-    try {
-      if (status.connected || status.is_connecting) {
+
+    const shouldCancelOrDisconnect =
+      connecting || status.connected || Boolean(status.is_connecting) || autoPortHunting;
+
+    if (shouldCancelOrDisconnect) {
+      const wasConnected = status.connected;
+      connectAttemptGenRef.current += 1;
+      autoPortStopRef.current = true;
+      setAutoPortHunting(false);
+      setConnecting(false);
+      setReconnectingBusy(false);
+      setDisconnecting(true);
+      try {
         setReconnectCooldown(true);
-        setTimeout(() => setReconnectCooldown(false), 2000);
+        setTimeout(() => setReconnectCooldown(false), wasConnected ? 2000 : 1200);
         const st = await invoke<VpnStatus>("disconnect_vpn");
         applyStatusUpdate(st);
-        showNotice("info", "VPN отключен. Защитная пауза WireGuard (2 сек)...");
-      } else {
-        if (!selectedProfile) {
+        showNotice(
+          "info",
+          wasConnected
+            ? "VPN отключен. Защитная пауза WireGuard (2 сек)..."
+            : "Подключение отменено."
+        );
+      } catch (err: any) {
+        showNotice("error", String(err));
+      } finally {
+        setDisconnecting(false);
+      }
+      return;
+    }
+
+    const myGen = ++connectAttemptGenRef.current;
+    setConnecting(true);
+    try {
+      if (!selectedProfile) {
+        showNotice(
+          "error",
+          "Сначала добавьте профиль или разверните VPN на своем VPS во вкладке «VPS Автодеплой»"
+        );
+        setActiveTab("vps");
+        return;
+      }
+      if (
+        selectedProfile.protocol === "amneziawg" ||
+        selectedProfile.protocol === "awg_quic" ||
+        selectedProfile.protocol === "awg_vless" ||
+        selectedProfile.protocol === "awg2"
+      ) {
+        const privKey = (selectedProfile.awg_private_key || selectedProfile.password || "").trim();
+        if (!privKey) {
           showNotice(
             "error",
-            "Сначала добавьте профиль или разверните VPN на своем VPS во вкладке «VPS Автодеплой»"
+            "В профиле Amnezia отсутствует приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
           );
-          setActiveTab("vps");
-          setConnecting(false);
+          handleOpenEditModal(selectedProfile);
           return;
         }
-        if (
-          selectedProfile.protocol === "amneziawg" ||
-          selectedProfile.protocol === "awg_quic" ||
-          selectedProfile.protocol === "awg_vless" ||
-          selectedProfile.protocol === "awg2"
-        ) {
-          const privKey = (selectedProfile.awg_private_key || selectedProfile.password || "").trim();
-          if (!privKey) {
-            showNotice(
-              "error",
-              "В профиле Amnezia отсутствует приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
-            );
-            handleOpenEditModal(selectedProfile);
-            setConnecting(false);
-            return;
-          }
-        }
-        const profRouting = selectedProfile.routing || routing;
-        const st = await invoke<VpnStatus>("connect_vpn", {
-          profileId: selectedProfile.id,
-          mode: routing.mode || profRouting.mode,
-          splitTunneling: profRouting.split_tunneling,
-          preserveListenPort: true,
-        });
-        applyStatusUpdate(st);
-        const lpSuffix = st.active_listen_port ? ` (ListenPort: ${st.active_listen_port})` : "";
-        if (!st.connected) {
-          if (st.is_connecting) {
-            showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}...`);
-          } else {
-            showNotice("error", `Не удалось запустить туннель ${selectedProfile.name}`);
-          }
-        } else if (st.is_handshaking) {
-          showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}. Ожидание рукопожатия WireGuard...`);
+      }
+      const profRouting = selectedProfile.routing || routing;
+      const st = await invoke<VpnStatus>("connect_vpn", {
+        profileId: selectedProfile.id,
+        mode: routing.mode || profRouting.mode,
+        splitTunneling: profRouting.split_tunneling,
+        preserveListenPort: true,
+      });
+      if (connectAttemptGenRef.current !== myGen) return;
+      applyStatusUpdate(st);
+      const lpSuffix = st.active_listen_port
+        ? ` (ListenPort: ${st.active_listen_port})`
+        : st.active_port
+        ? ` (Порт: ${st.active_port})`
+        : "";
+      if (!st.connected) {
+        if (st.is_connecting) {
+          showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}...`);
         } else {
-          showNotice("success", `Подключено к ${selectedProfile.name}${lpSuffix}`);
+          showNotice("error", `Не удалось запустить туннель ${selectedProfile.name}`);
         }
+      } else if (st.is_handshaking) {
+        showNotice("info", `Запуск туннеля ${selectedProfile.name}${lpSuffix}. Ожидание рукопожатия WireGuard...`);
+      } else {
+        showNotice("success", `Подключено к ${selectedProfile.name}${lpSuffix}`);
       }
     } catch (err: any) {
-      showNotice("error", String(err));
+      if (connectAttemptGenRef.current === myGen) {
+        showNotice("error", String(err));
+      }
     } finally {
-      setConnecting(false);
+      if (connectAttemptGenRef.current === myGen) {
+        setConnecting(false);
+      }
     }
   };
 
   const handleReconnect = async () => {
-    if (connecting || reconnectCooldown || autoPortHunting) return;
+    if (disconnecting || reconnectingBusy || reconnectCooldown || autoPortHunting) return;
     const targetId = status.active_profile_id || selectedProfile?.id;
     if (!targetId) return;
-    setConnecting(true);
+    const myGen = ++connectAttemptGenRef.current;
+    setConnecting(false);
+    setReconnectingBusy(true);
     try {
       const targetProf = profiles.find((p) => p.id === targetId) || selectedProfile;
       const profRouting = targetProf?.routing || routing;
@@ -2395,10 +2455,19 @@ export default function App() {
         mode: routing.mode || profRouting.mode,
         splitTunneling: profRouting.split_tunneling,
       });
+      if (connectAttemptGenRef.current !== myGen) return;
       applyStatusUpdate(st);
+      const portNote = st.active_listen_port
+        ? `ListenPort: ${st.active_listen_port}`
+        : st.active_port
+        ? `Порт: ${st.active_port}`
+        : "";
       if (!st.connected) {
         if (st.is_connecting) {
-          showNotice("info", `Переподключение ${st.active_profile_name || ""}...`);
+          showNotice(
+            "info",
+            `Переподключение ${st.active_profile_name || ""}${portNote ? ` (${portNote})` : ""}...`
+          );
         } else {
           showNotice("error", `Не удалось переподключить ${st.active_profile_name || ""}`);
         }
@@ -2407,6 +2476,11 @@ export default function App() {
           st.is_handshaking ? "info" : "success",
           `Переподключено • Новый порт прослушивания (ListenPort): ${st.active_listen_port}`
         );
+      } else if (portNote) {
+        showNotice(
+          st.is_handshaking ? "info" : "success",
+          `Переподключено • Новый порт: ${st.active_port}`
+        );
       } else {
         showNotice(
           st.is_handshaking ? "info" : "success",
@@ -2414,32 +2488,41 @@ export default function App() {
         );
       }
     } catch (err: any) {
-      showNotice("error", String(err));
+      if (connectAttemptGenRef.current === myGen) {
+        showNotice("error", String(err));
+      }
     } finally {
-      setConnecting(false);
+      if (connectAttemptGenRef.current === myGen) {
+        setReconnectingBusy(false);
+      }
     }
   };
 
   const handleAutoPortHunt = async () => {
     if (autoPortHunting) {
       autoPortStopRef.current = true;
+      connectAttemptGenRef.current += 1;
       setAutoPortHunting(false);
+      setReconnectingBusy(false);
+      setConnecting(false);
       showNotice("info", "Автоматический перебор портов остановлен");
       return;
     }
-    if (connecting || reconnectCooldown) return;
+    if (disconnecting || reconnectingBusy || reconnectCooldown) return;
     const targetId = status.active_profile_id || selectedProfile?.id;
     if (!targetId) return;
 
+    const huntGen = ++connectAttemptGenRef.current;
     autoPortStopRef.current = false;
+    setConnecting(false);
     setAutoPortHunting(true);
     setAutoPortAttempt(0);
 
     try {
       let attempt = 1;
-      while (!autoPortStopRef.current) {
+      while (!autoPortStopRef.current && connectAttemptGenRef.current === huntGen) {
         setAutoPortAttempt(attempt);
-        setConnecting(true);
+        setReconnectingBusy(true);
 
         const targetProf = profiles.find((p) => p.id === targetId) || selectedProfile;
         const profRouting = targetProf?.routing || routing;
@@ -2448,8 +2531,9 @@ export default function App() {
           mode: routing.mode || profRouting.mode,
           splitTunneling: profRouting.split_tunneling,
         });
+        if (autoPortStopRef.current || connectAttemptGenRef.current !== huntGen) break;
         applyStatusUpdate(st);
-        setConnecting(false);
+        setReconnectingBusy(false);
 
         const triedPort = st.active_listen_port || st.active_port;
         showNotice(
@@ -2461,35 +2545,35 @@ export default function App() {
 
         let established = false;
         let finalSt = st;
+        let connectingTicks = 0;
         let connectedTicks = st.connected ? 1 : 0;
 
-        // Ожидаем подтверждения рукопожатия / входящего трафика на текущем порту
-        for (let tick = 0; tick < 16; tick++) {
-          if (autoPortStopRef.current) break;
+        // Ожидаем запуска службы + подтверждения рукопожатия / входящего трафика на текущем порту
+        while (connectingTicks < 30 && connectedTicks < 12) {
+          if (autoPortStopRef.current || connectAttemptGenRef.current !== huntGen) break;
           await new Promise((r) => setTimeout(r, 350));
-          if (autoPortStopRef.current) break;
+          if (autoPortStopRef.current || connectAttemptGenRef.current !== huntGen) break;
 
           const pollSt = await invoke<VpnStatus>("get_vpn_status");
+          if (autoPortStopRef.current || connectAttemptGenRef.current !== huntGen) break;
           applyStatusUpdate(pollSt);
           finalSt = pollSt;
 
           if (!pollSt.connected) {
             if (pollSt.is_connecting) {
+              connectingTicks++;
               continue;
             }
             break;
           }
           connectedTicks++;
-          if (!pollSt.is_handshaking && (connectedTicks >= 3 || pollSt.down_bytes > 0)) {
+          if (!pollSt.is_handshaking && (connectedTicks >= 2 || pollSt.down_bytes > 0)) {
             established = true;
-            break;
-          }
-          if (connectedTicks >= 12) {
             break;
           }
         }
 
-        if (autoPortStopRef.current) {
+        if (autoPortStopRef.current || connectAttemptGenRef.current !== huntGen) {
           break;
         }
 
@@ -2503,14 +2587,18 @@ export default function App() {
         }
 
         attempt++;
+        await new Promise((r) => setTimeout(r, 250));
       }
     } catch (err: any) {
-      if (!autoPortStopRef.current) {
+      if (!autoPortStopRef.current && connectAttemptGenRef.current === huntGen) {
         showNotice("error", `Ошибка автоподбора порта: ${String(err)}`);
       }
     } finally {
-      setAutoPortHunting(false);
-      setConnecting(false);
+      if (connectAttemptGenRef.current === huntGen || autoPortStopRef.current) {
+        setAutoPortHunting(false);
+        setReconnectingBusy(false);
+        setConnecting(false);
+      }
     }
   };
 
@@ -8499,12 +8587,12 @@ export default function App() {
                 : null;
               const powerTheme = powerProtoMeta ? getProtocolPowerTheme(powerProtoMeta) : null;
               const isConnectingBg = !status.connected && Boolean(status.is_connecting);
-              const effectiveConnecting = connecting || isConnectingBg;
+              const effectiveConnecting = connecting || reconnectingBusy || isConnectingBg;
               const isHandshaking = status.connected && Boolean(status.is_handshaking);
               const isWarmStage =
                 isHandshaking ||
                 isConnectingBg ||
-                (connecting && !status.connected && !reconnectCooldown);
+                ((connecting || reconnectingBusy) && !status.connected && !reconnectCooldown);
 
               const buttonStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
@@ -8550,7 +8638,7 @@ export default function App() {
               return (
                 <button
                   onClick={handleToggleConnect}
-                  disabled={(connecting && !autoPortHunting) || reconnectCooldown}
+                  disabled={disconnecting || reconnectCooldown}
                   style={buttonStyle}
                   className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white hover:brightness-110 ${
                     isWarmStage
@@ -8588,7 +8676,7 @@ export default function App() {
                           : ""
                       }`}
                     >
-                      {effectiveConnecting || autoPortHunting ? (
+                      {disconnecting || effectiveConnecting || autoPortHunting ? (
                         <RefreshCw className="w-6 h-6 animate-spin text-white" />
                       ) : status.connected ? (
                         isHandshaking ? (
@@ -8603,12 +8691,12 @@ export default function App() {
 
                     <div className="text-left min-w-0">
                       <div className="text-[11px] font-semibold uppercase tracking-wider text-white/80 group-hover:text-white truncate">
-                        {autoPortHunting
+                        {disconnecting
+                          ? "Остановка туннеля..."
+                          : autoPortHunting
                           ? `Автоподбор порта (#${autoPortAttempt})`
-                          : connecting
-                          ? "Подождите..."
-                          : isConnectingBg
-                          ? "Запуск туннеля..."
+                          : effectiveConnecting
+                          ? "Запуск туннеля... Нажмите для отмены"
                           : reconnectCooldown
                           ? "Защитная пауза WireGuard"
                           : status.connected
@@ -8620,9 +8708,9 @@ export default function App() {
                           : "Туннель не выбран"}
                       </div>
                       <div className="text-lg font-extrabold tracking-wide text-white leading-tight truncate mt-0.5">
-                        {connecting && !autoPortHunting
-                          ? "ПОДКЛЮЧЕНИЕ..."
-                          : isConnectingBg
+                        {disconnecting
+                          ? "ОТКЛЮЧЕНИЕ..."
+                          : autoPortHunting || effectiveConnecting
                           ? "ОТМЕНИТЬ"
                           : reconnectCooldown
                           ? "ПАУЗА..."
@@ -8657,22 +8745,22 @@ export default function App() {
             })()}
 
             {/* Quick Reconnect & Auto Port Hunt bar when connected or connecting */}
-            {(status.connected || connecting || Boolean(status.is_connecting) || autoPortHunting) && (
+            {(status.connected || connecting || reconnectingBusy || Boolean(status.is_connecting) || autoPortHunting) && (
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
                   onClick={handleReconnect}
-                  disabled={connecting || reconnectCooldown || autoPortHunting}
+                  disabled={disconnecting || reconnectingBusy || reconnectCooldown || autoPortHunting}
                   className="w-full py-1.5 px-2.5 rounded-xl bg-[#0b101d] hover:bg-slate-800/90 border border-cyan-500/30 hover:border-cyan-400/60 text-[11px] font-semibold text-cyan-300 flex items-center justify-between gap-1 transition cursor-pointer disabled:opacity-50 min-w-0"
-                  title="Переподключить туннель и сменить локальный порт прослушивания (ListenPort)"
+                  title="Переподключить туннель и сменить порт подключения"
                 >
                   <span className="flex items-center gap-1.5 min-w-0">
-                    <RotateCcw className={`w-3 h-3 shrink-0 ${connecting && !autoPortHunting ? "animate-spin" : ""}`} />
+                    <RotateCcw className={`w-3 h-3 shrink-0 ${reconnectingBusy && !autoPortHunting ? "animate-spin" : ""}`} />
                     <span className="truncate">Переподкл.</span>
                   </span>
-                  {status.active_listen_port && (
+                  {(status.active_listen_port || status.active_port) && (
                     <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-cyan-500/15 text-cyan-200 border border-cyan-500/30 shrink-0">
-                      :{status.active_listen_port}
+                      :{status.active_listen_port || status.active_port}
                     </span>
                   )}
                 </button>
@@ -8680,7 +8768,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={handleAutoPortHunt}
-                  disabled={(connecting && !autoPortHunting) || (reconnectCooldown && !autoPortHunting)}
+                  disabled={!autoPortHunting && (disconnecting || reconnectingBusy || reconnectCooldown)}
                   className={`w-full py-1.5 px-2.5 rounded-xl border text-[11px] font-semibold flex items-center justify-between gap-1 transition cursor-pointer disabled:opacity-50 min-w-0 ${
                     autoPortHunting
                       ? "bg-amber-500/20 hover:bg-rose-500/25 border-amber-400/60 text-amber-200 animate-pulse"
@@ -8689,7 +8777,7 @@ export default function App() {
                   title={
                     autoPortHunting
                       ? "Остановить автоподбор портов"
-                      : "Автоматически перебирать порты (ListenPort) до установления соединения"
+                      : "Автоматически перебирать порты до установления соединения"
                   }
                 >
                   <span className="flex items-center gap-1.5 min-w-0">
@@ -8698,9 +8786,9 @@ export default function App() {
                       {autoPortHunting ? `Стоп (#${autoPortAttempt})` : "Автоподбор"}
                     </span>
                   </span>
-                  {autoPortHunting && status.active_listen_port && (
+                  {autoPortHunting && (status.active_listen_port || status.active_port) && (
                     <span className="text-[10px] font-mono px-1 py-0.2 rounded bg-amber-500/20 text-amber-200 border border-amber-500/40 shrink-0">
-                      :{status.active_listen_port}
+                      :{status.active_listen_port || status.active_port}
                     </span>
                   )}
                 </button>
@@ -8885,10 +8973,15 @@ export default function App() {
                 {effectiveDashboardProfiles.map((p) => {
                   const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
                   const isLiveConnected = status.connected && status.active_profile_id === p.id;
+                  const isLiveActive =
+                    (status.connected || Boolean(status.is_connecting)) &&
+                    status.active_profile_id === p.id;
                   const shownListenPort =
-                    isLiveConnected && status.active_listen_port
+                    isLiveActive && status.active_listen_port
                       ? status.active_listen_port
                       : p.listen_port;
+                  const shownServerPort =
+                    isLiveActive && status.active_port ? status.active_port : p.port;
 
                   return (
                     <div
@@ -8920,7 +9013,7 @@ export default function App() {
                           </div>
                           <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1.5">
                             <span className="truncate">
-                              {p.server}:{status.active_port && isLiveConnected ? status.active_port : p.port}
+                              {p.server}:{shownServerPort}
                             </span>
                             {(p.protocol === "amneziawg" ||
                               p.protocol === "awg_quic" ||
