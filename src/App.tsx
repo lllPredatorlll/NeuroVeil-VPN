@@ -92,7 +92,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2070";
+const APP_BUILD = "2080";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -1012,6 +1012,8 @@ export default function App() {
   const [configsFilterContainerId, setConfigsFilterContainerId] = useState<string>("all");
   const [containerBusyId, setContainerBusyId] = useState<string | null>(null);
   const [confirmDeleteContainerId, setConfirmDeleteContainerId] = useState<string | null>(null);
+  const [vpsAntiSleepEnabled, setVpsAntiSleepEnabled] = useState(false);
+  const [vpsAntiSleepBusy, setVpsAntiSleepBusy] = useState(false);
 
   // App Update Center State (GitHub: lllPredatorlll/NeuroVeil-VPN)
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -3248,6 +3250,7 @@ export default function App() {
       setVpsContainers(adminState.containers);
       setSyncedServerProfiles(adminState.profiles);
       setVpsMultiGroups(adminState.multi_groups || []);
+      setVpsAntiSleepEnabled(Boolean(adminState.anti_sleep_enabled));
       if (adminState.containers.length > 0) {
         const nextCid =
           selectedAdminContainerId && adminState.containers.some((c) => c.id === selectedAdminContainerId)
@@ -3288,6 +3291,7 @@ export default function App() {
     setVpsContainers([]);
     setSyncedServerProfiles([]);
     setVpsMultiGroups([]);
+    setVpsAntiSleepEnabled(false);
     setExpandedMultiGroupIds([]);
     setSelectedAdminContainerId("");
     setConfigsFilterContainerId("all");
@@ -3295,6 +3299,32 @@ export default function App() {
     setLastCreatedKeys(null);
     setVpsCreds((prev) => ({ ...prev, password: "" }));
     showNotice("info", "Вы вышли из режима управления VPS");
+  };
+
+  const handleToggleVpsAntiSleep = async () => {
+    if (!vpsCreds.host.trim() || !vpsCreds.password.trim()) {
+      showNotice("error", "Введите IP-адрес сервера и пароль SSH (root)");
+      return;
+    }
+    const nextEnable = !vpsAntiSleepEnabled;
+    setVpsAntiSleepBusy(true);
+    try {
+      const result = await invoke<boolean>("toggle_vps_antisleep_cmd", {
+        creds: vpsCreds,
+        enable: nextEnable,
+      });
+      setVpsAntiSleepEnabled(result);
+      showNotice(
+        result ? "success" : "info",
+        result
+          ? "Фоновый анти-слип на VPS включён (keepalive 35с + защита от swap)"
+          : "Фоновый анти-слип на VPS отключён"
+      );
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setVpsAntiSleepBusy(false);
+    }
   };
 
   const handleManageContainer = async (
@@ -6931,7 +6961,31 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex items-center gap-1.5 flex-wrap shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void handleToggleVpsAntiSleep()}
+                      disabled={vpsAntiSleepBusy}
+                      className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 ${
+                        vpsAntiSleepEnabled
+                          ? "bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-400/40 text-emerald-300"
+                          : "bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/35 text-amber-300"
+                      }`}
+                      title={
+                        vpsAntiSleepEnabled
+                          ? "Фоновый анти-слип на VPS активен (keepalive 35с + защита от swap). Нажмите для отключения."
+                          : "Установить и включить лёгкий фоновый анти-слип на этом VPS (ARP/UDP keepalive 35с + защита от swap)."
+                      }
+                    >
+                      <Zap className={`w-3.5 h-3.5 ${vpsAntiSleepBusy ? "animate-pulse" : ""}`} />
+                      <span>
+                        {vpsAntiSleepBusy
+                          ? "Применение..."
+                          : vpsAntiSleepEnabled
+                            ? "Анти-слип: ВКЛ"
+                            : "Анти-слип: ВЫКЛ"}
+                      </span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => void openPopupWindow("vps")}

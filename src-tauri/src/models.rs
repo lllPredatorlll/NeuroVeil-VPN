@@ -724,6 +724,8 @@ pub struct VpsAdminState {
     pub profiles: Vec<VpnProfile>,
     #[serde(default)]
     pub multi_groups: Vec<VpsMultiProtocolGroup>,
+    #[serde(default)]
+    pub anti_sleep_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

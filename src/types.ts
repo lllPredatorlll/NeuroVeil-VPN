@@ -260,6 +260,7 @@ export interface VpsAdminState {
   containers: VpsContainerInfo[];
   profiles: VpnProfile[];
   multi_groups?: VpsMultiProtocolGroup[];
+  anti_sleep_enabled?: boolean;
 }
 
 export interface AppUpdateInfo {

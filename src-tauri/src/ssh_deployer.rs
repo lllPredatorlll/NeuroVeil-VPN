@@ -1303,6 +1303,11 @@ EOF
 systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 || true
 "#;
     let _ = run_remote_cmd(&sess, sysctl_cmd).await;
+    emit_log(
+        app,
+        "Активация лёгкого фонового анти-слипа VPS (ARP/UDP keepalive + защита от swap)...",
+    );
+    let _ = run_remote_cmd(&sess, build_vps_antisleep_install_cmd()).await;
 
     // 5. Construct container config.json
     emit_log(
@@ -1812,6 +1817,7 @@ Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
 ExecStart=/usr/local/bin/sing-box run -c {cdir}/config.json
 Restart=on-failure
 RestartSec=3
+OOMScoreAdjust=-900
 LimitNOFILE=1048576
 
 [Install]
@@ -2436,7 +2442,10 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl restart ssh.socket >/dev/null 2>&1 || systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
 rm -rf /etc/sing-box
 rm -f /usr/local/bin/sing-box
+rm -f /usr/local/bin/neuroveil-antisleep.sh
+rm -f /var/run/neuroveil-antisleep.pid
 rm -f /etc/sysctl.d/99-neuroveil-vpn.conf
+rm -f /etc/sysctl.d/99-neuroveil-antisleep.conf
 rm -f /etc/sysctl.d/99-aegis-vpn.conf
 rm -f /etc/ssh/sshd_config.d/99-neuroveil*.conf
 rm -f /etc/ssh/sshd_config.d/99-aegis*.conf
@@ -4916,6 +4925,136 @@ fn parse_container_profiles(
     (profiles, proto_labels, ports)
 }
 
+fn build_vps_antisleep_install_cmd() -> &'static str {
+    r#"
+cat << 'EOF_AS_SYSCTL' > /etc/sysctl.d/99-neuroveil-antisleep.conf
+vm.swappiness = 1
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.neigh.default.gc_stale_time = 120
+EOF_AS_SYSCTL
+sysctl -p /etc/sysctl.d/99-neuroveil-antisleep.conf >/dev/null 2>&1 || true
+sysctl -w net.netfilter.nf_conntrack_udp_timeout=120 >/dev/null 2>&1 || true
+sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=180 >/dev/null 2>&1 || true
+
+cat << 'EOF_AS_SH' > /usr/local/bin/neuroveil-antisleep.sh
+#!/bin/sh
+# NeuroVeil VPN Lightweight VPS Anti-Sleep Keepalive
+# Keeps vNIC/ARP, hosting UDP/conntrack tables and sing-box pages warm without log noise.
+while true; do
+    GW=$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')
+    if [ -n "$GW" ]; then
+        ping -c 1 -W 1 -s 16 "$GW" >/dev/null 2>&1 || true
+    fi
+    ping -c 1 -W 1 -s 16 1.1.1.1 >/dev/null 2>&1 || true
+    if command -v timeout >/dev/null 2>&1 && command -v bash >/dev/null 2>&1; then
+        timeout 1 bash -c 'printf "\x00" > /dev/udp/1.1.1.1/53' >/dev/null 2>&1 || true
+    fi
+    for pid in $(pidof sing-box 2>/dev/null || pgrep -x sing-box 2>/dev/null || true); do
+        if [ -w "/proc/$pid/oom_score_adj" ]; then
+            printf '%s\n' '-900' > "/proc/$pid/oom_score_adj" 2>/dev/null || true
+        fi
+        cat "/proc/$pid/statm" >/dev/null 2>&1 || true
+    done
+    sleep 35
+done
+EOF_AS_SH
+chmod 755 /usr/local/bin/neuroveil-antisleep.sh
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cat << 'EOF_AS_SVC' > /etc/systemd/system/neuroveil-antisleep.service
+[Unit]
+Description=NeuroVeil VPN Lightweight Anti-Sleep Keepalive
+After=network.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh /usr/local/bin/neuroveil-antisleep.sh
+Restart=always
+RestartSec=5
+OOMScoreAdjust=-900
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+EOF_AS_SVC
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable neuroveil-antisleep.service >/dev/null 2>&1 || true
+    systemctl restart neuroveil-antisleep.service >/dev/null 2>&1 || true
+    if [ "$(systemctl is-active neuroveil-antisleep.service 2>/dev/null || echo inactive)" = "active" ]; then
+        echo "ANTISLEEP_ACTIVE"
+    else
+        echo "ANTISLEEP_FAILED"
+    fi
+else
+    if [ -f /var/run/neuroveil-antisleep.pid ]; then
+        kill "$(cat /var/run/neuroveil-antisleep.pid 2>/dev/null)" >/dev/null 2>&1 || true
+    fi
+    nohup /bin/sh /usr/local/bin/neuroveil-antisleep.sh >/dev/null 2>&1 &
+    echo $! > /var/run/neuroveil-antisleep.pid
+    echo "ANTISLEEP_ACTIVE"
+fi
+"#
+}
+
+fn build_vps_antisleep_remove_cmd() -> &'static str {
+    r#"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    systemctl stop neuroveil-antisleep.service >/dev/null 2>&1 || true
+    systemctl disable neuroveil-antisleep.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/neuroveil-antisleep.service
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+if [ -f /var/run/neuroveil-antisleep.pid ]; then
+    kill "$(cat /var/run/neuroveil-antisleep.pid 2>/dev/null)" >/dev/null 2>&1 || true
+    rm -f /var/run/neuroveil-antisleep.pid
+fi
+rm -f /usr/local/bin/neuroveil-antisleep.sh
+rm -f /etc/sysctl.d/99-neuroveil-antisleep.conf
+echo "ANTISLEEP_OFF"
+"#
+}
+
+pub async fn set_vps_antisleep(
+    app: &AppHandle,
+    creds: &VpsCredentials,
+    enable: bool,
+) -> Result<bool, String> {
+    emit_log(
+        app,
+        if enable {
+            "Установка и запуск лёгкого фонового анти-слипа на VPS..."
+        } else {
+            "Отключение и удаление фонового анти-слипа на VPS..."
+        },
+    );
+    let sess = connect_ssh(app, creds).await?;
+    let cmd = if enable {
+        build_vps_antisleep_install_cmd()
+    } else {
+        build_vps_antisleep_remove_cmd()
+    };
+    let (code, out) = run_remote_cmd(&sess, cmd).await?;
+    let _ = sess
+        .disconnect(russh::Disconnect::ByApplication, "done", "en")
+        .await;
+
+    if enable {
+        if !out.contains("ANTISLEEP_ACTIVE") {
+            return Err(format!("Не удалось запустить службу анти-слипа на VPS (code {}): {}", code, out.trim()));
+        }
+        emit_log(
+            app,
+            "Анти-слип VPS успешно включён (ARP/UDP keepalive 35с + защита sing-box от swap).",
+        );
+        Ok(true)
+    } else {
+        emit_log(app, "Анти-слип VPS отключён.");
+        Ok(false)
+    }
+}
+
 pub async fn fetch_vps_admin_state(
     app: &AppHandle,
     creds: &VpsCredentials,
@@ -5188,6 +5327,14 @@ pub async fn fetch_vps_admin_state(
     if !acct_setup.is_empty() {
         let _ = run_remote_cmd(&sess, &acct_setup).await;
     }
+    let (_, antisleep_out) = run_remote_cmd(
+        &sess,
+        "if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then systemctl is-active neuroveil-antisleep.service 2>/dev/null || echo inactive; elif [ -f /var/run/neuroveil-antisleep.pid ] && kill -0 \"$(cat /var/run/neuroveil-antisleep.pid 2>/dev/null)\" 2>/dev/null; then echo active; else echo inactive; fi",
+    )
+    .await
+    .unwrap_or((1, "inactive".to_string()));
+    let anti_sleep_enabled = antisleep_out.lines().any(|l| l.trim() == "active");
+
     let _ = sess
         .disconnect(russh::Disconnect::ByApplication, "done", "en")
         .await;
@@ -5206,6 +5353,7 @@ pub async fn fetch_vps_admin_state(
         containers,
         profiles: all_profiles,
         multi_groups: all_multi_groups,
+        anti_sleep_enabled,
     })
 }
 

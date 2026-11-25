@@ -31,14 +31,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.pkg.outputs.tag }}
-          name: "NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 2070)"
+          name: "NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 2080)"
           body: |
-            ### NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 2070)
-            - **Мгновенная отмена подключения, защита от зависания при старте и реальная смена портов на Android (`v2.0.7`)**:
-              - **Кнопка подключения больше не блокируется**: окно начального ожидания `VpnBridgePlugin` снижено с `18 с` до `700 мс`, а кнопка питания во время запуска и рукопожатия позволяет сразу нажать **«ОТМЕНИТЬ»** и мгновенно остановить попытку подключения (`connectAttemptGenRef` + `disconnect_vpn`).
-              - **Устранено зависание интерфейса и «сброс настроек» при запуске**: все Android Binder/ContentProvider IPC-вызовы вынесены из-под `Mutex<RuntimeState>` и защищены жёсткими таймаутами (`VpnStateProvider.callWithTimeout`), а загрузка профиля `get_app_state` при старте повторяется при временной задержке.
-              - **Кнопки «Переподкл.» и «Автоподбор» теперь меняют порты сразу**: кнопки активны уже во время запуска/рукопожатия, ротация портов работает как для `ListenPort` (AmneziaWG/WireGuard), так и для диапазона `hop_ports` (Hysteria 2), новый порт сразу отображается в интерфейсе и карточке профиля, а автоподбор корректно ждёт запуск службы перед проверкой рукопожатия.
-            - **Стабильная фоновая работа и автообновление**: Android обновляет `NeuroVeil-VPN-${{ steps.pkg.outputs.tag }}-arm64.apk`, Windows — `NeuroVeil.exe` (плюс доступен NSIS-установщик для Windows).
+            ### NeuroVeil VPN ${{ steps.pkg.outputs.tag }} (Build 2080)
+            - **Лёгкий фоновый анти-слип для VPS (`v2.0.8`)**:
+              - **Фоновая служба `neuroveil-antisleep` на VPS**: каждые 35 секунд поддерживает тёплое состояние сетевого шлюза (ARP/vSwitch), UDP NAT/Anti-DDoS таблицы и удерживает процессы `sing-box` в горячей RAM (`vm.swappiness=1`, `OOMScoreAdjust=-900`, `nf_conntrack_udp_timeout`), не создавая мусора в логах.
+              - **Автоматически при деплое + кнопка для существующих VPS**: новые серверы получают анти-слип сразу при установке, а для уже развёрнутых VPS в панели **«Управление VPS»** добавлен переключатель **«Анти-слип: ВКЛ / ВЫКЛ»** в 1 клик.
+            - **Включает все исправления `v2.0.7` для Android и Windows**: мгновенная отмена подключения, защита от зависания/сброса при старте и смена портов кнопками «Переподкл.» / «Автоподбор».
           draft: false
           prerelease: false
           fail_on_unmatched_files: false

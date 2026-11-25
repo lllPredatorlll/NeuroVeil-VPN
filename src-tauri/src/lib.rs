@@ -3532,6 +3532,18 @@ async fn manage_vps_container_cmd(
 }
 
 #[tauri::command]
+async fn toggle_vps_antisleep_cmd(
+    app: AppHandle,
+    creds: VpsCredentials,
+    enable: bool,
+) -> Result<bool, String> {
+    if creds.host.trim().is_empty() || creds.password.trim().is_empty() {
+        return Err("Введите IP-адрес сервера и пароль SSH (root)".to_string());
+    }
+    ssh_deployer::set_vps_antisleep(&app, &creds, enable).await
+}
+
+#[tauri::command]
 async fn delete_vps_device_cmd(
     app: AppHandle,
     creds: VpsCredentials,
@@ -4830,7 +4842,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2070)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2080)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4843,12 +4855,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2070).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2080).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2070).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2080).",
                         current_version
                     )
                 };
@@ -4856,7 +4868,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2070)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2080)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -6749,6 +6761,7 @@ pub fn run() {
             login_vps_admin,
             get_vps_admin_state,
             manage_vps_container_cmd,
+            toggle_vps_antisleep_cmd,
             delete_vps_device_cmd,
             delete_vps_multi_group_cmd,
             app_start_dragging,
