@@ -1,7 +1,7 @@
 export interface VpnProfile {
   id: string;
   name: string;
-  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "awg_quic" | "awg_vless" | "wireguard" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
+  protocol: "hysteria2" | "tuic" | "vless" | "shadowsocks" | "amneziawg" | "awg2" | "awg_quic" | "awg_vless" | "enigma" | "wireguard" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
   server: string;
   port: number;
   vless_port?: number | null;
@@ -69,6 +69,9 @@ export interface VpnProfile {
   container_id?: string | null;
   multi_group_id?: string | null;
   multi_group_name?: string | null;
+  enigma_keybook?: string | null;
+  enigma_key_path?: string | null;
+  enigma_mimic?: string | null;
 }
 
 export interface RoutingConfig {
@@ -175,9 +178,100 @@ export interface VpsCredentials {
   webrtc_port?: number;
   deploy_awg_quic?: boolean;
   deploy_awg_vless?: boolean;
+  deploy_enigma?: boolean;
+  enigma_port?: number;
+  enigma_hop_ports?: string;
   enable_salamander: boolean;
   enable_port_hopping?: boolean;
   ssh_proxy: string;
+}
+
+export interface BridgePairPreset {
+  id: string;
+  name: string;
+  entry_profile_id: string;
+  exit_profile_id: string;
+}
+
+export interface BridgeClientConfig {
+  id: string;
+  name: string;
+  protocol: string;
+  entry_host: string;
+  entry_ssh_port: number;
+  entry_username: string;
+  listen_port: number;
+  exit_profile_id: string;
+  exit_profile_name: string;
+  exit_server: string;
+  exit_protocol: string;
+  config_format: string;
+  config_text: string;
+  uri: string;
+  service_name: string;
+  runtime: string;
+  created_at: string;
+}
+
+export interface CreateBridgeClientRequest {
+  name: string;
+  protocol: string;
+  entry_host: string;
+  entry_ssh_port: number;
+  entry_username: string;
+  entry_password: string;
+  exit_profile_id: string;
+  custom_port: number;
+  reality_sni: string;
+}
+
+export interface DeleteBridgeClientRequest {
+  config_id: string;
+  remove_from_server: boolean;
+  entry_password: string;
+}
+
+export interface BridgeConfig {
+  enabled: boolean;
+  entry_profile_id?: string | null;
+  exit_profile_id?: string | null;
+  saved_pairs: BridgePairPreset[];
+  client_configs?: BridgeClientConfig[];
+  last_entry_host?: string | null;
+  last_entry_ssh_port?: number | null;
+  last_entry_username?: string | null;
+  last_entry_protocol?: string | null;
+  last_exit_host?: string | null;
+  last_exit_ssh_port?: number | null;
+  last_exit_username?: string | null;
+  last_exit_protocol?: string | null;
+}
+
+export interface BridgePairDeployRequest {
+  pair_name: string;
+  entry_host: string;
+  entry_ssh_port: number;
+  entry_username: string;
+  entry_password: string;
+  entry_protocol: string;
+  exit_host: string;
+  exit_ssh_port: number;
+  exit_username: string;
+  exit_password: string;
+  exit_protocol: string;
+  save_pair_preset: boolean;
+  auto_connect_after_deploy: boolean;
+}
+
+export interface BridgePairDeployResult {
+  success: boolean;
+  message: string;
+  entry_profile: VpnProfile;
+  exit_profile: VpnProfile;
+  saved_pair?: BridgePairPreset | null;
+  entry_new_ssh_port?: number | null;
+  exit_new_ssh_port?: number | null;
+  auto_connected: boolean;
 }
 
 export interface AppPersistentState {
@@ -195,6 +289,8 @@ export interface AppPersistentState {
   window_width?: number | null;
   window_height?: number | null;
   window_maximized?: boolean | null;
+  passive_telemetry_enabled?: boolean;
+  bridge?: BridgeConfig;
 }
 
 export interface VpnStatus {
@@ -218,6 +314,13 @@ export interface VpnStatus {
   is_handshaking?: boolean;
   handshake_status?: string | null;
   is_connecting?: boolean;
+  enigma_rotor_info?: string | null;
+  bridge_active?: boolean;
+  bridge_entry_profile_id?: string | null;
+  bridge_entry_name?: string | null;
+  bridge_exit_name?: string | null;
+  bridge_entry_protocol?: string | null;
+  bridge_exit_protocol?: string | null;
 }
 
 export interface PortProbeResult {
@@ -319,3 +422,92 @@ export interface SpeedTestProgressEvent {
   elapsed_ms: number;
   error?: string | null;
 }
+
+export interface TelemetrySessionRecord {
+  id: string;
+  profile_id: string;
+  profile_name: string;
+  protocol: string;
+  server: string;
+  port: number;
+  mimic_mode?: string | null;
+  network_mode: string;
+  started_at: string;
+  ended_at?: string | null;
+  duration_secs: number;
+  handshake_ms?: number | null;
+  handshake_ok: boolean;
+  disconnect_reason: string;
+  up_bytes: number;
+  down_bytes: number;
+  peak_up_bps: number;
+  peak_down_bps: number;
+  avg_active_up_bps?: number | null;
+  avg_active_down_bps?: number | null;
+  ping_samples_ms: number[];
+  ping_min_ms?: number | null;
+  ping_avg_ms?: number | null;
+  ping_p95_ms?: number | null;
+  ping_max_ms?: number | null;
+  jitter_ms?: number | null;
+  probes_ok: number;
+  probes_fail: number;
+  stalls_count: number;
+  enigma_handshakes?: number | null;
+  enigma_decoys?: number | null;
+  enigma_packets_tx?: number | null;
+  enigma_packets_rx?: number | null;
+}
+
+export interface SpeedTestHistoryRecord {
+  id: string;
+  timestamp: string;
+  profile_id?: string | null;
+  profile_name: string;
+  protocol: string;
+  route_used: string;
+  quick_only: boolean;
+  ping_min_ms?: number | null;
+  ping_avg_ms?: number | null;
+  ping_max_ms?: number | null;
+  jitter_ms?: number | null;
+  packet_loss_pct?: number | null;
+  vps_rtt_ms?: number | null;
+  download_avg_mbps?: number | null;
+  download_max_mbps?: number | null;
+  upload_avg_mbps?: number | null;
+  upload_max_mbps?: number | null;
+  colo?: string | null;
+  external_ip?: string | null;
+}
+
+export interface TelemetryProtocolSummary {
+  protocol: string;
+  sessions_count: number;
+  total_duration_secs: number;
+  handshake_success_pct?: number | null;
+  avg_handshake_ms?: number | null;
+  total_up_bytes: number;
+  total_down_bytes: number;
+  peak_down_mbps?: number | null;
+  avg_active_down_mbps?: number | null;
+  peak_up_mbps?: number | null;
+  avg_active_up_mbps?: number | null;
+  avg_ping_ms?: number | null;
+  p95_ping_ms?: number | null;
+  avg_jitter_ms?: number | null;
+  packet_loss_pct?: number | null;
+  stalls_total: number;
+  speedtest_count: number;
+  speedtest_avg_down_mbps?: number | null;
+  speedtest_avg_up_mbps?: number | null;
+}
+
+export interface TelemetryReportResponse {
+  enabled: boolean;
+  active_session?: TelemetrySessionRecord | null;
+  summaries: TelemetryProtocolSummary[];
+  sessions: TelemetrySessionRecord[];
+  speedtests: SpeedTestHistoryRecord[];
+}
+

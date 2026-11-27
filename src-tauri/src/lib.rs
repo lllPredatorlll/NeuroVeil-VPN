@@ -1,3 +1,4 @@
+pub mod enigma;
 mod models;
 mod singbox;
 mod ssh_deployer;
@@ -5,18 +6,24 @@ mod ssh_deployer;
 mod android_vpn;
 
 use models::{
-    default_routing_presets, is_awg_protocol, AppPersistentState, AppUpdateInfo, DeployResult,
-    PortProbeResult, RoutingConfig, RoutingPreset, RunningProcessInfo, SpeedTestProgressEvent,
-    SpeedTestServiceCheck, VpnProfile, VpnStatus, VpsAdminState, VpsCredentials,
+    default_routing_presets, is_awg_protocol, AppPersistentState, AppUpdateInfo,
+    BridgeClientConfig, BridgeConfig, BridgePairDeployRequest, BridgePairDeployResult,
+    BridgePairPreset, CreateBridgeClientRequest, DeleteBridgeClientRequest, DeployResult,
+    PortProbeResult, RoutingConfig, RoutingPreset, RunningProcessInfo, SpeedTestHistoryRecord,
+    SpeedTestProgressEvent, SpeedTestServiceCheck, TelemetryProtocolSummary,
+    TelemetryReportResponse, TelemetrySessionRecord, TelemetryStore, VpnProfile, VpnStatus,
+    VpsAdminState, VpsCredentials,
 };
 #[allow(unused_imports)]
 use singbox::{
     build_awg_conf, build_multi_zip_bytes, build_profile_uri, check_singbox_version,
     collect_exe_in_dir, download_singbox_core, generate_android_runtime_singbox_config,
-    generate_mobile_singbox_config, generate_multi_singbox_config, generate_singbox_config,
-    generate_singbox_config_with_port, get_app_data_dir, get_profile_candidate_ports,
-    get_singbox_bin_path, parse_multi_profiles_input, parse_multi_zip_bytes, parse_profile_uri,
-    reset_stale_app_sockets, set_app_data_dir, set_windows_system_proxy, write_routing_rulesets,
+    generate_android_runtime_singbox_config_with_bridge, generate_mobile_singbox_config,
+    generate_multi_singbox_config, generate_router_2hop_singbox_json, generate_singbox_config,
+    generate_singbox_config_with_bridge, generate_singbox_config_with_port, get_app_data_dir,
+    get_profile_candidate_ports, get_singbox_bin_path, parse_multi_profiles_input,
+    parse_multi_zip_bytes, parse_profile_uri, reset_stale_app_sockets, set_app_data_dir,
+    set_windows_system_proxy, write_routing_rulesets,
 };
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -60,6 +67,14 @@ struct RuntimeState {
     down_bytes: u64,
     up_speed: u64,
     down_speed: u64,
+    enigma_tunnel: Option<enigma::EnigmaTunnelHandle>,
+    active_telemetry: Option<ActiveTelemetryCollector>,
+    bridge_active: bool,
+    bridge_entry_profile_id: Option<String>,
+    bridge_entry_name: Option<String>,
+    bridge_exit_name: Option<String>,
+    bridge_entry_protocol: Option<String>,
+    bridge_exit_protocol: Option<String>,
 }
 
 fn is_vpn_running(rt: &RuntimeState) -> bool {
@@ -202,6 +217,482 @@ fn save_persistent_state(state: &AppPersistentState) {
     }
 }
 
+#[derive(Clone, Debug)]
+struct ActiveTelemetryCollector {
+    id: String,
+    profile_id: String,
+    profile_name: String,
+    protocol: String,
+    server: String,
+    port: u16,
+    mimic_mode: Option<String>,
+    network_mode: String,
+    started_at: String,
+    started_instant: Instant,
+    handshake_ms: Option<u64>,
+    handshake_ok: bool,
+    up_bytes: u64,
+    down_bytes: u64,
+    peak_up_bps: u64,
+    peak_down_bps: u64,
+    active_up_sum_bps: u64,
+    active_up_samples: u64,
+    active_down_sum_bps: u64,
+    active_down_samples: u64,
+    ping_samples_ms: Vec<u32>,
+    probes_ok: u32,
+    probes_fail: u32,
+    stalls_count: u32,
+    consecutive_probe_fail: u32,
+    enigma_handshakes: Option<u64>,
+    enigma_decoys: Option<u64>,
+    enigma_packets_tx: Option<u64>,
+    enigma_packets_rx: Option<u64>,
+}
+
+impl ActiveTelemetryCollector {
+    fn new(profile: &VpnProfile, active_port: u16, network_mode: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            profile_id: profile.id.clone(),
+            profile_name: profile.name.clone(),
+            protocol: profile.protocol.clone(),
+            server: profile.server.clone(),
+            port: active_port,
+            mimic_mode: if profile.protocol == "enigma" {
+                Some(
+                    profile
+                        .enigma_mimic
+                        .clone()
+                        .unwrap_or_else(|| "auto".to_string()),
+                )
+            } else {
+                None
+            },
+            network_mode: network_mode.to_string(),
+            started_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            started_instant: Instant::now(),
+            handshake_ms: None,
+            handshake_ok: false,
+            up_bytes: 0,
+            down_bytes: 0,
+            peak_up_bps: 0,
+            peak_down_bps: 0,
+            active_up_sum_bps: 0,
+            active_up_samples: 0,
+            active_down_sum_bps: 0,
+            active_down_samples: 0,
+            ping_samples_ms: Vec::new(),
+            probes_ok: 0,
+            probes_fail: 0,
+            stalls_count: 0,
+            consecutive_probe_fail: 0,
+            enigma_handshakes: None,
+            enigma_decoys: None,
+            enigma_packets_tx: None,
+            enigma_packets_rx: None,
+        }
+    }
+
+    fn mark_handshake_ok(&mut self) {
+        if !self.handshake_ok {
+            self.handshake_ok = true;
+            self.handshake_ms = Some(self.started_instant.elapsed().as_millis() as u64);
+        }
+    }
+
+    fn record_traffic_tick(&mut self, total_up: u64, total_down: u64, up_bps: u64, down_bps: u64) {
+        self.up_bytes = total_up;
+        self.down_bytes = total_down;
+        if up_bps > self.peak_up_bps {
+            self.peak_up_bps = up_bps;
+        }
+        if down_bps > self.peak_down_bps {
+            self.peak_down_bps = down_bps;
+        }
+        // Only count ticks with meaningful activity (>= 4 KB/s) so idle periods do not dilute real throughput
+        if up_bps >= 4096 {
+            self.active_up_sum_bps = self.active_up_sum_bps.saturating_add(up_bps);
+            self.active_up_samples = self.active_up_samples.saturating_add(1);
+        }
+        if down_bps >= 4096 {
+            self.active_down_sum_bps = self.active_down_sum_bps.saturating_add(down_bps);
+            self.active_down_samples = self.active_down_samples.saturating_add(1);
+        }
+    }
+
+    fn record_probe_ok(&mut self, ms: u32) {
+        self.probes_ok = self.probes_ok.saturating_add(1);
+        self.consecutive_probe_fail = 0;
+        if self.ping_samples_ms.len() >= 2000 {
+            self.ping_samples_ms.remove(0);
+        }
+        self.ping_samples_ms.push(ms);
+        self.mark_handshake_ok();
+    }
+
+    fn record_probe_fail(&mut self) {
+        self.probes_fail = self.probes_fail.saturating_add(1);
+        self.consecutive_probe_fail = self.consecutive_probe_fail.saturating_add(1);
+        if self.consecutive_probe_fail == 2 {
+            self.stalls_count = self.stalls_count.saturating_add(1);
+        }
+    }
+
+    fn update_enigma(&mut self, handle: Option<&enigma::EnigmaTunnelHandle>) {
+        if let Some(h) = handle {
+            if let Some(snap) = h.snapshot() {
+                self.enigma_handshakes = Some(snap.handshakes_sent);
+                self.enigma_decoys = Some(snap.decoys_sent);
+                self.enigma_packets_tx = Some(snap.packets_tx);
+                self.enigma_packets_rx = Some(snap.packets_rx);
+            }
+        }
+    }
+
+    fn to_record(&self, ended_at: Option<String>, disconnect_reason: &str) -> TelemetrySessionRecord {
+        let mut sorted = self.ping_samples_ms.clone();
+        sorted.sort_unstable();
+        let ping_min_ms = sorted.first().copied();
+        let ping_max_ms = sorted.last().copied();
+        let ping_avg_ms = if !self.ping_samples_ms.is_empty() {
+            let sum: u64 = self.ping_samples_ms.iter().map(|&v| v as u64).sum();
+            Some((sum as f64 / self.ping_samples_ms.len() as f64 * 10.0).round() / 10.0)
+        } else {
+            None
+        };
+        let ping_p95_ms = if !sorted.is_empty() {
+            let idx = (((sorted.len() as f64) * 0.95).ceil() as usize)
+                .saturating_sub(1)
+                .min(sorted.len() - 1);
+            Some(sorted[idx])
+        } else {
+            None
+        };
+        let jitter_ms = if self.ping_samples_ms.len() >= 2 {
+            let mut diff_sum = 0.0f64;
+            for w in self.ping_samples_ms.windows(2) {
+                diff_sum += (w[1] as f64 - w[0] as f64).abs();
+            }
+            let avg_diff = diff_sum / (self.ping_samples_ms.len() - 1) as f64;
+            Some((avg_diff * 10.0).round() / 10.0)
+        } else {
+            None
+        };
+
+        let tail_samples = if self.ping_samples_ms.len() > 60 {
+            self.ping_samples_ms[self.ping_samples_ms.len() - 60..].to_vec()
+        } else {
+            self.ping_samples_ms.clone()
+        };
+
+        TelemetrySessionRecord {
+            id: self.id.clone(),
+            profile_id: self.profile_id.clone(),
+            profile_name: self.profile_name.clone(),
+            protocol: self.protocol.clone(),
+            server: self.server.clone(),
+            port: self.port,
+            mimic_mode: self.mimic_mode.clone(),
+            network_mode: self.network_mode.clone(),
+            started_at: self.started_at.clone(),
+            ended_at,
+            duration_secs: self.started_instant.elapsed().as_secs(),
+            handshake_ms: self.handshake_ms,
+            handshake_ok: self.handshake_ok,
+            disconnect_reason: disconnect_reason.to_string(),
+            up_bytes: self.up_bytes,
+            down_bytes: self.down_bytes,
+            peak_up_bps: self.peak_up_bps,
+            peak_down_bps: self.peak_down_bps,
+            avg_active_up_bps: if self.active_up_samples > 0 {
+                Some(self.active_up_sum_bps / self.active_up_samples)
+            } else {
+                None
+            },
+            avg_active_down_bps: if self.active_down_samples > 0 {
+                Some(self.active_down_sum_bps / self.active_down_samples)
+            } else {
+                None
+            },
+            ping_samples_ms: tail_samples,
+            ping_min_ms,
+            ping_avg_ms,
+            ping_p95_ms,
+            ping_max_ms,
+            jitter_ms,
+            probes_ok: self.probes_ok,
+            probes_fail: self.probes_fail,
+            stalls_count: self.stalls_count,
+            enigma_handshakes: self.enigma_handshakes,
+            enigma_decoys: self.enigma_decoys,
+            enigma_packets_tx: self.enigma_packets_tx,
+            enigma_packets_rx: self.enigma_packets_rx,
+        }
+    }
+}
+
+fn get_telemetry_file_path() -> std::path::PathBuf {
+    get_app_data_dir().join("telemetry_history.json")
+}
+
+fn load_telemetry_store() -> TelemetryStore {
+    let path = get_telemetry_file_path();
+    if let Ok(raw) = fs::read_to_string(&path) {
+        let clean: String = raw.chars().filter(|c| *c != '\0').collect();
+        if let Ok(store) = serde_json::from_str::<TelemetryStore>(clean.trim()) {
+            return store;
+        }
+    }
+    TelemetryStore::default()
+}
+
+fn save_telemetry_store(store: &TelemetryStore) {
+    let dir = get_app_data_dir();
+    let _ = fs::create_dir_all(&dir);
+    let primary_path = get_telemetry_file_path();
+    let tmp_path = dir.join("telemetry_history.json.tmp");
+
+    let Ok(json) = serde_json::to_string_pretty(store) else {
+        return;
+    };
+    if fs::write(&tmp_path, json.as_bytes()).is_err() {
+        return;
+    }
+    if fs::rename(&tmp_path, &primary_path).is_err() {
+        let _ = fs::remove_file(&primary_path);
+        if fs::rename(&tmp_path, &primary_path).is_err() {
+            let _ = fs::copy(&tmp_path, &primary_path);
+            let _ = fs::remove_file(&tmp_path);
+        }
+    }
+}
+
+fn upsert_telemetry_session(rec: TelemetrySessionRecord) {
+    let mut store = load_telemetry_store();
+    if let Some(pos) = store.sessions.iter().position(|s| s.id == rec.id) {
+        store.sessions[pos] = rec;
+    } else {
+        store.sessions.insert(0, rec);
+        if store.sessions.len() > 200 {
+            store.sessions.truncate(200);
+        }
+    }
+    save_telemetry_store(&store);
+}
+
+fn append_telemetry_speedtest(rec: SpeedTestHistoryRecord) {
+    let mut store = load_telemetry_store();
+    store.speedtests.insert(0, rec);
+    if store.speedtests.len() > 200 {
+        store.speedtests.truncate(200);
+    }
+    save_telemetry_store(&store);
+}
+
+fn finalize_active_telemetry(rt: &mut RuntimeState, reason: &str) {
+    if let Some(mut collector) = rt.active_telemetry.take() {
+        collector.update_enigma(rt.enigma_tunnel.as_ref());
+        let ended = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let rec = collector.to_record(Some(ended), reason);
+        // Save on any session lasting >= 2s or having any data/handshake activity
+        if rec.duration_secs >= 2 || rec.handshake_ok || rec.up_bytes > 0 || rec.down_bytes > 0 {
+            upsert_telemetry_session(rec);
+        }
+    }
+}
+
+fn bps_to_mbps_opt(bps: Option<u64>) -> Option<f64> {
+    bps.filter(|&v| v > 0)
+        .map(|v| (((v as f64) * 8.0 / 1_000_000.0) * 100.0).round() / 100.0)
+}
+
+fn compute_protocol_summaries(
+    sessions: &[TelemetrySessionRecord],
+    active_session: Option<&TelemetrySessionRecord>,
+    speedtests: &[SpeedTestHistoryRecord],
+) -> Vec<TelemetryProtocolSummary> {
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Agg {
+        sessions_count: u32,
+        total_duration_secs: u64,
+        hs_ok_count: u32,
+        hs_ms_sum: u64,
+        hs_ms_cnt: u32,
+        total_up_bytes: u64,
+        total_down_bytes: u64,
+        peak_down_bps: u64,
+        peak_up_bps: u64,
+        active_down_sum: u64,
+        active_down_cnt: u32,
+        active_up_sum: u64,
+        active_up_cnt: u32,
+        all_pings: Vec<u32>,
+        jitter_sum: f64,
+        jitter_cnt: u32,
+        probes_ok: u32,
+        probes_fail: u32,
+        stalls_total: u32,
+        st_count: u32,
+        st_down_sum: f64,
+        st_down_cnt: u32,
+        st_up_sum: f64,
+        st_up_cnt: u32,
+    }
+
+    let mut map: BTreeMap<String, Agg> = BTreeMap::new();
+
+    let mut combined: Vec<&TelemetrySessionRecord> = Vec::new();
+    if let Some(act) = active_session {
+        combined.push(act);
+    }
+    for s in sessions {
+        if active_session.map(|a| a.id != s.id).unwrap_or(true) {
+            combined.push(s);
+        }
+    }
+
+    for s in combined {
+        let key = s.protocol.to_lowercase();
+        let agg = map.entry(key).or_default();
+        agg.sessions_count += 1;
+        agg.total_duration_secs = agg.total_duration_secs.saturating_add(s.duration_secs);
+        if s.handshake_ok {
+            agg.hs_ok_count += 1;
+        }
+        if let Some(hms) = s.handshake_ms {
+            agg.hs_ms_sum = agg.hs_ms_sum.saturating_add(hms);
+            agg.hs_ms_cnt += 1;
+        }
+        agg.total_up_bytes = agg.total_up_bytes.saturating_add(s.up_bytes);
+        agg.total_down_bytes = agg.total_down_bytes.saturating_add(s.down_bytes);
+        if s.peak_down_bps > agg.peak_down_bps {
+            agg.peak_down_bps = s.peak_down_bps;
+        }
+        if s.peak_up_bps > agg.peak_up_bps {
+            agg.peak_up_bps = s.peak_up_bps;
+        }
+        if let Some(ad) = s.avg_active_down_bps {
+            agg.active_down_sum = agg.active_down_sum.saturating_add(ad);
+            agg.active_down_cnt += 1;
+        }
+        if let Some(au) = s.avg_active_up_bps {
+            agg.active_up_sum = agg.active_up_sum.saturating_add(au);
+            agg.active_up_cnt += 1;
+        }
+        agg.all_pings.extend_from_slice(&s.ping_samples_ms);
+        if let Some(j) = s.jitter_ms {
+            agg.jitter_sum += j;
+            agg.jitter_cnt += 1;
+        }
+        agg.probes_ok = agg.probes_ok.saturating_add(s.probes_ok);
+        agg.probes_fail = agg.probes_fail.saturating_add(s.probes_fail);
+        agg.stalls_total = agg.stalls_total.saturating_add(s.stalls_count);
+    }
+
+    for st in speedtests {
+        if st.route_used == "direct" {
+            continue;
+        }
+        let key = st.protocol.to_lowercase();
+        let agg = map.entry(key).or_default();
+        agg.st_count += 1;
+        if let Some(d) = st.download_avg_mbps {
+            agg.st_down_sum += d;
+            agg.st_down_cnt += 1;
+        }
+        if let Some(u) = st.upload_avg_mbps {
+            agg.st_up_sum += u;
+            agg.st_up_cnt += 1;
+        }
+    }
+
+    let mut out: Vec<TelemetryProtocolSummary> = map
+        .into_iter()
+        .map(|(protocol, mut agg)| {
+            agg.all_pings.sort_unstable();
+            let avg_ping_ms = if !agg.all_pings.is_empty() {
+                let sum: u64 = agg.all_pings.iter().map(|&v| v as u64).sum();
+                Some(((sum as f64 / agg.all_pings.len() as f64) * 10.0).round() / 10.0)
+            } else {
+                None
+            };
+            let p95_ping_ms = if !agg.all_pings.is_empty() {
+                let idx = (((agg.all_pings.len() as f64) * 0.95).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(agg.all_pings.len() - 1);
+                Some(agg.all_pings[idx])
+            } else {
+                None
+            };
+            let total_probes = agg.probes_ok + agg.probes_fail;
+            let packet_loss_pct = if total_probes > 0 {
+                Some(((agg.probes_fail as f64 / total_probes as f64) * 1000.0).round() / 10.0)
+            } else {
+                None
+            };
+
+            TelemetryProtocolSummary {
+                protocol,
+                sessions_count: agg.sessions_count,
+                total_duration_secs: agg.total_duration_secs,
+                handshake_success_pct: if agg.sessions_count > 0 {
+                    Some(
+                        ((agg.hs_ok_count as f64 / agg.sessions_count as f64) * 1000.0).round()
+                            / 10.0,
+                    )
+                } else {
+                    None
+                },
+                avg_handshake_ms: if agg.hs_ms_cnt > 0 {
+                    Some(agg.hs_ms_sum / agg.hs_ms_cnt as u64)
+                } else {
+                    None
+                },
+                total_up_bytes: agg.total_up_bytes,
+                total_down_bytes: agg.total_down_bytes,
+                peak_down_mbps: bps_to_mbps_opt(Some(agg.peak_down_bps)),
+                avg_active_down_mbps: bps_to_mbps_opt(if agg.active_down_cnt > 0 {
+                    Some(agg.active_down_sum / agg.active_down_cnt as u64)
+                } else {
+                    None
+                }),
+                peak_up_mbps: bps_to_mbps_opt(Some(agg.peak_up_bps)),
+                avg_active_up_mbps: bps_to_mbps_opt(if agg.active_up_cnt > 0 {
+                    Some(agg.active_up_sum / agg.active_up_cnt as u64)
+                } else {
+                    None
+                }),
+                avg_ping_ms,
+                p95_ping_ms,
+                avg_jitter_ms: if agg.jitter_cnt > 0 {
+                    Some(((agg.jitter_sum / agg.jitter_cnt as f64) * 10.0).round() / 10.0)
+                } else {
+                    None
+                },
+                packet_loss_pct,
+                stalls_total: agg.stalls_total,
+                speedtest_count: agg.st_count,
+                speedtest_avg_down_mbps: if agg.st_down_cnt > 0 {
+                    Some(((agg.st_down_sum / agg.st_down_cnt as f64) * 100.0).round() / 100.0)
+                } else {
+                    None
+                },
+                speedtest_avg_up_mbps: if agg.st_up_cnt > 0 {
+                    Some(((agg.st_up_sum / agg.st_up_cnt as f64) * 100.0).round() / 100.0)
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+
+    out.sort_by(|a, b| b.total_duration_secs.cmp(&a.total_duration_secs));
+    out
+}
+
 fn strip_ansi(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut in_escape = false;
@@ -262,6 +753,10 @@ fn pick_random_free_udp_port(exclude: &[u16]) -> u16 {
 fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
     #[cfg(target_os = "android")]
     {
+        finalize_active_telemetry(rt, "user");
+        if let Some(et) = rt.enigma_tunnel.take() {
+            et.stop();
+        }
         let was_connected = rt.android_connected || rt.android_connecting;
         let app_opt = rt.app_handle.clone();
         rt.android_connected = false;
@@ -282,10 +777,21 @@ fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
         rt.handshake_status = None;
         rt.up_speed = 0;
         rt.down_speed = 0;
+        rt.bridge_active = false;
+        rt.bridge_entry_profile_id = None;
+        rt.bridge_entry_name = None;
+        rt.bridge_exit_name = None;
+        rt.bridge_entry_protocol = None;
+        rt.bridge_exit_protocol = None;
         return app_opt;
     }
     #[cfg(not(target_os = "android"))]
     {
+        finalize_active_telemetry(rt, "user");
+        if let Some(et) = rt.enigma_tunnel.take() {
+            et.stop();
+            push_log(&mut rt.logs, "[Enigma] Локальный роторный шлюз остановлен.".to_string());
+        }
         if let Some(mut child) = rt.child.take() {
             let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
             let _ = child.kill();
@@ -309,6 +815,12 @@ fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
         rt.handshake_status = None;
         rt.up_speed = 0;
         rt.down_speed = 0;
+        rt.bridge_active = false;
+        rt.bridge_entry_profile_id = None;
+        rt.bridge_entry_name = None;
+        rt.bridge_exit_name = None;
+        rt.bridge_entry_protocol = None;
+        rt.bridge_exit_protocol = None;
         None
     }
 }
@@ -377,7 +889,10 @@ fn apply_mobile_vpn_status_in_memory(
                 rt.active_profile_name = Some(p.name.clone());
                 rt.active_protocol = Some(p.protocol.clone());
                 rt.active_port = Some(p.port);
-                rt.active_listen_port = if is_awg_protocol(&p.protocol) && p.protocol != "awg_vless" {
+                rt.active_listen_port = if is_awg_protocol(&p.protocol)
+                    && p.protocol != "awg_vless"
+                    && p.protocol != "enigma"
+                {
                     p.listen_port
                 } else {
                     None
@@ -461,7 +976,10 @@ fn apply_mobile_vpn_status_in_memory(
                 rt.active_profile_name = Some(p.name.clone());
                 rt.active_protocol = Some(p.protocol.clone());
                 rt.active_port = Some(p.port);
-                rt.active_listen_port = if is_awg_protocol(&p.protocol) && p.protocol != "awg_vless" {
+                rt.active_listen_port = if is_awg_protocol(&p.protocol)
+                    && p.protocol != "awg_vless"
+                    && p.protocol != "enigma"
+                {
                     p.listen_port
                 } else {
                     None
@@ -533,6 +1051,13 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
             singbox_version: rt.singbox_version.clone(),
             singbox_path: "libbox.aar (встроенное ядро Android)".to_string(),
             logs: rt.logs.clone(),
+            enigma_rotor_info: None,
+            bridge_active: rt.bridge_active,
+            bridge_entry_profile_id: rt.bridge_entry_profile_id.clone(),
+            bridge_entry_name: rt.bridge_entry_name.clone(),
+            bridge_exit_name: rt.bridge_exit_name.clone(),
+            bridge_entry_protocol: rt.bridge_entry_protocol.clone(),
+            bridge_exit_protocol: rt.bridge_exit_protocol.clone(),
         };
     }
 
@@ -547,6 +1072,10 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
                     format!("Процесс sing-box завершился (код: {}).", code),
                 );
                 let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
+                finalize_active_telemetry(rt, &format!("unexpected_exit_{}", code));
+                if let Some(et) = rt.enigma_tunnel.take() {
+                    et.stop();
+                }
                 rt.child = None;
                 rt.active_profile_id = None;
                 rt.active_profile_name = None;
@@ -558,6 +1087,12 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
                 rt.handshake_status = None;
                 rt.up_speed = 0;
                 rt.down_speed = 0;
+                rt.bridge_active = false;
+                rt.bridge_entry_profile_id = None;
+                rt.bridge_entry_name = None;
+                rt.bridge_exit_name = None;
+                rt.bridge_entry_protocol = None;
+                rt.bridge_exit_protocol = None;
             }
         }
 
@@ -572,6 +1107,8 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
                 rt.singbox_version = "sing-box (установлен)".to_string();
             }
         }
+
+        let enigma_rotor_info = rt.enigma_tunnel.as_ref().and_then(|h| h.summary());
 
         VpnStatus {
             connected: rt.child.is_some(),
@@ -594,6 +1131,13 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
             singbox_version: rt.singbox_version.clone(),
             singbox_path: sb_bin.to_string_lossy().to_string(),
             logs: rt.logs.clone(),
+            enigma_rotor_info,
+            bridge_active: rt.bridge_active,
+            bridge_entry_profile_id: rt.bridge_entry_profile_id.clone(),
+            bridge_entry_name: rt.bridge_entry_name.clone(),
+            bridge_exit_name: rt.bridge_exit_name.clone(),
+            bridge_entry_protocol: rt.bridge_entry_protocol.clone(),
+            bridge_exit_protocol: rt.bridge_exit_protocol.clone(),
         }
     }
 }
@@ -803,8 +1347,10 @@ fn assign_child_to_kill_job(child: &Child) {
 fn start_singbox_child(
     state_clone: &Arc<Mutex<RuntimeState>>,
     profile: &VpnProfile,
+    bridge_entry: Option<&VpnProfile>,
     routing_snapshot: &RoutingConfig,
     active_port: u16,
+    active_entry_port: Option<u16>,
 ) -> Result<std::process::Child, String> {
     let bin_path = get_singbox_bin_path();
     if !bin_path.exists() {
@@ -814,7 +1360,14 @@ fn start_singbox_child(
         );
     }
 
-    let config_json = generate_singbox_config_with_port(profile, routing_snapshot, Some(active_port));
+    let config_json = generate_singbox_config_with_bridge(
+        profile,
+        bridge_entry,
+        routing_snapshot,
+        Some(active_port),
+        active_entry_port,
+        false,
+    );
     let config_path = get_app_data_dir().join("active_config.json");
     let config_str = serde_json::to_string_pretty(&config_json).map_err(|e| e.to_string())?;
     fs::write(&config_path, config_str)
@@ -867,6 +1420,7 @@ fn start_singbox_child(
 fn spawn_and_monitor_singbox(
     state_clone: &Arc<Mutex<RuntimeState>>,
     profile: &VpnProfile,
+    bridge_entry: Option<&VpnProfile>,
     routing_snapshot: &RoutingConfig,
     active_port: u16,
     custom_log: Option<String>,
@@ -880,7 +1434,11 @@ fn spawn_and_monitor_singbox(
         {
             prof_with_port.hop_ports = None;
         }
-        let config_json = generate_android_runtime_singbox_config(&prof_with_port, routing_snapshot);
+        let config_json = generate_android_runtime_singbox_config_with_bridge(
+            &prof_with_port,
+            bridge_entry,
+            routing_snapshot,
+        );
         let config_str = serde_json::to_string_pretty(&config_json).map_err(|e| e.to_string())?;
         let config_path = get_app_data_dir().join("active_config.json");
         let _ = fs::write(&config_path, &config_str);
@@ -892,10 +1450,16 @@ fn spawn_and_monitor_singbox(
                 .ok_or_else(|| "Android AppHandle не инициализирован".to_string())?
         };
 
+        let display_name = if let Some(entry) = bridge_entry {
+            format!("МОСТ: {} → {}", entry.name, profile.name)
+        } else {
+            profile.name.clone()
+        };
+
         let start_res = crate::android_vpn::start_vpn(
             &app_handle,
             config_str,
-            profile.name.clone(),
+            display_name.clone(),
             profile.id.clone(),
             profile.protocol.clone(),
         )?;
@@ -926,12 +1490,25 @@ fn spawn_and_monitor_singbox(
             .filter(|&p| p > 0)
             .or_else(|| (start_res.socks_port > 0).then_some(start_res.socks_port));
 
-        let is_awg = is_awg_protocol(&profile.protocol);
+        let is_awg = is_awg_protocol(&profile.protocol)
+            || bridge_entry.map(|e| is_awg_protocol(&e.protocol)).unwrap_or(false);
 
         let snapshot = {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
             if let Some(msg) = custom_log {
                 push_log(&mut rt.logs, msg);
+            } else if let Some(entry) = bridge_entry {
+                push_log(
+                    &mut rt.logs,
+                    format!(
+                        "[Мост 2-Hop] Запуск libbox VPN: '{}' ({}) → '{}' ({}), Split Tunneling: {}",
+                        entry.name,
+                        entry.protocol.to_uppercase(),
+                        profile.name,
+                        profile.protocol.to_uppercase(),
+                        if routing_snapshot.split_tunneling { "ВКЛ" } else { "ВЫКЛ" }
+                    ),
+                );
             } else {
                 push_log(
                     &mut rt.logs,
@@ -969,15 +1546,30 @@ fn spawn_and_monitor_singbox(
             rt.down_bytes = 0;
             if is_connected || is_connecting {
                 rt.active_profile_id = Some(profile.id.clone());
-                rt.active_profile_name = Some(profile.name.clone());
+                rt.active_profile_name = Some(display_name);
                 rt.active_protocol = Some(profile.protocol.clone());
                 rt.active_port = Some(active_port);
                 rt.port_hunting_status = None;
-                rt.active_listen_port = if is_awg && profile.protocol != "awg_vless" {
+                rt.active_listen_port = if bridge_entry.is_none() && is_awg && profile.protocol != "awg_vless" {
                     profile.listen_port
                 } else {
                     None
                 };
+                if let Some(entry) = bridge_entry {
+                    rt.bridge_active = true;
+                    rt.bridge_entry_profile_id = Some(entry.id.clone());
+                    rt.bridge_entry_name = Some(entry.name.clone());
+                    rt.bridge_exit_name = Some(profile.name.clone());
+                    rt.bridge_entry_protocol = Some(entry.protocol.clone());
+                    rt.bridge_exit_protocol = Some(profile.protocol.clone());
+                } else {
+                    rt.bridge_active = false;
+                    rt.bridge_entry_profile_id = None;
+                    rt.bridge_entry_name = None;
+                    rt.bridge_exit_name = None;
+                    rt.bridge_entry_protocol = None;
+                    rt.bridge_exit_protocol = None;
+                }
             } else {
                 rt.active_profile_id = None;
                 rt.active_profile_name = None;
@@ -985,10 +1577,20 @@ fn spawn_and_monitor_singbox(
                 rt.active_port = None;
                 rt.active_listen_port = None;
                 rt.port_hunting_status = None;
+                rt.bridge_active = false;
+                rt.bridge_entry_profile_id = None;
+                rt.bridge_entry_name = None;
+                rt.bridge_exit_name = None;
+                rt.bridge_entry_protocol = None;
+                rt.bridge_exit_protocol = None;
             }
             if is_connected && is_awg && !rx_confirmed {
                 rt.is_handshaking = true;
-                rt.handshake_status = Some("Установка соединения (рукопожатие WireGuard)...".to_string());
+                rt.handshake_status = Some(if bridge_entry.is_some() {
+                    "Мост 2-Hop: установка рукопожатия цепочки...".to_string()
+                } else {
+                    "Установка соединения (рукопожатие WireGuard)...".to_string()
+                });
             } else if !is_connected && is_connecting {
                 rt.is_handshaking = false;
                 rt.handshake_status = Some("Запуск VPN-туннеля...".to_string());
@@ -1019,7 +1621,69 @@ fn spawn_and_monitor_singbox(
 
     #[cfg(not(target_os = "android"))]
     {
-    let child = start_singbox_child(state_clone, profile, routing_snapshot, active_port)?;
+    let enigma_logs_buf = Arc::new(Mutex::new(Vec::<String>::new()));
+    let enigma_target = if let Some(entry) = bridge_entry {
+        if entry.protocol == "enigma" {
+            Some((entry, entry.port, true))
+        } else {
+            None
+        }
+    } else if profile.protocol == "enigma" {
+        Some((profile, active_port, false))
+    } else {
+        None
+    };
+
+    let (enigma_handle, enigma_is_entry) = if let Some((ep_prof, ep_port, is_entry)) = enigma_target {
+        let (kb, _kb_path) = crate::enigma::ensure_profile_keybook(
+            &get_app_data_dir(),
+            &ep_prof.id,
+            ep_prof.enigma_keybook.as_deref(),
+            ep_prof.enigma_key_path.as_deref(),
+        )?;
+        let mimic = crate::enigma::MimicMode::from_str_opt(ep_prof.enigma_mimic.as_deref());
+        let h = crate::enigma::start_enigma_client_tunnel(
+            &ep_prof.server,
+            ep_port,
+            kb,
+            mimic,
+            enigma_logs_buf.clone(),
+        )?;
+        (Some(h), is_entry)
+    } else {
+        (None, false)
+    };
+
+    let sb_peer_port = if !enigma_is_entry {
+        enigma_handle
+            .as_ref()
+            .map(|h| h.local_wg_port)
+            .unwrap_or(active_port)
+    } else {
+        active_port
+    };
+    let sb_entry_port = if enigma_is_entry {
+        enigma_handle.as_ref().map(|h| h.local_wg_port)
+    } else {
+        bridge_entry.map(|e| e.port)
+    };
+
+    let child = match start_singbox_child(
+        state_clone,
+        profile,
+        bridge_entry,
+        routing_snapshot,
+        sb_peer_port,
+        sb_entry_port,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            if let Some(h) = enigma_handle {
+                h.stop();
+            }
+            return Err(e);
+        }
+    };
 
     if routing_snapshot.mode == "system_proxy" {
         let port = routing_snapshot.local_mixed_port;
@@ -1030,7 +1694,11 @@ fn spawn_and_monitor_singbox(
     let state_for_warmup = state_clone.clone();
     let warmup_clash_port = routing_snapshot.clash_api_port;
     let warmup_procs = routing_snapshot.proxy_processes.clone();
-    let warmup_is_awg = is_awg_protocol(&profile.protocol);
+    let warmup_is_bridge = bridge_entry.is_some();
+    let warmup_is_awg = is_awg_protocol(&profile.protocol)
+        || bridge_entry.map(|e| is_awg_protocol(&e.protocol)).unwrap_or(false);
+    let warmup_is_enigma = profile.protocol == "enigma"
+        || bridge_entry.map(|e| e.protocol == "enigma").unwrap_or(false);
     thread::spawn(move || {
         let check_url = format!("http://127.0.0.1:{}/proxies", warmup_clash_port);
         for _ in 0..35 {
@@ -1044,24 +1712,36 @@ fn spawn_and_monitor_singbox(
             thread::sleep(Duration::from_millis(40));
         }
         let delay_url = format!(
-            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=1800",
+            "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=2500",
             warmup_clash_port
         );
         for _ in 0..2 {
             if let Ok(resp) = ureq::get(&delay_url)
-                .timeout(Duration::from_millis(2000))
+                .timeout(Duration::from_millis(2800))
                 .call()
             {
                 if let Ok(val) = resp.into_json::<serde_json::Value>() {
                     if val.get("delay").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
                         if let Ok(mut g) = state_for_warmup.lock() {
+                            if let Some(ref mut tel) = g.active_telemetry {
+                                tel.mark_handshake_ok();
+                            }
                             if g.is_handshaking {
                                 g.is_handshaking = false;
                                 g.handshake_status = None;
-                                if warmup_is_awg {
+                                if warmup_is_bridge {
                                     push_log(
                                         &mut g.logs,
-                                        "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                                        "[Мост 2-Hop] Цепочка успешно установлена, защищенный каскадный туннель активен!".to_string(),
+                                    );
+                                } else if warmup_is_awg {
+                                    push_log(
+                                        &mut g.logs,
+                                        if warmup_is_enigma {
+                                            "[Enigma] Роторное рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                        } else {
+                                            "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                        },
                                     );
                                 }
                             }
@@ -1083,10 +1763,37 @@ fn spawn_and_monitor_singbox(
     });
 
     // Update runtime state and return status
-    let status = {
+    let (status, telemetry_session_id) = {
         let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+        if let Ok(mut elogs) = enigma_logs_buf.lock() {
+            for line in elogs.drain(..) {
+                push_log(&mut rt.logs, line);
+            }
+        }
+        let display_name = if let Some(entry) = bridge_entry {
+            format!("МОСТ: {} → {}", entry.name, profile.name)
+        } else {
+            profile.name.clone()
+        };
         if let Some(msg) = custom_log {
             push_log(&mut rt.logs, msg);
+        } else if let Some(entry) = bridge_entry {
+            push_log(
+                &mut rt.logs,
+                format!(
+                    "[Мост 2-Hop] Запуск sing-box: Вход '{}' ({} @ {}:{}) → Выход '{}' ({} @ {}:{}), режим: {}, Split Tunneling: {}",
+                    entry.name,
+                    entry.protocol.to_uppercase(),
+                    entry.server,
+                    entry.port,
+                    profile.name,
+                    profile.protocol.to_uppercase(),
+                    profile.server,
+                    active_port,
+                    routing_snapshot.mode,
+                    if routing_snapshot.split_tunneling { "ВКЛ" } else { "ВЫКЛ" }
+                ),
+            );
         } else {
             push_log(
                 &mut rt.logs,
@@ -1109,32 +1816,84 @@ fn spawn_and_monitor_singbox(
             );
         }
         rt.child = Some(child);
+        rt.enigma_tunnel = enigma_handle;
         rt.active_profile_id = Some(profile.id.clone());
-        rt.active_profile_name = Some(profile.name.clone());
+        rt.active_profile_name = Some(display_name);
         rt.active_protocol = Some(profile.protocol.clone());
         rt.active_port = Some(active_port);
         rt.port_hunting_status = None;
         rt.up_bytes = 0;
         rt.down_bytes = 0;
+        if let Some(entry) = bridge_entry {
+            rt.bridge_active = true;
+            rt.bridge_entry_profile_id = Some(entry.id.clone());
+            rt.bridge_entry_name = Some(entry.name.clone());
+            rt.bridge_exit_name = Some(profile.name.clone());
+            rt.bridge_entry_protocol = Some(entry.protocol.clone());
+            rt.bridge_exit_protocol = Some(profile.protocol.clone());
+        } else {
+            rt.bridge_active = false;
+            rt.bridge_entry_profile_id = None;
+            rt.bridge_entry_name = None;
+            rt.bridge_exit_name = None;
+            rt.bridge_entry_protocol = None;
+            rt.bridge_exit_protocol = None;
+        }
+        if rt.persistent.passive_telemetry_enabled {
+            let mut collector =
+                ActiveTelemetryCollector::new(profile, active_port, &routing_snapshot.mode);
+            collector.update_enigma(rt.enigma_tunnel.as_ref());
+            rt.active_telemetry = Some(collector);
+        } else {
+            rt.active_telemetry = None;
+        }
+        let sid = rt.active_telemetry.as_ref().map(|t| t.id.clone());
 
-        let is_awg = is_awg_protocol(&profile.protocol);
-        rt.active_listen_port = if is_awg { profile.listen_port } else { None };
-        if is_awg {
+        let is_awg = is_awg_protocol(&profile.protocol)
+            || bridge_entry.map(|e| is_awg_protocol(&e.protocol)).unwrap_or(false);
+        rt.active_listen_port = if let Some(entry) = bridge_entry {
+            if entry.protocol == "enigma" {
+                rt.enigma_tunnel.as_ref().map(|h| h.local_wg_port)
+            } else if is_awg_protocol(&entry.protocol) && entry.protocol != "awg_vless" {
+                entry.listen_port
+            } else {
+                None
+            }
+        } else if profile.protocol == "enigma" {
+            rt.enigma_tunnel.as_ref().map(|h| h.local_wg_port)
+        } else if is_awg && profile.protocol != "awg_vless" {
+            profile.listen_port
+        } else {
+            None
+        };
+        if is_awg || bridge_entry.is_some() {
             rt.is_handshaking = true;
-            rt.handshake_status = Some("Установка соединения (рукопожатие WireGuard)...".to_string());
+            rt.handshake_status = Some(if bridge_entry.is_some() {
+                "Мост 2-Hop: установка соединения по цепочке...".to_string()
+            } else if profile.protocol == "enigma" {
+                "Enigma: установка роторного рукопожатия...".to_string()
+            } else {
+                "Установка соединения (рукопожатие WireGuard)...".to_string()
+            });
         } else {
             rt.is_handshaking = false;
             rt.handshake_status = None;
         }
 
-        build_vpn_status(&mut rt)
+        (build_vpn_status(&mut rt), sid)
     };
 
     let state_for_traffic = state_clone.clone();
     let clash_port = routing_snapshot.clash_api_port;
     let is_awg = is_awg_protocol(&profile.protocol);
+    let is_enigma_proto = profile.protocol == "enigma";
+    let enigma_logs_for_loop = if is_enigma_proto {
+        Some(enigma_logs_buf)
+    } else {
+        None
+    };
 
-    // Active handshake probe for WireGuard / AmneziaWG:
+    // Active handshake probe for WireGuard / AmneziaWG / Enigma:
     // Proactively triggers WireGuard Handshake Initiation via local proxy (127.0.0.1:2081)
     if is_awg {
         thread::spawn(move || {
@@ -1150,6 +1909,7 @@ fn spawn_and_monitor_singbox(
     }
 
     thread::spawn(move || {
+        use std::sync::atomic::{AtomicBool, Ordering};
         thread::sleep(Duration::from_millis(400));
         let url = format!("http://127.0.0.1:{}/connections", clash_port);
         let mut prev_up = 0u64;
@@ -1158,14 +1918,25 @@ fn spawn_and_monitor_singbox(
         let mut consecutive_rx_zero = 0u32;
         let mut save_tick_counter = 0u32;
         let start_time = Instant::now();
+        let mut last_tick_at = Instant::now();
+        let mut last_probe_at = Instant::now();
+        let mut last_checkpoint_at = Instant::now();
+        let probe_in_flight = Arc::new(AtomicBool::new(false));
         let mut warned_handshake_cooldown = false;
         let mut warned_no_udp_reply = false;
 
         loop {
             {
-                if let Ok(guard) = state_for_traffic.lock() {
+                if let Ok(mut guard) = state_for_traffic.lock() {
                     if guard.child.is_none() {
                         break;
+                    }
+                    if let Some(ref elogs_arc) = enigma_logs_for_loop {
+                        if let Ok(mut elogs) = elogs_arc.lock() {
+                            for line in elogs.drain(..) {
+                                push_log(&mut guard.logs, line);
+                            }
+                        }
                     }
                 } else {
                     break;
@@ -1199,12 +1970,19 @@ fn spawn_and_monitor_singbox(
                         }
                     }
 
+                    let dt_secs = last_tick_at.elapsed().as_secs_f64().max(0.25);
+                    last_tick_at = Instant::now();
+                    let mut checkpoint_rec: Option<TelemetrySessionRecord> = None;
+                    let mut should_spawn_probe = false;
+
                     if let Ok(mut guard) = state_for_traffic.lock() {
                         if initialized {
                             let delta_up = total_up.saturating_sub(prev_up);
                             let delta_down = total_down.saturating_sub(prev_down);
                             guard.up_speed = delta_up;
                             guard.down_speed = delta_down;
+                            let up_bps = ((delta_up as f64) / dt_secs).round() as u64;
+                            let down_bps = ((delta_down as f64) / dt_secs).round() as u64;
 
                             if delta_up > 0 || delta_down > 0 {
                                 if let Some(active_id) = guard.active_profile_id.clone() {
@@ -1227,6 +2005,14 @@ fn spawn_and_monitor_singbox(
                                 }
                             }
 
+                            if proxy_down > 0 {
+                                if let Some(ref mut tel) = guard.active_telemetry {
+                                    if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
+                                        tel.mark_handshake_ok();
+                                    }
+                                }
+                            }
+
                             if is_awg {
                                 if proxy_down > 0 {
                                     consecutive_rx_zero = 0;
@@ -1235,7 +2021,11 @@ fn spawn_and_monitor_singbox(
                                         guard.handshake_status = None;
                                         push_log(
                                             &mut guard.logs,
-                                            "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                                            if is_enigma_proto {
+                                                "[Enigma] Роторное рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                            } else {
+                                                "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                            },
                                         );
                                     }
                                 } else if guard.is_handshaking {
@@ -1269,16 +2059,57 @@ fn spawn_and_monitor_singbox(
                                     }
                                 }
                             }
+
+                            let enigma_snap = guard.enigma_tunnel.as_ref().and_then(|h| h.snapshot());
+                            let tel_enabled = guard.persistent.passive_telemetry_enabled;
+                            if let Some(ref mut tel) = guard.active_telemetry {
+                                if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
+                                    tel.record_traffic_tick(total_up, total_down, up_bps, down_bps);
+                                    if let Some(snap) = enigma_snap {
+                                        tel.enigma_handshakes = Some(snap.handshakes_sent);
+                                        tel.enigma_decoys = Some(snap.decoys_sent);
+                                        tel.enigma_packets_tx = Some(snap.packets_tx);
+                                        tel.enigma_packets_rx = Some(snap.packets_rx);
+                                    }
+                                    if tel_enabled
+                                        && start_time.elapsed() >= Duration::from_secs(5)
+                                        && last_probe_at.elapsed() >= Duration::from_secs(20)
+                                        && !probe_in_flight.load(Ordering::Relaxed)
+                                    {
+                                        should_spawn_probe = true;
+                                    }
+                                    if tel_enabled
+                                        && last_checkpoint_at.elapsed() >= Duration::from_secs(60)
+                                        && (tel.started_instant.elapsed().as_secs() >= 5
+                                            || tel.handshake_ok
+                                            || total_down > 0)
+                                    {
+                                        checkpoint_rec = Some(tel.to_record(None, "active"));
+                                        last_checkpoint_at = Instant::now();
+                                    }
+                                }
+                            }
                         } else {
                             guard.up_speed = 0;
                             guard.down_speed = 0;
                             initialized = true;
+                            if proxy_down > 0 {
+                                if let Some(ref mut tel) = guard.active_telemetry {
+                                    if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
+                                        tel.mark_handshake_ok();
+                                    }
+                                }
+                            }
                             if is_awg && proxy_down > 0 && guard.is_handshaking {
                                 guard.is_handshaking = false;
                                 guard.handshake_status = None;
                                 push_log(
                                     &mut guard.logs,
-                                    "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string(),
+                                    if is_enigma_proto {
+                                        "[Enigma] Роторное рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                    } else {
+                                        "[WireGuard] Рукопожатие успешно установлено, защищенный туннель активен!".to_string()
+                                    },
                                 );
                             }
                         }
@@ -1286,6 +2117,52 @@ fn spawn_and_monitor_singbox(
                         guard.down_bytes = total_down;
                         prev_up = total_up;
                         prev_down = total_down;
+                    }
+
+                    if should_spawn_probe {
+                        if let Some(ref sid) = telemetry_session_id {
+                            last_probe_at = Instant::now();
+                            probe_in_flight.store(true, Ordering::Relaxed);
+                            let st_probe = state_for_traffic.clone();
+                            let flag_probe = probe_in_flight.clone();
+                            let sid_probe = sid.clone();
+                            let delay_url = format!(
+                                "http://127.0.0.1:{}/proxies/proxy/delay?url=http://cp.cloudflare.com/generate_204&timeout=2500",
+                                clash_port
+                            );
+                            thread::spawn(move || {
+                                let mut measured_ms: Option<u32> = None;
+                                if let Ok(r) = ureq::get(&delay_url).timeout(Duration::from_millis(2800)).call() {
+                                    if let Ok(v) = r.into_json::<serde_json::Value>() {
+                                        if let Some(d) = v.get("delay").and_then(|x| x.as_u64()) {
+                                            if d > 0 {
+                                                measured_ms = Some(d as u32);
+                                            }
+                                        }
+                                    }
+                                }
+                                if let Ok(mut g) = st_probe.lock() {
+                                    if g.child.is_some() {
+                                        if let Some(ref mut tel) = g.active_telemetry {
+                                            if tel.id == sid_probe {
+                                                if let Some(ms) = measured_ms {
+                                                    tel.record_probe_ok(ms);
+                                                } else if tel.handshake_ok {
+                                                    tel.record_probe_fail();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                flag_probe.store(false, Ordering::Relaxed);
+                            });
+                        }
+                    }
+
+                    if let Some(rec) = checkpoint_rec {
+                        thread::spawn(move || {
+                            upsert_telemetry_session(rec);
+                        });
                     }
                 }
             }
@@ -1388,21 +2265,39 @@ fn hot_reload_or_restart_singbox(
     #[cfg(target_os = "android")]
     {
         let _ = old_routing;
-        let config_json = generate_android_runtime_singbox_config(profile, routing_snapshot);
+        let (app_handle, bridge_entry, display_name) = {
+            let rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            let app = rt
+                .app_handle
+                .clone()
+                .ok_or_else(|| "Android AppHandle не инициализирован".to_string())?;
+            let entry = if rt.bridge_active {
+                rt.bridge_entry_profile_id
+                    .as_deref()
+                    .and_then(|eid| rt.persistent.profiles.iter().find(|p| p.id == eid).cloned())
+            } else {
+                None
+            };
+            let dname = if let Some(ref e) = entry {
+                format!("МОСТ: {} → {}", e.name, profile.name)
+            } else {
+                profile.name.clone()
+            };
+            (app, entry, dname)
+        };
+        let config_json = generate_android_runtime_singbox_config_with_bridge(
+            profile,
+            bridge_entry.as_ref(),
+            routing_snapshot,
+        );
         let config_str = serde_json::to_string_pretty(&config_json).map_err(|e| e.to_string())?;
         let config_path = get_app_data_dir().join("active_config.json");
         let _ = fs::write(&config_path, &config_str);
 
-        let app_handle = {
-            let rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-            rt.app_handle
-                .clone()
-                .ok_or_else(|| "Android AppHandle не инициализирован".to_string())?
-        };
         crate::android_vpn::start_vpn(
             &app_handle,
             config_str,
-            profile.name.clone(),
+            display_name,
             profile.id.clone(),
             profile.protocol.clone(),
         )?;
@@ -1426,8 +2321,34 @@ fn hot_reload_or_restart_singbox(
     // and rules_direct.json via fsnotify and dynamically reloads routing table in memory.
     let _ = write_routing_rulesets(routing_snapshot);
 
-    // 2. Persist active_config.json
-    let config_json = generate_singbox_config(profile, routing_snapshot);
+    // 2. Persist active_config.json (preserve Enigma local gateway port and Bridge Entry if active)
+    let (active_enigma_port, bridge_entry) = state_clone
+        .lock()
+        .ok()
+        .map(|rt| {
+            let e_port = rt.enigma_tunnel.as_ref().map(|h| h.local_wg_port);
+            let entry = if rt.bridge_active {
+                rt.bridge_entry_profile_id
+                    .as_deref()
+                    .and_then(|eid| rt.persistent.profiles.iter().find(|p| p.id == eid).cloned())
+            } else {
+                None
+            };
+            (e_port, entry)
+        })
+        .unwrap_or((None, None));
+    let enigma_is_entry = bridge_entry
+        .as_ref()
+        .map(|e| e.protocol == "enigma")
+        .unwrap_or(false);
+    let config_json = generate_singbox_config_with_bridge(
+        profile,
+        bridge_entry.as_ref(),
+        routing_snapshot,
+        if enigma_is_entry { None } else { active_enigma_port },
+        if enigma_is_entry { active_enigma_port } else { None },
+        false,
+    );
     let config_path = get_app_data_dir().join("active_config.json");
     if let Ok(config_str) = serde_json::to_string_pretty(&config_json) {
         let _ = fs::write(&config_path, config_str);
@@ -1533,6 +2454,99 @@ fn hot_reload_or_restart_singbox(
     }
 }
 
+fn sync_awg_vless_sibling(profiles: &mut [VpnProfile], target_id: &str) {
+    let sibling_vless = profiles
+        .iter()
+        .find(|p| p.protocol == "vless" && p.reality_public_key.is_some())
+        .cloned();
+    if let Some(vl) = sibling_vless {
+        if let Some(p_mut) = profiles.iter_mut().find(|p| p.id == target_id) {
+            if p_mut.protocol == "awg_vless" {
+                if p_mut.uuid.as_deref().unwrap_or("").trim().is_empty() {
+                    p_mut.uuid = vl.uuid.clone().or_else(|| Some(vl.password.clone()));
+                }
+                if p_mut.reality_public_key.as_deref().unwrap_or("").trim().is_empty() {
+                    p_mut.reality_public_key = vl.reality_public_key.clone();
+                }
+                if p_mut.reality_short_id.as_deref().unwrap_or("").trim().is_empty() {
+                    p_mut.reality_short_id = vl.reality_short_id.clone();
+                }
+                if p_mut.sni.trim().is_empty() {
+                    p_mut.sni = vl.sni.clone();
+                }
+                if p_mut.vless_port.unwrap_or(0) == 0 {
+                    p_mut.vless_port = Some(vl.port);
+                }
+            }
+        }
+    }
+}
+
+fn validate_profile_credentials(prof: &VpnProfile, label: &str) -> Result<(), String> {
+    if is_awg_protocol(&prof.protocol) {
+        let priv_key = prof
+            .awg_private_key
+            .as_deref()
+            .unwrap_or(&prof.password)
+            .trim();
+        if priv_key.is_empty() {
+            return Err(format!(
+                "В профиле {} («{}») не указан приватный ключ (Private Key).\n\nНажмите значок карандаша ✏️ для ввода Private Key или выберите готовый файл конфигурации (.conf).",
+                label, prof.name
+            ));
+        }
+        let pub_key = prof.awg_public_key.as_deref().unwrap_or("").trim();
+        if pub_key.is_empty() {
+            return Err(format!(
+                "В профиле {} («{}») не указан публичный ключ сервера (Public Key).\n\nУкажите Public Key в настройках профиля (✏️) или импортируйте готовый файл .conf.",
+                label, prof.name
+            ));
+        }
+        if prof.protocol == "awg_vless" {
+            let vless_uid = prof.uuid.as_deref().unwrap_or("").trim();
+            let vless_pbk = prof.reality_public_key.as_deref().unwrap_or("").trim();
+            if vless_uid.is_empty() || vless_pbk.is_empty() {
+                return Err(format!(
+                    "Для гибридного протокола «AWG + VLESS Reality» в профиле {} («{}») необходимы параметры VLESS Reality (UUID и Reality Public Key).",
+                    label, prof.name
+                ));
+            }
+        }
+        if prof.protocol == "enigma" {
+            crate::enigma::ensure_profile_keybook(
+                &get_app_data_dir(),
+                &prof.id,
+                prof.enigma_keybook.as_deref(),
+                prof.enigma_key_path.as_deref(),
+            )?;
+        }
+    } else if prof.protocol == "vless" || prof.protocol == "vless_ws" || prof.protocol == "webrtc" {
+        let uid = prof.uuid.as_deref().unwrap_or(&prof.password).trim();
+        if uid.is_empty() {
+            return Err(format!(
+                "В профиле {} («{}», {}) не указан UUID (пароль). Проверьте настройки профиля.",
+                label,
+                prof.name,
+                prof.protocol.to_uppercase()
+            ));
+        }
+    } else if prof.protocol == "hysteria2"
+        || prof.protocol == "tuic"
+        || prof.protocol == "shadowsocks"
+        || prof.protocol == "shadowtls"
+    {
+        if prof.password.trim().is_empty() {
+            return Err(format!(
+                "В профиле {} («{}», {}) не указан пароль. Проверьте настройки профиля.",
+                label,
+                prof.name,
+                prof.protocol.to_uppercase()
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn connect_vpn_internal(
     state_clone: SharedState,
     profile_id: String,
@@ -1555,82 +2569,14 @@ async fn connect_vpn_internal(
         // 0. Pre-flight check: validate credentials before stopping current connection or attempting port hunting
         {
             let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
-            let sibling_vless = rt
-                .persistent
-                .profiles
-                .iter()
-                .find(|p| p.protocol == "vless" && p.reality_public_key.is_some())
-                .cloned();
-
-            if let Some(p_mut) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile_id) {
-                if p_mut.protocol == "awg_vless" {
-                    let same_srv_vless = sibling_vless.as_ref();
-                    if let Some(vl) = same_srv_vless {
-                        if p_mut.uuid.as_deref().unwrap_or("").trim().is_empty() {
-                            p_mut.uuid = vl.uuid.clone().or_else(|| Some(vl.password.clone()));
-                        }
-                        if p_mut.reality_public_key.as_deref().unwrap_or("").trim().is_empty() {
-                            p_mut.reality_public_key = vl.reality_public_key.clone();
-                        }
-                        if p_mut.reality_short_id.as_deref().unwrap_or("").trim().is_empty() {
-                            p_mut.reality_short_id = vl.reality_short_id.clone();
-                        }
-                        if p_mut.sni.trim().is_empty() {
-                            p_mut.sni = vl.sni.clone();
-                        }
-                        if p_mut.vless_port.unwrap_or(0) == 0 {
-                            p_mut.vless_port = Some(vl.port);
-                        }
-                    }
-                }
-            }
-
+            sync_awg_vless_sibling(&mut rt.persistent.profiles, &profile_id);
             let prof = rt
                 .persistent
                 .profiles
                 .iter()
                 .find(|p| p.id == profile_id)
                 .ok_or_else(|| "Выбранный профиль не найден".to_string())?;
-
-            if is_awg_protocol(&prof.protocol) {
-                let priv_key = prof
-                    .awg_private_key
-                    .as_deref()
-                    .unwrap_or(&prof.password)
-                    .trim();
-                if priv_key.is_empty() {
-                    return Err(
-                        "В профиле AmneziaWG не указан приватный ключ (Private Key).\n\nНажмите значок карандаша ✏️ для ввода Private Key или выберите готовый файл конфигурации через кнопку «Выбрать файл конфига» (.conf)."
-                            .to_string(),
-                    );
-                }
-                let pub_key = prof.awg_public_key.as_deref().unwrap_or("").trim();
-                if pub_key.is_empty() {
-                    return Err(
-                        "В профиле AmneziaWG не указан публичный ключ сервера (Public Key).\n\nУкажите Public Key в настройках профиля (✏️) или импортируйте готовый файл .conf."
-                            .to_string(),
-                    );
-                }
-                if prof.protocol == "awg_vless" {
-                    let vless_uid = prof.uuid.as_deref().unwrap_or("").trim();
-                    let vless_pbk = prof.reality_public_key.as_deref().unwrap_or("").trim();
-                    if vless_uid.is_empty() || vless_pbk.is_empty() {
-                        return Err(
-                            "Для гибридного протокола «AWG + VLESS Reality» необходимы параметры VLESS Reality (UUID и Reality Public Key). Укажите их в настройках профиля (✏️) или разверните сервер с VLESS Reality + AmneziaWG."
-                                .to_string(),
-                        );
-                    }
-                }
-            } else if prof.protocol == "vless" || prof.protocol == "vless_ws" || prof.protocol == "webrtc" {
-                let uid = prof.uuid.as_deref().unwrap_or(&prof.password).trim();
-                if uid.is_empty() {
-                    return Err(format!("В профиле {} не указан UUID (пароль). Проверьте настройки профиля.", prof.protocol.to_uppercase()));
-                }
-            } else if prof.protocol == "hysteria2" || prof.protocol == "tuic" || prof.protocol == "shadowsocks" || prof.protocol == "shadowtls" {
-                if prof.password.trim().is_empty() {
-                    return Err(format!("В профиле {} не указан пароль. Проверьте настройки профиля.", prof.protocol.to_uppercase()));
-                }
-            }
+            validate_profile_credentials(prof, "VPN")?;
         }
 
         // 1. Stop existing process (or reset Android state for in-place reload) and snapshot profile & routing
@@ -1695,6 +2641,7 @@ async fn connect_vpn_internal(
         // 1.5. Amnezia-style automatic UDP listen_port rotation on connect/reconnect
         if is_awg_protocol(&profile.protocol)
             && profile.protocol != "awg_vless"
+            && profile.protocol != "enigma"
             && (!preserve_listen_port
                 || (profile.auto_rotate_listen_port.unwrap_or(true)
                     && profile.listen_port.unwrap_or(0) == 0))
@@ -1769,8 +2716,15 @@ async fn connect_vpn_internal(
             }
         }
 
-        // 1.9. Hysteria2 automatic UDP server port rotation across hop_ports on reconnect/auto-hunt
-        if !preserve_listen_port && profile.protocol == "hysteria2" {
+        // 1.9. Hysteria2 / Enigma automatic UDP server port rotation across hop_ports on reconnect/auto-hunt
+        let has_enigma_hops = profile.protocol == "enigma"
+            && profile
+                .hop_ports
+                .as_deref()
+                .or(profile.awg_hop_ports.as_deref())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+        if !preserve_listen_port && (profile.protocol == "hysteria2" || has_enigma_hops) {
             let candidates = get_profile_candidate_ports(&profile, None, Some(vec![profile.port]), 24);
             if !candidates.is_empty() {
                 let idx = (Uuid::new_v4().as_u128() as usize) % candidates.len();
@@ -1782,6 +2736,7 @@ async fn connect_vpn_internal(
                     }
                     profile.port = new_port;
                     profile.uri = build_profile_uri(&profile);
+                    let proto_label = if profile.protocol == "enigma" { "Enigma" } else { "Hysteria2" };
                     if let Ok(mut rt) = state_clone.lock() {
                         if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile.id) {
                             if p.original_port.is_none() || p.original_port == Some(0) {
@@ -1794,8 +2749,8 @@ async fn connect_vpn_internal(
                         push_log(
                             &mut rt.logs,
                             format!(
-                                "[Hysteria2] Порт подключения изменен при переподключении: {} → {}",
-                                old_port, new_port
+                                "[{}] Порт подключения изменен при переподключении: {} → {}",
+                                proto_label, old_port, new_port
                             ),
                         );
                     }
@@ -1809,7 +2764,10 @@ async fn connect_vpn_internal(
             if let Ok(mut g) = state_clone.lock() {
                 g.port_hunting_status = None;
                 g.active_port = Some(active_port);
-                g.active_listen_port = if is_awg_protocol(&profile.protocol) && profile.protocol != "awg_vless" {
+                g.active_listen_port = if is_awg_protocol(&profile.protocol)
+                    && profile.protocol != "awg_vless"
+                    && profile.protocol != "enigma"
+                {
                     profile.listen_port
                 } else {
                     None
@@ -1817,7 +2775,279 @@ async fn connect_vpn_internal(
             }
         }
 
-        spawn_and_monitor_singbox(&state_clone, &profile, &routing_snapshot, active_port, None)
+        spawn_and_monitor_singbox(&state_clone, &profile, None, &routing_snapshot, active_port, None)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn is_tcp_only_bridge_protocol(protocol: &str) -> bool {
+    protocol == "ssh" || protocol == "shadowtls"
+}
+
+fn is_udp_only_bridge_protocol(protocol: &str) -> bool {
+    matches!(
+        protocol,
+        "wireguard" | "wg" | "amneziawg" | "awg2" | "awg_quic" | "hysteria2" | "tuic"
+    )
+}
+
+async fn connect_bridge_internal(
+    state_clone: SharedState,
+    entry_profile_id: String,
+    exit_profile_id: String,
+    mode: String,
+    split_tunneling: bool,
+    preserve_listen_port: bool,
+) -> Result<VpnStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(not(target_os = "android"))]
+        {
+            let bin_path = get_singbox_bin_path();
+            if !bin_path.exists() {
+                return Err(
+                    "Ядро sing-box.exe еще не установлено. Нажмите «Скачать ядро sing-box» на панели или в настройках."
+                        .to_string(),
+                );
+            }
+        }
+
+        if entry_profile_id.trim().is_empty() || exit_profile_id.trim().is_empty() {
+            return Err("Выберите оба профиля: «Входной мост» и «Выходной сервер».".to_string());
+        }
+        if entry_profile_id == exit_profile_id {
+            return Err("Входной мост и Выходной сервер должны быть разными профилями.".to_string());
+        }
+
+        // 0. Pre-flight check: validate both profiles and protocol compatibility
+        {
+            let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            sync_awg_vless_sibling(&mut rt.persistent.profiles, &entry_profile_id);
+            sync_awg_vless_sibling(&mut rt.persistent.profiles, &exit_profile_id);
+
+            let entry_prof = rt
+                .persistent
+                .profiles
+                .iter()
+                .find(|p| p.id == entry_profile_id)
+                .ok_or_else(|| "Профиль «Входной мост» не найден.".to_string())?
+                .clone();
+            let exit_prof = rt
+                .persistent
+                .profiles
+                .iter()
+                .find(|p| p.id == exit_profile_id)
+                .ok_or_else(|| "Профиль «Выходной сервер» не найден.".to_string())?
+                .clone();
+
+            if exit_prof.protocol == "enigma" {
+                return Err(
+                    "Протокол Enigma не может быть Выходным сервером в режиме моста (он использует локальный UDP-шлюз).\n\nПоставьте Enigma на «Входной мост», а на «Выходной сервер» выберите AWG 3.1, WireGuard, VLESS Reality или Hysteria 2."
+                        .to_string(),
+                );
+            }
+
+            if is_tcp_only_bridge_protocol(&entry_prof.protocol)
+                && is_udp_only_bridge_protocol(&exit_prof.protocol)
+            {
+                return Err(format!(
+                    "Входной мост на TCP-протоколе ({}) не может передавать чистый UDP-выход ({}).\n\nВыберите для Выхода TCP-протокол (VLESS Reality, AWG+VLESS, VLESS WS, WebRTC, Shadowsocks, ShadowTLS) или смените Входной мост на WireGuard / AWG / VLESS / Hysteria 2.",
+                    entry_prof.protocol.to_uppercase(),
+                    exit_prof.protocol.to_uppercase()
+                ));
+            }
+
+            validate_profile_credentials(&entry_prof, "Входного моста")?;
+            validate_profile_credentials(&exit_prof, "Выходного сервера")?;
+        }
+
+        // 1. Stop existing tunnel and snapshot entry, exit & routing
+        let (mut entry_profile, mut exit_profile, routing_snapshot, _had_tracked_child) = {
+            let mut rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
+            let had_child = is_vpn_running(&rt);
+            #[cfg(target_os = "android")]
+            {
+                rt.android_connected = false;
+                rt.android_connecting = true;
+                rt.android_socks_port = None;
+                rt.last_android_error_logged = None;
+                rt.is_handshaking = false;
+                rt.handshake_status = None;
+                rt.up_speed = 0;
+                rt.down_speed = 0;
+                rt.up_bytes = 0;
+                rt.down_bytes = 0;
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                stop_singbox_internal(&mut rt);
+            }
+
+            rt.persistent.selected_profile_id = Some(exit_profile_id.clone());
+            rt.persistent.bridge.enabled = true;
+            rt.persistent.bridge.entry_profile_id = Some(entry_profile_id.clone());
+            rt.persistent.bridge.exit_profile_id = Some(exit_profile_id.clone());
+
+            let entry_prof = rt
+                .persistent
+                .profiles
+                .iter()
+                .find(|p| p.id == entry_profile_id)
+                .ok_or_else(|| "Профиль «Входной мост» не найден.".to_string())?
+                .clone();
+
+            let default_routing = rt.persistent.routing.clone();
+            let (exit_prof, prof_routing) = if let Some(p) = rt
+                .persistent
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == exit_profile_id)
+            {
+                let mut pr = p.routing.clone().unwrap_or(default_routing);
+                pr.mode = mode.clone();
+                pr.split_tunneling = split_tunneling;
+                p.routing = Some(pr.clone());
+                (p.clone(), pr)
+            } else {
+                return Err("Профиль «Выходной сервер» не найден.".to_string());
+            };
+
+            rt.persistent.routing.mode = mode.clone();
+            rt.persistent.routing.split_tunneling = split_tunneling;
+            save_persistent_state(&rt.persistent);
+
+            (entry_prof, exit_prof, prof_routing, had_child)
+        };
+
+        // Ensure any previous sing-box process is terminated
+        #[cfg(target_os = "windows")]
+        {
+            if !_had_tracked_child {
+                let mut kill_cmd = Command::new("taskkill");
+                kill_cmd
+                    .args(["/F", "/IM", "sing-box.exe"])
+                    .creation_flags(CREATE_NO_WINDOW);
+                let _ = kill_cmd.output();
+                thread::sleep(Duration::from_millis(120));
+            } else {
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+
+        // 1.5. Rotate / assign free UDP listen_port for Entry WG/AWG if needed
+        if is_awg_protocol(&entry_profile.protocol)
+            && entry_profile.protocol != "awg_vless"
+            && entry_profile.protocol != "enigma"
+            && (!preserve_listen_port
+                || (entry_profile.auto_rotate_listen_port.unwrap_or(true)
+                    && entry_profile.listen_port.unwrap_or(0) == 0))
+        {
+            let mut exclude = vec![
+                entry_profile.port,
+                exit_profile.port,
+                routing_snapshot.local_mixed_port,
+                routing_snapshot.clash_api_port,
+                2081,
+            ];
+            if let Some(old_lp) = entry_profile.listen_port.filter(|&p| p > 0) {
+                exclude.push(old_lp);
+            }
+            if let Some(exit_lp) = exit_profile.listen_port.filter(|&p| p > 0) {
+                exclude.push(exit_lp);
+            }
+            let new_lp = pick_random_free_udp_port(&exclude);
+            entry_profile.listen_port = Some(new_lp);
+            entry_profile.uri = build_profile_uri(&entry_profile);
+            if let Ok(mut rt) = state_clone.lock() {
+                if let Some(p) = rt
+                    .persistent
+                    .profiles
+                    .iter_mut()
+                    .find(|p| p.id == entry_profile.id)
+                {
+                    p.listen_port = Some(new_lp);
+                    p.uri = entry_profile.uri.clone();
+                }
+                save_persistent_state(&rt.persistent);
+            }
+        }
+
+        // 1.6. Prevent local WG listen_port collision between Entry and Exit if both are WG/AWG
+        if is_awg_protocol(&exit_profile.protocol)
+            && exit_profile.protocol != "awg_vless"
+            && exit_profile.protocol != "enigma"
+        {
+            let entry_lp = entry_profile.listen_port.unwrap_or(0);
+            let exit_lp = exit_profile.listen_port.unwrap_or(0);
+            if (entry_lp > 0 && exit_lp == entry_lp) || (!preserve_listen_port && exit_lp > 0) {
+                let mut exclude = vec![
+                    entry_profile.port,
+                    exit_profile.port,
+                    routing_snapshot.local_mixed_port,
+                    routing_snapshot.clash_api_port,
+                    2081,
+                ];
+                if entry_lp > 0 {
+                    exclude.push(entry_lp);
+                }
+                if exit_lp > 0 {
+                    exclude.push(exit_lp);
+                }
+                let new_exit_lp = pick_random_free_udp_port(&exclude);
+                exit_profile.listen_port = Some(new_exit_lp);
+                exit_profile.uri = build_profile_uri(&exit_profile);
+                if let Ok(mut rt) = state_clone.lock() {
+                    if let Some(p) = rt
+                        .persistent
+                        .profiles
+                        .iter_mut()
+                        .find(|p| p.id == exit_profile.id)
+                    {
+                        p.listen_port = Some(new_exit_lp);
+                        p.uri = exit_profile.uri.clone();
+                    }
+                    save_persistent_state(&rt.persistent);
+                }
+            }
+        }
+
+        // 1.8. QUIC v1 Initial + WebRTC STUN UDP Pre-Warming if Entry is awg_quic
+        if entry_profile.protocol == "awg_quic" {
+            let lp = entry_profile.listen_port.unwrap_or_else(|| {
+                let p = pick_random_free_udp_port(&[entry_profile.port, 2080, 2081, 9090]);
+                entry_profile.listen_port = Some(p);
+                p
+            });
+            if send_udp_quic_stun_prewarm(lp, &entry_profile.server, entry_profile.port) {
+                if let Ok(mut rt) = state_clone.lock() {
+                    push_log(
+                        &mut rt.logs,
+                        format!(
+                            "[Мост 2-Hop / QUIC Pre-Warm] Отправлены пакеты инициализации на Входной мост {}:{} с ListenPort {}",
+                            entry_profile.server, entry_profile.port, lp
+                        ),
+                    );
+                }
+            }
+        }
+
+        let active_port = exit_profile.port;
+        {
+            if let Ok(mut g) = state_clone.lock() {
+                g.port_hunting_status = None;
+                g.active_port = Some(active_port);
+                g.active_listen_port = entry_profile.listen_port;
+            }
+        }
+
+        spawn_and_monitor_singbox(
+            &state_clone,
+            &exit_profile,
+            Some(&entry_profile),
+            &routing_snapshot,
+            active_port,
+            None,
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1906,6 +3136,112 @@ async fn connect_vpn(
 }
 
 #[tauri::command]
+async fn connect_bridge(
+    app: AppHandle,
+    entry_profile_id: String,
+    exit_profile_id: String,
+    mode: String,
+    split_tunneling: bool,
+    state: State<'_, SharedState>,
+) -> Result<VpnStatus, String> {
+    use tauri::Emitter;
+    let res = connect_bridge_internal(
+        state.inner().clone(),
+        entry_profile_id,
+        exit_profile_id,
+        mode,
+        split_tunneling,
+        true,
+    )
+    .await?;
+    let _ = app.emit("state-updated", ());
+    Ok(res)
+}
+
+#[tauri::command]
+fn save_bridge_config(
+    app: AppHandle,
+    config: BridgeConfig,
+    state: State<'_, SharedState>,
+) -> Result<BridgeConfig, String> {
+    use tauri::Emitter;
+    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    rt.persistent.bridge = config.clone();
+    save_persistent_state(&rt.persistent);
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(config)
+}
+
+#[tauri::command]
+fn save_bridge_pair_preset(
+    app: AppHandle,
+    mut preset: BridgePairPreset,
+    state: State<'_, SharedState>,
+) -> Result<BridgeConfig, String> {
+    use tauri::Emitter;
+    if preset.entry_profile_id.trim().is_empty() || preset.exit_profile_id.trim().is_empty() {
+        return Err("Выберите Входной мост и Выходной сервер перед сохранением связки.".to_string());
+    }
+    if preset.entry_profile_id == preset.exit_profile_id {
+        return Err("Входной мост и Выходной сервер должны быть разными профилями.".to_string());
+    }
+    if preset.id.trim().is_empty() {
+        preset.id = Uuid::new_v4().to_string();
+    }
+    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    if preset.name.trim().is_empty() {
+        let entry_name = rt
+            .persistent
+            .profiles
+            .iter()
+            .find(|p| p.id == preset.entry_profile_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Вход");
+        let exit_name = rt
+            .persistent
+            .profiles
+            .iter()
+            .find(|p| p.id == preset.exit_profile_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Выход");
+        preset.name = format!("{} → {}", entry_name, exit_name);
+    }
+    if let Some(pos) = rt
+        .persistent
+        .bridge
+        .saved_pairs
+        .iter()
+        .position(|p| p.id == preset.id)
+    {
+        rt.persistent.bridge.saved_pairs[pos] = preset;
+    } else {
+        rt.persistent.bridge.saved_pairs.push(preset);
+    }
+    save_persistent_state(&rt.persistent);
+    let out = rt.persistent.bridge.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(out)
+}
+
+#[tauri::command]
+fn delete_bridge_pair_preset(
+    app: AppHandle,
+    pair_id: String,
+    state: State<'_, SharedState>,
+) -> Result<BridgeConfig, String> {
+    use tauri::Emitter;
+    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    rt.persistent.bridge.saved_pairs.retain(|p| p.id != pair_id);
+    save_persistent_state(&rt.persistent);
+    let out = rt.persistent.bridge.clone();
+    drop(rt);
+    let _ = app.emit("state-updated", ());
+    Ok(out)
+}
+
+#[tauri::command]
 async fn reconnect_vpn(
     profile_id: Option<String>,
     mode: Option<String>,
@@ -1913,9 +3249,10 @@ async fn reconnect_vpn(
     state: State<'_, SharedState>,
 ) -> Result<VpnStatus, String> {
     let state_clone = state.inner().clone();
-    let (pid, resolved_mode, resolved_split) = {
+    let (bridge_entry_opt, pid, resolved_mode, resolved_split) = {
         let rt = state_clone.lock().map_err(|_| "Lock error".to_string())?;
         let pid = profile_id
+            .clone()
             .or_else(|| rt.active_profile_id.clone())
             .or_else(|| rt.persistent.selected_profile_id.clone())
             .or_else(|| rt.persistent.profiles.first().map(|p| p.id.clone()))
@@ -1927,12 +3264,31 @@ async fn reconnect_vpn(
             .find(|p| p.id == pid)
             .and_then(|p| p.routing.as_ref())
             .unwrap_or(&rt.persistent.routing);
+        let bridge_entry = if rt.bridge_active
+            && (profile_id.is_none() || profile_id.as_deref() == rt.active_profile_id.as_deref())
+        {
+            rt.bridge_entry_profile_id.clone()
+        } else {
+            None
+        };
         (
+            bridge_entry,
             pid,
             mode.unwrap_or_else(|| prof_routing.mode.clone()),
             split_tunneling.unwrap_or(prof_routing.split_tunneling),
         )
     };
+    if let Some(entry_id) = bridge_entry_opt {
+        return connect_bridge_internal(
+            state_clone,
+            entry_id,
+            pid,
+            resolved_mode,
+            resolved_split,
+            false,
+        )
+        .await;
+    }
     connect_vpn_internal(state_clone, pid, resolved_mode, resolved_split, false).await
 }
 
@@ -2303,7 +3659,9 @@ async fn delete_profile(app: AppHandle, id: String, state: State<'_, SharedState
     use tauri::Emitter;
     let (stop_app, res) = {
         let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
-        let stop_app = if rt.active_profile_id.as_deref() == Some(&id) {
+        let stop_app = if rt.active_profile_id.as_deref() == Some(&id)
+            || rt.bridge_entry_profile_id.as_deref() == Some(&id)
+        {
             stop_singbox_in_memory(&mut rt)
         } else {
             None
@@ -2312,6 +3670,18 @@ async fn delete_profile(app: AppHandle, id: String, state: State<'_, SharedState
         if rt.persistent.selected_profile_id.as_deref() == Some(&id) {
             rt.persistent.selected_profile_id = rt.persistent.profiles.first().map(|p| p.id.clone());
         }
+        if rt.persistent.bridge.entry_profile_id.as_deref() == Some(&id) {
+            rt.persistent.bridge.entry_profile_id = None;
+            rt.persistent.bridge.enabled = false;
+        }
+        if rt.persistent.bridge.exit_profile_id.as_deref() == Some(&id) {
+            rt.persistent.bridge.exit_profile_id = None;
+            rt.persistent.bridge.enabled = false;
+        }
+        rt.persistent
+            .bridge
+            .saved_pairs
+            .retain(|pair| pair.entry_profile_id != id && pair.exit_profile_id != id);
         save_persistent_state(&rt.persistent);
         sync_android_tile_from_state(&rt);
         (stop_app, rt.persistent.profiles.clone())
@@ -2821,6 +4191,179 @@ async fn export_awg_conf_file(
 }
 
 #[tauri::command]
+async fn export_enigma_keybook(
+    app: AppHandle,
+    profile_id: String,
+    profile: Option<VpnProfile>,
+    filename: Option<String>,
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
+    let (prof, kb) = {
+        let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        let prof = rt
+            .persistent
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id)
+            .cloned()
+            .or(profile)
+            .ok_or_else(|| "Профиль не найден".to_string())?;
+        let (kb, _kb_path) = crate::enigma::ensure_profile_keybook(
+            &get_app_data_dir(),
+            &prof.id,
+            prof.enigma_keybook.as_deref(),
+            prof.enigma_key_path.as_deref(),
+        )?;
+        (prof, kb)
+    };
+
+    let clean_name = filename
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            let stem = clean_export_stem(
+                prof.name.split('—').next().unwrap_or(&prof.name).split('-').next().unwrap_or(&prof.name),
+                "enigma",
+            );
+            format!("{}.nvkey", stem)
+        });
+
+    #[cfg(target_os = "android")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            crate::android_vpn::save_file_bytes(
+                &app,
+                clean_name,
+                "application/octet-stream".to_string(),
+                &kb.raw,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let safe_name = clean_name.replace('"', "").replace('\'', "");
+        let chosen_path = tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+            let ps_script = format!(
+                r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.SaveFileDialog
+$dlg.Title = "Сохранить файл чтения Enigma (.nvkey)"
+$dlg.Filter = "Ключевая книга Enigma (*.nvkey)|*.nvkey|Все файлы (*.*)|*.*"
+$dlg.AddExtension = $true
+$dlg.DefaultExt = "nvkey"
+$dlg.FileName = "{}"
+$dlg.InitialDirectory = [Environment]::GetFolderPath('Desktop')
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+    Write-Output $dlg.FileName
+}}
+"#,
+                safe_name
+            );
+            let mut cmd = Command::new("powershell");
+            cmd.args(["-NoProfile", "-Sta", "-Command", &ps_script]);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let out = cmd.output().map_err(|e| e.to_string())?;
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        if let Some(ref dest) = chosen_path {
+            kb.save_to_file(std::path::Path::new(dest))?;
+            if let Ok(mut rt) = state.lock() {
+                if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == prof.id) {
+                    p.enigma_key_path = Some(dest.clone());
+                    p.enigma_keybook = Some(kb.to_base64());
+                    p.uri = build_profile_uri(p);
+                    save_persistent_state(&rt.persistent);
+                }
+            }
+        }
+        Ok(chosen_path)
+    }
+}
+
+#[tauri::command]
+async fn pick_and_import_enigma_keybook(
+    app: AppHandle,
+    profile_id: String,
+    state: State<'_, SharedState>,
+) -> Result<Option<VpnProfile>, String> {
+    use tauri::Emitter;
+
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, profile_id, state);
+        return Err("Импорт отдельного .nvkey поддерживается в ПК-версии (2.2.1).".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let file_path = tauri::async_runtime::spawn_blocking(|| -> Result<Option<String>, String> {
+            let ps_script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+Add-Type -AssemblyName System.Windows.Forms
+$dlg = New-Object System.Windows.Forms.OpenFileDialog
+$dlg.Title = "Выберите файл чтения Enigma (.nvkey)"
+$dlg.Filter = "Ключевая книга Enigma (*.nvkey)|*.nvkey|Все файлы (*.*)|*.*"
+if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $dlg.FileName
+}
+"#;
+            let mut cmd = Command::new("powershell");
+            cmd.args(["-NoProfile", "-Sta", "-Command", ps_script]);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let out = cmd.output().map_err(|e| e.to_string())?;
+            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if text.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(text))
+            }
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        let Some(path_str) = file_path else {
+            return Ok(None);
+        };
+
+        let kb = crate::enigma::EnigmaKeybook::from_file(std::path::Path::new(&path_str))?;
+        let internal_path = get_app_data_dir().join("enigma_keys").join(format!("{}.nvkey", profile_id));
+        let _ = kb.save_to_file(&internal_path);
+
+        let updated = {
+            let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+            let prof = rt
+                .persistent
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == profile_id)
+                .ok_or_else(|| "Профиль не найден".to_string())?;
+            prof.enigma_keybook = Some(kb.to_base64());
+            prof.enigma_key_path = Some(path_str);
+            prof.uri = build_profile_uri(prof);
+            let cloned = prof.clone();
+            save_persistent_state(&rt.persistent);
+            cloned
+        };
+        let _ = app.emit("state-updated", ());
+        Ok(Some(updated))
+    }
+}
+
+#[tauri::command]
 fn save_routing_config(
     app: AppHandle,
     routing: RoutingConfig,
@@ -3278,6 +4821,607 @@ async fn deploy_vps_server(
     }
     let _ = app.emit("state-updated", ());
     Ok(result)
+}
+
+fn build_single_protocol_vps_creds(
+    host: &str,
+    ssh_port: u16,
+    username: &str,
+    password: &str,
+    protocol: &str,
+    ssh_proxy: &str,
+) -> VpsCredentials {
+    let proto = protocol.trim().to_lowercase();
+    VpsCredentials {
+        host: host.trim().to_string(),
+        ssh_port: if ssh_port == 0 { 22 } else { ssh_port },
+        username: if username.trim().is_empty() {
+            "root".to_string()
+        } else {
+            username.trim().to_string()
+        },
+        password: password.to_string(),
+        vless_port: 443,
+        hy2_port: 8443,
+        tuic_port: 8444,
+        ss_port: 8388,
+        ss_method: "2022-blake3-aes-128-gcm".to_string(),
+        awg_port: 0, // Auto-randomized by ssh_deployer
+        awg_hop_ports: "20000:65000".to_string(),
+        awg_jc: None,
+        awg_jmin: None,
+        awg_jmax: None,
+        awg_s1: None,
+        awg_s2: None,
+        awg_s3: None,
+        awg_s4: None,
+        awg_h1: None,
+        awg_h2: None,
+        awg_h3: None,
+        awg_h4: None,
+        awg_i1: None,
+        awg_i2: None,
+        awg_i3: None,
+        awg_i4: None,
+        awg_header_protection_key: None,
+        awg_rekey_after_time: None,
+        awg_rekey_timeout: None,
+        awg_reject_after_time: None,
+        awg_keepalive_timeout: None,
+        awg_max_handshake_attempts: None,
+        awg_random_trailers: None,
+        awg_disable_cookies: None,
+        awg_persistent_keepalive: None,
+        awg_port_probing: None,
+        deploy_awg2: proto == "awg2",
+        awg2_port: 0,
+        awg2_hop_ports: "20000:65000".to_string(),
+        awg2_jc: None,
+        awg2_jmin: None,
+        awg2_jmax: None,
+        awg2_s1: None,
+        awg2_s2: None,
+        awg2_h1: None,
+        awg2_h2: None,
+        awg2_h3: None,
+        awg2_h4: None,
+        sni: "bing.com".to_string(),
+        reality_sni: "www.microsoft.com".to_string(),
+        deploy_vless: proto == "vless",
+        deploy_hy2: proto == "hysteria2",
+        deploy_tuic: proto == "tuic",
+        deploy_ss: proto == "shadowsocks",
+        deploy_awg: proto == "amneziawg",
+        deploy_ssh: proto == "ssh",
+        deploy_shadowtls: proto == "shadowtls",
+        shadowtls_port: 8443,
+        shadowtls_sni: "www.microsoft.com".to_string(),
+        deploy_vless_ws: proto == "vless_ws",
+        vless_ws_port: 2096,
+        cdn_domain: None,
+        deploy_webrtc: proto == "webrtc",
+        webrtc_port: 3478,
+        deploy_awg_quic: proto == "awg_quic",
+        deploy_awg_vless: proto == "awg_vless",
+        deploy_enigma: proto == "enigma",
+        enigma_port: 0,
+        enigma_hop_ports: "20000:65000".to_string(),
+        enable_salamander: true,
+        enable_port_hopping: true,
+        ssh_proxy: ssh_proxy.trim().to_string(),
+    }
+}
+
+#[tauri::command]
+async fn deploy_bridge_pair(
+    app: AppHandle,
+    req: BridgePairDeployRequest,
+    state: State<'_, SharedState>,
+) -> Result<BridgePairDeployResult, String> {
+    use tauri::Emitter;
+
+    let emit_b = |msg: &str| {
+        let _ = app.emit("bridge-deploy-log", msg.to_string());
+    };
+
+    let entry_host = req.entry_host.trim().to_string();
+    let exit_host = req.exit_host.trim().to_string();
+    let entry_user = if req.entry_username.trim().is_empty() {
+        "root".to_string()
+    } else {
+        req.entry_username.trim().to_string()
+    };
+    let exit_user = if req.exit_username.trim().is_empty() {
+        "root".to_string()
+    } else {
+        req.exit_username.trim().to_string()
+    };
+    let entry_port = if req.entry_ssh_port == 0 { 22 } else { req.entry_ssh_port };
+    let exit_port = if req.exit_ssh_port == 0 { 22 } else { req.exit_ssh_port };
+    let entry_proto = req.entry_protocol.trim().to_lowercase();
+    let exit_proto = req.exit_protocol.trim().to_lowercase();
+
+    if entry_host.is_empty() || req.entry_password.trim().is_empty() {
+        return Err("Заполните IP-адрес и SSH-пароль для Сервера 1 (Входной мост).".to_string());
+    }
+    if exit_host.is_empty() || req.exit_password.trim().is_empty() {
+        return Err("Заполните IP-адрес и SSH-пароль для Сервера 2 (Выходной сервер).".to_string());
+    }
+    if entry_host == exit_host {
+        return Err("IP-адреса Входного моста и Выходного сервера должны отличаться.".to_string());
+    }
+    if exit_proto == "enigma" {
+        return Err("Протокол Enigma можно использовать только на Входном мосте (Сервер 1). Для Выходного сервера выберите AmneziaWG 3.1, VLESS Reality, Hysteria 2 или TUIC v5.".to_string());
+    }
+    if is_tcp_only_bridge_protocol(&entry_proto) && is_udp_only_bridge_protocol(&exit_proto) {
+        return Err(format!(
+            "TCP-протокол на Входе ({}) не передаёт чистый UDP на Выходе ({}). Выберите на Вход VLESS Reality / AmneziaWG / Hysteria 2 или на Выход TCP-протокол (VLESS Reality / AWG+VLESS / Shadowsocks).",
+            entry_proto.to_uppercase(),
+            exit_proto.to_uppercase()
+        ));
+    }
+
+    // Save non-secret server parameters immediately so user doesn't have to re-enter them
+    {
+        if let Ok(mut rt) = state.lock() {
+            rt.persistent.bridge.last_entry_host = Some(entry_host.clone());
+            rt.persistent.bridge.last_entry_ssh_port = Some(entry_port);
+            rt.persistent.bridge.last_entry_username = Some(entry_user.clone());
+            rt.persistent.bridge.last_entry_protocol = Some(entry_proto.clone());
+            rt.persistent.bridge.last_exit_host = Some(exit_host.clone());
+            rt.persistent.bridge.last_exit_ssh_port = Some(exit_port);
+            rt.persistent.bridge.last_exit_username = Some(exit_user.clone());
+            rt.persistent.bridge.last_exit_protocol = Some(exit_proto.clone());
+            save_persistent_state(&rt.persistent);
+        }
+    }
+
+    let clean_pair_name = req.pair_name.trim().to_string();
+    let resolved_pair_name = if clean_pair_name.is_empty() {
+        format!("Мост {} → {}", entry_host, exit_host)
+    } else {
+        clean_pair_name.clone()
+    };
+
+    // =========================================================================
+    // STAGE 1/3: Deploy Server 1 (Entry Bridge)
+    // =========================================================================
+    emit_b(&format!(
+        "═══ [Этап 1/3] Настройка Входного моста: {} ({}) ═══",
+        entry_host,
+        entry_proto.to_uppercase()
+    ));
+    let entry_creds = build_single_protocol_vps_creds(
+        &entry_host,
+        entry_port,
+        &entry_user,
+        &req.entry_password,
+        &entry_proto,
+        "",
+    );
+    let entry_res = ssh_deployer::deploy_vps(&app, &entry_creds)
+        .await
+        .map_err(|e| format!("Ошибка настройки Входного моста ({}): {}", entry_host, e))?;
+
+    let mut entry_profile = entry_res
+        .created_profiles
+        .iter()
+        .find(|p| p.protocol == entry_proto)
+        .or_else(|| entry_res.created_profiles.first())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Входной мост ({}) настроен, но профиль не был создан.",
+                entry_host
+            )
+        })?;
+
+    entry_profile.name = if clean_pair_name.is_empty() {
+        format!("Мост Вход • {}", entry_host)
+    } else {
+        format!("{} [Вход]", clean_pair_name)
+    };
+    entry_profile.uri = build_profile_uri(&entry_profile);
+
+    {
+        if let Ok(mut rt) = state.lock() {
+            for prof in &entry_res.created_profiles {
+                let mut p_save = prof.clone();
+                if p_save.id == entry_profile.id {
+                    p_save = entry_profile.clone();
+                }
+                rt.persistent.profiles.retain(|p| {
+                    !(p.server == p_save.server
+                        && p.port == p_save.port
+                        && p.protocol == p_save.protocol)
+                });
+                rt.persistent.profiles.push(p_save);
+            }
+            if let Some(new_p) = entry_res.new_ssh_port {
+                rt.persistent.bridge.last_entry_ssh_port = Some(new_p);
+            }
+            save_persistent_state(&rt.persistent);
+        }
+    }
+    let _ = app.emit("state-updated", ());
+    emit_b(&format!(
+        "✓ Входной мост готов: «{}» ({} @ {}:{})",
+        entry_profile.name,
+        entry_profile.protocol.to_uppercase(),
+        entry_profile.server,
+        entry_profile.port
+    ));
+
+    // =========================================================================
+    // STAGE 2/3: Deploy Server 2 (Exit Server) — with automatic Bridge SSH Assist
+    // =========================================================================
+    emit_b(&format!(
+        "═══ [Этап 2/3] Настройка Выходного сервера: {} ({}) ═══",
+        exit_host,
+        exit_proto.to_uppercase()
+    ));
+
+    let mut exit_ssh_proxy = String::new();
+    let mut started_temp_entry_tunnel = false;
+
+    // Quick SSH reachability probe for Server 2; if blocked by ISP, route SSH via Server 1!
+    match ssh_deployer::test_single_endpoint(
+        &app,
+        &exit_host,
+        exit_port,
+        &exit_user,
+        &req.exit_password,
+        "",
+    )
+    .await
+    {
+        Ok(_) => {
+            emit_b(&format!(
+                "✓ Выходной сервер {} доступен по SSH напрямую.",
+                exit_host
+            ));
+        }
+        Err(err) if err.contains("Неверный логин или пароль SSH") => {
+            return Err(format!(
+                "Ошибка авторизации на Выходном сервере ({}): {}",
+                exit_host, err
+            ));
+        }
+        Err(direct_err) => {
+            emit_b(&format!(
+                "⚠ Прямой SSH к {} не прошёл ({}). Запускаем временный туннель через Входной мост {} для настройки Выходного сервера...",
+                exit_host, direct_err, entry_host
+            ));
+            let state_clone = state.inner().clone();
+            match connect_vpn_internal(
+                state_clone,
+                entry_profile.id.clone(),
+                "system_proxy".to_string(),
+                false,
+                true,
+            )
+            .await
+            {
+                Ok(_) => {
+                    started_temp_entry_tunnel = true;
+                    // Wait for local SOCKS5 proxy on 127.0.0.1:2081 to become ready
+                    let mut proxy_ready = false;
+                    for _ in 0..20 {
+                        if let Ok(addr) = "127.0.0.1:2081".parse::<SocketAddr>() {
+                            if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+                                proxy_ready = true;
+                                break;
+                            }
+                        }
+                        tokio::time::sleep(Duration::from_millis(350)).await;
+                    }
+                    if is_awg_protocol(&entry_profile.protocol) {
+                        tokio::time::sleep(Duration::from_millis(1200)).await;
+                    }
+                    if proxy_ready {
+                        exit_ssh_proxy = "socks5://127.0.0.1:2081".to_string();
+                        emit_b("✓ Временный туннель через Входной мост готов (127.0.0.1:2081). Подключаемся к Выходному серверу...");
+                    } else {
+                        emit_b("⚠ Временный прокси 127.0.0.1:2081 не ответил вовремя, пробуем продолжить настройку...");
+                    }
+                }
+                Err(tun_err) => {
+                    emit_b(&format!(
+                        "⚠ Не удалось поднять временный туннель через Входной мост ({}), пробуем стандартное подключение...",
+                        tun_err
+                    ));
+                }
+            }
+        }
+    }
+
+    let exit_creds = build_single_protocol_vps_creds(
+        &exit_host,
+        exit_port,
+        &exit_user,
+        &req.exit_password,
+        &exit_proto,
+        &exit_ssh_proxy,
+    );
+
+    let exit_res = match ssh_deployer::deploy_vps(&app, &exit_creds).await {
+        Ok(r) => r,
+        Err(e) => {
+            if started_temp_entry_tunnel {
+                let stop_app = if let Ok(mut rt) = state.lock() {
+                    stop_singbox_in_memory(&mut rt)
+                } else {
+                    None
+                };
+                stop_android_vpn_if_needed(stop_app).await;
+            }
+            return Err(format!(
+                "Входной мост ({}) настроен и сохранён, но возникла ошибка на Выходном сервере ({}): {}",
+                entry_host, exit_host, e
+            ));
+        }
+    };
+
+    let mut exit_profile = exit_res
+        .created_profiles
+        .iter()
+        .find(|p| p.protocol == exit_proto)
+        .or_else(|| exit_res.created_profiles.first())
+        .cloned()
+        .ok_or_else(|| {
+            format!(
+                "Выходной сервер ({}) настроен, но профиль не был создан.",
+                exit_host
+            )
+        })?;
+
+    exit_profile.name = if clean_pair_name.is_empty() {
+        format!("Мост Выход • {}", exit_host)
+    } else {
+        format!("{} [Выход]", clean_pair_name)
+    };
+    exit_profile.uri = build_profile_uri(&exit_profile);
+
+    // =========================================================================
+    // STAGE 3/3: Save Exit profile, bind Bridge Pair & optionally auto-connect
+    // =========================================================================
+    let (saved_pair_opt, connect_mode, connect_split) = {
+        let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        for prof in &exit_res.created_profiles {
+            let mut p_save = prof.clone();
+            if p_save.id == exit_profile.id {
+                p_save = exit_profile.clone();
+            }
+            rt.persistent.profiles.retain(|p| {
+                !(p.server == p_save.server
+                    && p.port == p_save.port
+                    && p.protocol == p_save.protocol)
+            });
+            rt.persistent.profiles.push(p_save);
+        }
+        if let Some(new_p) = exit_res.new_ssh_port {
+            rt.persistent.bridge.last_exit_ssh_port = Some(new_p);
+        }
+        rt.persistent.bridge.entry_profile_id = Some(entry_profile.id.clone());
+        rt.persistent.bridge.exit_profile_id = Some(exit_profile.id.clone());
+        rt.persistent.selected_profile_id = Some(exit_profile.id.clone());
+
+        let saved_pair = if req.save_pair_preset {
+            let preset = BridgePairPreset {
+                id: Uuid::new_v4().to_string(),
+                name: resolved_pair_name.clone(),
+                entry_profile_id: entry_profile.id.clone(),
+                exit_profile_id: exit_profile.id.clone(),
+            };
+            // Avoid duplicate pair for exact same entry+exit
+            rt.persistent.bridge.saved_pairs.retain(|p| {
+                !(p.entry_profile_id == preset.entry_profile_id
+                    && p.exit_profile_id == preset.exit_profile_id)
+            });
+            rt.persistent.bridge.saved_pairs.push(preset.clone());
+            Some(preset)
+        } else {
+            None
+        };
+
+        save_persistent_state(&rt.persistent);
+        let mode = rt.persistent.routing.mode.clone();
+        let split = rt.persistent.routing.split_tunneling;
+        (saved_pair, mode, split)
+    };
+
+    let _ = app.emit("state-updated", ());
+    emit_b(&format!(
+        "✓ Выходной сервер готов: «{}» ({} @ {}:{})",
+        exit_profile.name,
+        exit_profile.protocol.to_uppercase(),
+        exit_profile.server,
+        exit_profile.port
+    ));
+
+    let mut auto_connected = false;
+    if req.auto_connect_after_deploy {
+        emit_b(&format!(
+            "═══ [Этап 3/3] Запуск готового 2-Hop Моста: {} → {} ═══",
+            entry_profile.name, exit_profile.name
+        ));
+        match connect_bridge_internal(
+            state.inner().clone(),
+            entry_profile.id.clone(),
+            exit_profile.id.clone(),
+            connect_mode,
+            connect_split,
+            true,
+        )
+        .await
+        {
+            Ok(st) if st.connected || st.is_connecting => {
+                auto_connected = true;
+                emit_b("✓ 2-Hop Мост успешно подключён и готов к работе!");
+            }
+            Ok(_) => {
+                emit_b("⚠ Профили созданы и связаны, но автоподключение не завершилось. Нажмите «Подключить мост» вручную.");
+            }
+            Err(e) => {
+                emit_b(&format!(
+                    "⚠ Профили созданы и связаны, но при автозапуске моста возникла ошибка: {}",
+                    e
+                ));
+            }
+        }
+    } else if started_temp_entry_tunnel {
+        let stop_app = if let Ok(mut rt) = state.lock() {
+            stop_singbox_in_memory(&mut rt)
+        } else {
+            None
+        };
+        stop_android_vpn_if_needed(stop_app).await;
+    }
+
+    let _ = app.emit("state-updated", ());
+    let summary_msg = if auto_connected {
+        format!(
+            "Связка «{}» настроена и подключена ({} → {})!",
+            resolved_pair_name, entry_host, exit_host
+        )
+    } else {
+        format!(
+            "Связка «{}» успешно настроена ({} → {}) и готова к подключению!",
+            resolved_pair_name, entry_host, exit_host
+        )
+    };
+
+    Ok(BridgePairDeployResult {
+        success: true,
+        message: summary_msg,
+        entry_profile,
+        exit_profile,
+        saved_pair: saved_pair_opt,
+        entry_new_ssh_port: entry_res.new_ssh_port,
+        exit_new_ssh_port: exit_res.new_ssh_port,
+        auto_connected,
+    })
+}
+
+#[tauri::command]
+async fn create_bridge_client_config(
+    app: AppHandle,
+    req: CreateBridgeClientRequest,
+    state: State<'_, SharedState>,
+) -> Result<BridgeClientConfig, String> {
+    use tauri::Emitter;
+
+    let exit_profile = {
+        let rt = state.lock().map_err(|_| "State lock error".to_string())?;
+        rt.persistent
+            .profiles
+            .iter()
+            .find(|p| p.id == req.exit_profile_id)
+            .cloned()
+            .ok_or_else(|| "Выбранный Выходной сервер не найден в профилях.".to_string())?
+    };
+
+    // Remember non-secret Entry VPS SSH metadata
+    {
+        if let Ok(mut rt) = state.lock() {
+            if !req.entry_host.trim().is_empty() {
+                rt.persistent.bridge.last_entry_host = Some(req.entry_host.trim().to_string());
+            }
+            if req.entry_ssh_port > 0 {
+                rt.persistent.bridge.last_entry_ssh_port = Some(req.entry_ssh_port);
+            }
+            if !req.entry_username.trim().is_empty() {
+                rt.persistent.bridge.last_entry_username =
+                    Some(req.entry_username.trim().to_string());
+            }
+            save_persistent_state(&rt.persistent);
+        }
+    }
+
+    let created = ssh_deployer::deploy_bridge_client_gateway(&app, &req, &exit_profile).await?;
+
+    {
+        let mut rt = state.lock().map_err(|_| "State lock error".to_string())?;
+        rt.persistent
+            .bridge
+            .client_configs
+            .retain(|c| c.id != created.id);
+        rt.persistent.bridge.client_configs.insert(0, created.clone());
+        save_persistent_state(&rt.persistent);
+    }
+
+    let _ = app.emit("state-updated", ());
+    Ok(created)
+}
+
+#[tauri::command]
+async fn delete_bridge_client_config(
+    app: AppHandle,
+    req: DeleteBridgeClientRequest,
+    state: State<'_, SharedState>,
+) -> Result<String, String> {
+    use tauri::Emitter;
+
+    let existing = {
+        let rt = state.lock().map_err(|_| "State lock error".to_string())?;
+        rt.persistent
+            .bridge
+            .client_configs
+            .iter()
+            .find(|c| c.id == req.config_id)
+            .cloned()
+            .ok_or_else(|| "Конфигурация моста не найдена.".to_string())?
+    };
+
+    let mut msg = format!("Конфигурация «{}» удалена из списка.", existing.name);
+    if req.remove_from_server {
+        if req.entry_password.trim().is_empty() {
+            return Err(
+                "Введите SSH-пароль Входного моста, чтобы остановить и удалить шлюз на сервере."
+                    .to_string(),
+            );
+        }
+        msg = ssh_deployer::remove_bridge_client_gateway(&app, &existing, &req.entry_password)
+            .await?;
+    }
+
+    {
+        let mut rt = state.lock().map_err(|_| "State lock error".to_string())?;
+        rt.persistent
+            .bridge
+            .client_configs
+            .retain(|c| c.id != req.config_id);
+        save_persistent_state(&rt.persistent);
+    }
+
+    let _ = app.emit("state-updated", ());
+    Ok(msg)
+}
+
+#[tauri::command]
+fn export_bridge_router_singbox_json(
+    entry_profile_id: String,
+    exit_profile_id: String,
+    state: State<'_, SharedState>,
+) -> Result<String, String> {
+    let rt = state.lock().map_err(|_| "State lock error".to_string())?;
+    let entry = rt
+        .persistent
+        .profiles
+        .iter()
+        .find(|p| p.id == entry_profile_id)
+        .ok_or_else(|| "Профиль Входного моста не найден.".to_string())?;
+    let exit = rt
+        .persistent
+        .profiles
+        .iter()
+        .find(|p| p.id == exit_profile_id)
+        .ok_or_else(|| "Профиль Выходного сервера не найден.".to_string())?;
+    if entry.protocol == "enigma" || exit.protocol == "enigma" {
+        return Err("Протокол Enigma требует локальный бинарный клиент и не может быть экспортирован в чистый sing-box JSON.".to_string());
+    }
+    let cfg = generate_router_2hop_singbox_json(entry, exit, &rt.persistent.routing);
+    serde_json::to_string_pretty(&cfg).map_err(|e| format!("Ошибка сериализации JSON: {}", e))
 }
 
 #[tauri::command]
@@ -3964,46 +6108,233 @@ fn relaunch_as_admin() -> bool {
     false
 }
 
+#[cfg(target_os = "windows")]
+fn boost_process_priority_windows() {
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn SetPriorityClass(hProcess: *mut std::ffi::c_void, dwPriorityClass: u32) -> i32;
+    }
+    const ABOVE_NORMAL_PRIORITY_CLASS: u32 = 0x0000_8000;
+    unsafe {
+        let _ = SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape_win(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_user_id() -> Option<String> {
+    let mut cmd = Command::new("whoami");
+    cmd.args(["/user", "/fo", "csv", "/nh"]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    if let Ok(out) = cmd.output() {
+        if out.status.success() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            if let Some(line) = text.lines().find(|l| !l.trim().is_empty()) {
+                let parts: Vec<&str> = line.split(',').collect();
+                if let Some(sid_raw) = parts.last() {
+                    let sid = sid_raw.trim().trim_matches('"').trim();
+                    if sid.starts_with("S-1-") {
+                        return Some(sid.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let user = std::env::var("USERNAME").ok().filter(|v| !v.trim().is_empty())?;
+    let domain = std::env::var("USERDOMAIN").ok().filter(|v| !v.trim().is_empty());
+    Some(match domain {
+        Some(d) => format!("{}\\{}", d, user),
+        None => user,
+    })
+}
+
 #[allow(unused_variables)]
 fn set_windows_autostart(enable: bool, start_minimized: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        // Always clean up legacy task names & stale HKCU Run entries so they don't collide
+        for old_task in ["NeuroVeilVPN", "AegisVPN"] {
+            let mut cmd_old = Command::new("schtasks");
+            cmd_old.args(["/delete", "/tn", old_task, "/f"]);
+            cmd_old.creation_flags(CREATE_NO_WINDOW);
+            let _ = cmd_old.output();
+        }
+        let mut reg_del = Command::new("reg");
+        reg_del.args([
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "NeuroVeil",
+            "/f",
+        ]);
+        reg_del.creation_flags(CREATE_NO_WINDOW);
+        let _ = reg_del.output();
+
         if enable {
             let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let exe_str = current_exe.to_string_lossy();
-            let tr_val = if start_minimized {
-                format!("\"{}\" --minimized", exe_str)
-            } else {
+            let exe_str = current_exe.to_string_lossy().to_string();
+            let work_dir_str = current_exe
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let user_id = resolve_windows_user_id();
+            let exe_cmd = if exe_str.contains(' ') {
                 format!("\"{}\"", exe_str)
+            } else {
+                exe_str.clone()
             };
-            let mut cmd = Command::new("schtasks");
-            cmd.args([
-                "/create",
-                "/tn",
-                "NeuroVeil",
-                "/tr",
-                &tr_val,
-                "/sc",
-                "onlogon",
-                "/rl",
-                "highest",
-                "/f",
-            ]);
-            cmd.creation_flags(CREATE_NO_WINDOW);
-            let out = cmd.output().map_err(|e| format!("schtasks error: {}", e))?;
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                return Err(format!("Не удалось настроить задачу автозапуска: {}", err));
+            let args_xml = if start_minimized {
+                "\n      <Arguments>--minimized</Arguments>".to_string()
+            } else {
+                String::new()
+            };
+            let work_dir_xml = if !work_dir_str.is_empty() {
+                format!(
+                    "\n      <WorkingDirectory>{}</WorkingDirectory>",
+                    xml_escape_win(&work_dir_str)
+                )
+            } else {
+                String::new()
+            };
+
+            let mut xml_ok = false;
+            let mut xml_err_detail = String::new();
+            if let Some(uid) = user_id {
+                let uid_xml = xml_escape_win(&uid);
+                let xml = format!(
+                    concat!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\r\n",
+                        "<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">\r\n",
+                        "  <RegistrationInfo>\r\n",
+                        "    <Author>NeuroVeil VPN</Author>\r\n",
+                        "    <Description>Автозапуск NeuroVeil VPN с повышенным приоритетом при входе в Windows</Description>\r\n",
+                        "  </RegistrationInfo>\r\n",
+                        "  <Triggers>\r\n",
+                        "    <LogonTrigger>\r\n",
+                        "      <Enabled>true</Enabled>\r\n",
+                        "      <UserId>{uid}</UserId>\r\n",
+                        "    </LogonTrigger>\r\n",
+                        "  </Triggers>\r\n",
+                        "  <Principals>\r\n",
+                        "    <Principal id=\"Author\">\r\n",
+                        "      <UserId>{uid}</UserId>\r\n",
+                        "      <LogonType>InteractiveToken</LogonType>\r\n",
+                        "      <RunLevel>HighestAvailable</RunLevel>\r\n",
+                        "    </Principal>\r\n",
+                        "  </Principals>\r\n",
+                        "  <Settings>\r\n",
+                        "    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>\r\n",
+                        "    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>\r\n",
+                        "    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>\r\n",
+                        "    <AllowHardTerminate>false</AllowHardTerminate>\r\n",
+                        "    <StartWhenAvailable>true</StartWhenAvailable>\r\n",
+                        "    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>\r\n",
+                        "    <AllowStartOnDemand>true</AllowStartOnDemand>\r\n",
+                        "    <Enabled>true</Enabled>\r\n",
+                        "    <Hidden>false</Hidden>\r\n",
+                        "    <RunOnlyIfIdle>false</RunOnlyIfIdle>\r\n",
+                        "    <WakeToRun>false</WakeToRun>\r\n",
+                        "    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>\r\n",
+                        "    <Priority>4</Priority>\r\n",
+                        "  </Settings>\r\n",
+                        "  <Actions Context=\"Author\">\r\n",
+                        "    <Exec>\r\n",
+                        "      <Command>{cmd}</Command>{args}{workdir}\r\n",
+                        "    </Exec>\r\n",
+                        "  </Actions>\r\n",
+                        "</Task>\r\n"
+                    ),
+                    uid = uid_xml,
+                    cmd = xml_escape_win(&exe_cmd),
+                    args = args_xml,
+                    workdir = work_dir_xml,
+                );
+
+                let xml_path = std::env::temp_dir().join("neuroveil_autostart.xml");
+                let mut utf16_bytes: Vec<u8> = Vec::with_capacity(2 + xml.len() * 2);
+                utf16_bytes.push(0xFF);
+                utf16_bytes.push(0xFE);
+                for code_unit in xml.encode_utf16() {
+                    utf16_bytes.extend_from_slice(&code_unit.to_le_bytes());
+                }
+                if std::fs::write(&xml_path, &utf16_bytes).is_ok() {
+                    let mut cmd = Command::new("schtasks");
+                    cmd.args([
+                        "/create",
+                        "/tn",
+                        "NeuroVeil",
+                        "/xml",
+                        &xml_path.to_string_lossy(),
+                        "/f",
+                    ]);
+                    cmd.creation_flags(CREATE_NO_WINDOW);
+                    match cmd.output() {
+                        Ok(out) if out.status.success() => {
+                            xml_ok = true;
+                        }
+                        Ok(out) => {
+                            xml_err_detail = format!(
+                                "{} {}",
+                                String::from_utf8_lossy(&out.stderr).trim(),
+                                String::from_utf8_lossy(&out.stdout).trim()
+                            )
+                            .trim()
+                            .to_string();
+                        }
+                        Err(e) => {
+                            xml_err_detail = e.to_string();
+                        }
+                    }
+                    let _ = std::fs::remove_file(&xml_path);
+                }
+            }
+
+            if !xml_ok {
+                // Fallback to CLI schtasks registration
+                let tr_val = if start_minimized {
+                    format!("\"{}\" --minimized", exe_str)
+                } else {
+                    format!("\"{}\"", exe_str)
+                };
+                let mut cmd = Command::new("schtasks");
+                cmd.args([
+                    "/create",
+                    "/tn",
+                    "NeuroVeil",
+                    "/tr",
+                    &tr_val,
+                    "/sc",
+                    "onlogon",
+                    "/rl",
+                    "highest",
+                    "/f",
+                ]);
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                let out = cmd.output().map_err(|e| format!("schtasks error: {}", e))?;
+                if !out.status.success() {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    return Err(format!(
+                        "Не удалось настроить задачу автозапуска: {} (XML: {})",
+                        err.trim(),
+                        xml_err_detail
+                    ));
+                }
             }
         } else {
             let mut cmd = Command::new("schtasks");
             cmd.args(["/delete", "/tn", "NeuroVeil", "/f"]);
             cmd.creation_flags(CREATE_NO_WINDOW);
             let _ = cmd.output();
-            let mut cmd_old = Command::new("schtasks");
-            cmd_old.args(["/delete", "/tn", "AegisVPN", "/f"]);
-            cmd_old.creation_flags(CREATE_NO_WINDOW);
-            let _ = cmd_old.output();
         }
     }
     Ok(())
@@ -4172,11 +6503,11 @@ fn apply_scaled_main_window_size(window: &tauri::WebviewWindow) {
     let _ = window.set_maximizable(false);
     let (mut k, sw, sh) = compute_screen_scale_factor(window);
     let max_k_w = (sw * 0.90) / 460.0;
-    let max_k_h = (sh * 0.86) / 680.0;
+    let max_k_h = (sh * 0.92) / 748.0;
     k = k.min(max_k_w).min(max_k_h).clamp(0.75, 1.32);
 
     let target_w = (460.0 * k).round();
-    let target_h = (680.0 * k).round();
+    let target_h = (748.0 * k).round();
     let fixed_size = tauri::Size::Logical(tauri::LogicalSize {
         width: target_w,
         height: target_h,
@@ -4303,6 +6634,8 @@ async fn open_popup_window(
             "key" => ("NeuroVeil VPN — Вставить ключ", 500.0, 430.0, 400.0, 340.0),
             "vps" => ("NeuroVeil VPN — Добавить VPS (Автодеплой по SSH)", 740.0, 660.0, 520.0, 460.0),
             "vps_admin" => ("NeuroVeil VPN — Управление VPS", 760.0, 660.0, 560.0, 480.0),
+            "bridge_deploy" => ("NeuroVeil VPN — Деплой моста (2 VPS в связке)", 820.0, 690.0, 560.0, 500.0),
+            "bridge_manage" => ("NeuroVeil VPN — Управление каскадом (2-Hop)", 720.0, 670.0, 500.0, 480.0),
             "logs" => ("NeuroVeil VPN — Журнал ядра sing-box", 720.0, 520.0, 460.0, 340.0),
             "qr" => ("NeuroVeil VPN — QR-код и подключение смартфона", 540.0, 640.0, 420.0, 480.0),
             "edit" => ("NeuroVeil VPN — Редактирование конфигурации", 660.0, 650.0, 460.0, 440.0),
@@ -4310,7 +6643,7 @@ async fn open_popup_window(
             "processes" => ("NeuroVeil VPN — Выбор из запущенных процессов", 640.0, 540.0, 460.0, 380.0),
             "save_preset" => ("NeuroVeil VPN — Новая предустановка маршрутов", 480.0, 430.0, 380.0, 340.0),
             "confirm_clean" => ("NeuroVeil VPN — Подтвердите очистку сервера", 440.0, 235.0, 360.0, 200.0),
-            "speedtest" => ("NeuroVeil VPN — Тест соединения и скорости", 650.0, 640.0, 500.0, 480.0),
+            "speedtest" => ("NeuroVeil VPN — Тест соединения, скорость и аналитика", 760.0, 670.0, 560.0, 500.0),
             _ => ("NeuroVeil VPN", 500.0, 420.0, 380.0, 300.0),
         };
 
@@ -4842,7 +7175,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2080)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2100)", current_version),
                     release_notes: "В репозитории GitHub пока нет опубликованных релизов. У вас установлена актуальная версия приложения.".to_string(),
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -4855,12 +7188,12 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
             Err(e) if e == "HTTP 404" || e == "HTTP 403" => {
                 let note = if e == "HTTP 404" {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2080).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2100).\nПодсказка: если репозиторий lllPredatorlll/NeuroVeil-VPN сейчас закрыт (Private) или пуст, сделайте его публичным (Public) в настройках GitHub (Settings -> Change repository visibility -> Public) и выгрузите файлы проекта.",
                         current_version
                     )
                 } else {
                     format!(
-                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2080).",
+                        "Связь с GitHub установлена. У вас актуальная версия v{} (Build 2100).",
                         current_version
                     )
                 };
@@ -4868,7 +7201,7 @@ async fn check_app_update() -> Result<AppUpdateInfo, String> {
                     current_version: current_version.clone(),
                     latest_version: current_version.clone(),
                     has_update: false,
-                    release_name: format!("NeuroVeil VPN v{} (Build 2080)", current_version),
+                    release_name: format!("NeuroVeil VPN v{} (Build 2100)", current_version),
                     release_notes: note,
                     published_at: None,
                     html_url: GITHUB_REPO_URL.to_string(),
@@ -5182,7 +7515,25 @@ fn save_system_settings(
         save_persistent_state(&rt.persistent);
         rt.persistent.clone()
     };
-    let _ = set_windows_autostart(autostart, start_minimized);
+    if let Err(err) = set_windows_autostart(autostart, start_minimized) {
+        if let Ok(mut rt) = state.lock() {
+            push_log(&mut rt.logs, format!("[Автозапуск] Ошибка настройки: {}", err));
+        }
+        return Err(err);
+    }
+    if let Ok(mut rt) = state.lock() {
+        push_log(
+            &mut rt.logs,
+            if autostart {
+                format!(
+                    "[Автозапуск] Задача Windows Task Scheduler 'NeuroVeil' обновлена (Priority=AboveNormal, minimized={}).",
+                    start_minimized
+                )
+            } else {
+                "[Автозапуск] Задача Windows Task Scheduler 'NeuroVeil' удалена.".to_string()
+            },
+        );
+    }
     Ok(res)
 }
 
@@ -5751,24 +8102,35 @@ async fn run_connection_speed_test(
     let my_seq = SPEEDTEST_RUN_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     SPEEDTEST_CANCEL.store(false, Ordering::SeqCst);
 
-    let (vpn_connected, active_host, active_port) = {
+    let (vpn_connected, active_host, active_port, active_pid, active_pname, active_proto) = {
         let rt = state.lock().map_err(|_| "Lock error".to_string())?;
         let connected = is_vpn_running(&rt);
         let pid = rt
             .active_profile_id
             .clone()
             .or_else(|| rt.persistent.selected_profile_id.clone());
-        let target = pid.and_then(|id| {
+        let target = pid.as_ref().and_then(|id| {
             rt.persistent
                 .profiles
                 .iter()
-                .find(|p| p.id == id)
-                .map(|p| (p.server.clone(), p.port))
+                .find(|p| p.id == *id)
+                .map(|p| (p.server.clone(), p.port, p.name.clone(), p.protocol.clone()))
         });
         (
             connected,
             target.as_ref().map(|t| t.0.clone()),
-            target.map(|t| t.1),
+            target.as_ref().map(|t| t.1),
+            pid,
+            target
+                .as_ref()
+                .map(|t| t.2.clone())
+                .or_else(|| rt.active_profile_name.clone())
+                .unwrap_or_else(|| "Прямой канал".to_string()),
+            target
+                .as_ref()
+                .map(|t| t.3.clone())
+                .or_else(|| rt.active_protocol.clone())
+                .unwrap_or_else(|| "direct".to_string()),
         )
     };
 
@@ -6406,10 +8768,295 @@ async fn run_connection_speed_test(
         ev.phase = "done".to_string();
         ev.progress_pct = 100;
         emit_now(&mut ev);
+
+        let rec_proto = if ev.route_used == "direct" {
+            "direct".to_string()
+        } else {
+            active_proto
+        };
+        let rec_name = if ev.route_used == "direct" {
+            "Прямой канал".to_string()
+        } else {
+            active_pname
+        };
+        let rec_pid = if ev.route_used == "direct" {
+            None
+        } else {
+            active_pid
+        };
+        append_telemetry_speedtest(SpeedTestHistoryRecord {
+            id: Uuid::new_v4().to_string(),
+            timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            profile_id: rec_pid,
+            profile_name: rec_name,
+            protocol: rec_proto,
+            route_used: ev.route_used.clone(),
+            quick_only,
+            ping_min_ms: ev.ping_min_ms,
+            ping_avg_ms: ev.ping_avg_ms,
+            ping_max_ms: ev.ping_max_ms,
+            jitter_ms: ev.jitter_ms,
+            packet_loss_pct: ev.packet_loss_pct,
+            vps_rtt_ms: ev.vps_rtt_ms,
+            download_avg_mbps: ev.download_avg_mbps,
+            download_max_mbps: ev.download_max_mbps,
+            upload_avg_mbps: ev.upload_avg_mbps,
+            upload_max_mbps: ev.upload_max_mbps,
+            colo: ev.colo.clone(),
+            external_ip: ev.external_ip.clone(),
+        });
+
         Ok(ev)
     })
     .await
     .map_err(|e| format!("Ошибка потока теста соединения: {}", e))?
+}
+
+fn build_telemetry_report_from_state(rt: &RuntimeState) -> TelemetryReportResponse {
+    let store = load_telemetry_store();
+    let active_session = rt.active_telemetry.as_ref().map(|col| {
+        let mut c = col.clone();
+        c.update_enigma(rt.enigma_tunnel.as_ref());
+        c.to_record(None, "active")
+    });
+    let summaries =
+        compute_protocol_summaries(&store.sessions, active_session.as_ref(), &store.speedtests);
+    TelemetryReportResponse {
+        enabled: rt.persistent.passive_telemetry_enabled,
+        active_session,
+        summaries,
+        sessions: store.sessions,
+        speedtests: store.speedtests,
+    }
+}
+
+#[tauri::command]
+fn get_telemetry_report(state: State<'_, SharedState>) -> Result<TelemetryReportResponse, String> {
+    let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    Ok(build_telemetry_report_from_state(&rt))
+}
+
+#[tauri::command]
+fn set_passive_telemetry_enabled(
+    enabled: bool,
+    state: State<'_, SharedState>,
+) -> Result<bool, String> {
+    let mut rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    rt.persistent.passive_telemetry_enabled = enabled;
+    if !enabled {
+        finalize_active_telemetry(&mut rt, "telemetry_paused");
+    } else if is_vpn_running(&rt) && rt.active_telemetry.is_none() {
+        if let Some(pid) = rt.active_profile_id.clone() {
+            if let Some(prof) = rt.persistent.profiles.iter().find(|p| p.id == pid).cloned() {
+                let port = rt.active_port.unwrap_or(prof.port);
+                let mode = rt.persistent.routing.mode.clone();
+                let mut col = ActiveTelemetryCollector::new(&prof, port, &mode);
+                if !rt.is_handshaking {
+                    col.handshake_ok = true;
+                }
+                col.update_enigma(rt.enigma_tunnel.as_ref());
+                rt.active_telemetry = Some(col);
+            }
+        }
+    }
+    save_persistent_state(&rt.persistent);
+    Ok(enabled)
+}
+
+#[tauri::command]
+fn clear_telemetry_history(state: State<'_, SharedState>) -> Result<TelemetryReportResponse, String> {
+    save_telemetry_store(&TelemetryStore::default());
+    let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+    Ok(build_telemetry_report_from_state(&rt))
+}
+
+fn csv_escape(s: &str) -> String {
+    let clean = s.replace('\r', " ").replace('\n', " ");
+    if clean.contains(';') || clean.contains('"') || clean.contains(',') {
+        format!("\"{}\"", clean.replace('"', "\"\""))
+    } else {
+        clean
+    }
+}
+
+#[tauri::command]
+async fn export_telemetry_file(
+    app: AppHandle,
+    format: String,
+    state: State<'_, SharedState>,
+) -> Result<Option<String>, String> {
+    let report = {
+        let rt = state.lock().map_err(|_| "Lock error".to_string())?;
+        build_telemetry_report_from_state(&rt)
+    };
+    let is_csv = format.trim().eq_ignore_ascii_case("csv");
+    let ts_tag = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let default_filename = if is_csv {
+        format!("neuroveil-telemetry-{}.csv", ts_tag)
+    } else {
+        format!("neuroveil-telemetry-{}.json", ts_tag)
+    };
+
+    let content_bytes: Vec<u8> = if is_csv {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("=== СВОДКА ПО ПРОТОКОЛАМ ===".to_string());
+        lines.push("Протокол;Сессии;Время_сек;Успех_HS_%;Ср_HS_мс;Трафик_Вниз_МБ;Трафик_Вверх_МБ;Актив_Ср_Вниз_Мбит;Пик_Вниз_Мбит;Актив_Ср_Вверх_Мбит;Пик_Вверх_Мбит;Ср_Пинг_мс;P95_Пинг_мс;Джиттер_мс;Потери_%;Зависания;Speedtest_шт;Speedtest_Ср_Вниз_Мбит;Speedtest_Ср_Вверх_Мбит".to_string());
+        for s in &report.summaries {
+            lines.push(format!(
+                "{};{};{};{};{};{:.2};{:.2};{};{};{};{};{};{};{};{};{};{};{};{}",
+                csv_escape(&s.protocol),
+                s.sessions_count,
+                s.total_duration_secs,
+                s.handshake_success_pct.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.avg_handshake_ms.map(|v| v.to_string()).unwrap_or_default(),
+                s.total_down_bytes as f64 / (1024.0 * 1024.0),
+                s.total_up_bytes as f64 / (1024.0 * 1024.0),
+                s.avg_active_down_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.peak_down_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.avg_active_up_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.peak_up_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.avg_ping_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.p95_ping_ms.map(|v| v.to_string()).unwrap_or_default(),
+                s.avg_jitter_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.packet_loss_pct.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.stalls_total,
+                s.speedtest_count,
+                s.speedtest_avg_down_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.speedtest_avg_up_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+            ));
+        }
+        lines.push(String::new());
+        lines.push("=== ИСТОРИЯ СЕССИЙ (ПАССИВНЫЙ СБОР) ===".to_string());
+        lines.push("Начало;Конец;Профиль;Протокол;Сервер;Порт;Мимикрия;Режим;Длительность_сек;HS_мс;HS_ОК;Причина_стопа;Вниз_МБ;Вверх_МБ;Актив_Вниз_Мбит;Пик_Вниз_Мбит;Актив_Вверх_Мбит;Пик_Вверх_Мбит;Пинг_Мин_мс;Пинг_Ср_мс;Пинг_P95_мс;Пинг_Макс_мс;Джиттер_мс;Проб_ОК;Проб_Сбой;Зависания;Enigma_HS;Enigma_Decoys".to_string());
+        let mut all_sess = Vec::new();
+        if let Some(ref a) = report.active_session {
+            all_sess.push(a);
+        }
+        for s in &report.sessions {
+            if report.active_session.as_ref().map(|a| a.id != s.id).unwrap_or(true) {
+                all_sess.push(s);
+            }
+        }
+        for s in all_sess {
+            lines.push(format!(
+                "{};{};{};{};{};{};{};{};{};{};{};{};{:.2};{:.2};{};{};{};{};{};{};{};{};{};{};{};{};{};{}",
+                csv_escape(&s.started_at),
+                csv_escape(s.ended_at.as_deref().unwrap_or("Активна")),
+                csv_escape(&s.profile_name),
+                csv_escape(&s.protocol),
+                csv_escape(&s.server),
+                s.port,
+                csv_escape(s.mimic_mode.as_deref().unwrap_or("")),
+                csv_escape(&s.network_mode),
+                s.duration_secs,
+                s.handshake_ms.map(|v| v.to_string()).unwrap_or_default(),
+                if s.handshake_ok { "Да" } else { "Нет" },
+                csv_escape(&s.disconnect_reason),
+                s.down_bytes as f64 / (1024.0 * 1024.0),
+                s.up_bytes as f64 / (1024.0 * 1024.0),
+                bps_to_mbps_opt(s.avg_active_down_bps).map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                bps_to_mbps_opt(Some(s.peak_down_bps)).map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                bps_to_mbps_opt(s.avg_active_up_bps).map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                bps_to_mbps_opt(Some(s.peak_up_bps)).map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                s.ping_min_ms.map(|v| v.to_string()).unwrap_or_default(),
+                s.ping_avg_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.ping_p95_ms.map(|v| v.to_string()).unwrap_or_default(),
+                s.ping_max_ms.map(|v| v.to_string()).unwrap_or_default(),
+                s.jitter_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                s.probes_ok,
+                s.probes_fail,
+                s.stalls_count,
+                s.enigma_handshakes.map(|v| v.to_string()).unwrap_or_default(),
+                s.enigma_decoys.map(|v| v.to_string()).unwrap_or_default(),
+            ));
+        }
+        lines.push(String::new());
+        lines.push("=== ИСТОРИЯ ЗАМЕРОВ SPEEDTEST ===".to_string());
+        lines.push("Время;Профиль;Протокол;Маршрут;Быстрый_Пинг;Пинг_Ср_мс;Джиттер_мс;Потери_%;VPS_RTT_мс;Скачивание_Ср_Мбит;Скачивание_Макс_Мбит;Отдача_Ср_Мбит;Отдача_Макс_Мбит;CF_Узел;IP".to_string());
+        for st in &report.speedtests {
+            lines.push(format!(
+                "{};{};{};{};{};{};{};{};{};{};{};{};{};{};{}",
+                csv_escape(&st.timestamp),
+                csv_escape(&st.profile_name),
+                csv_escape(&st.protocol),
+                csv_escape(&st.route_used),
+                if st.quick_only { "Да" } else { "Нет" },
+                st.ping_avg_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                st.jitter_ms.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                st.packet_loss_pct.map(|v| format!("{:.1}", v)).unwrap_or_default(),
+                st.vps_rtt_ms.map(|v| v.to_string()).unwrap_or_default(),
+                st.download_avg_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                st.download_max_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                st.upload_avg_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                st.upload_max_mbps.map(|v| format!("{:.2}", v)).unwrap_or_default(),
+                csv_escape(st.colo.as_deref().unwrap_or("")),
+                csv_escape(st.external_ip.as_deref().unwrap_or("")),
+            ));
+        }
+        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM for Excel
+        bytes.extend_from_slice(lines.join("\r\n").as_bytes());
+        bytes
+    } else {
+        serde_json::to_vec_pretty(&report).map_err(|e| e.to_string())?
+    };
+
+    #[cfg(target_os = "android")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || {
+            crate::android_vpn::save_file_bytes(
+                &app,
+                default_filename,
+                if is_csv {
+                    "text/csv".to_string()
+                } else {
+                    "application/json".to_string()
+                },
+                &content_bytes,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        tauri::async_runtime::spawn_blocking(move || {
+            let filter = if is_csv {
+                "CSV таблицы (*.csv)|*.csv|Все файлы (*.*)|*.*"
+            } else {
+                "JSON файлы (*.json)|*.json|Все файлы (*.*)|*.*"
+            };
+            let ps_script = format!(
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n\
+                 Add-Type -AssemblyName System.Windows.Forms\n\
+                 $dlg = New-Object System.Windows.Forms.SaveFileDialog\n\
+                 $dlg.Title = 'Экспорт аналитики и сравнения протоколов'\n\
+                 $dlg.Filter = '{}'\n\
+                 $dlg.FileName = '{}'\n\
+                 $dlg.InitialDirectory = [Environment]::GetFolderPath('Desktop')\n\
+                 if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{\n\
+                     Write-Output $dlg.FileName\n\
+                 }}",
+                filter, default_filename
+            );
+            let mut cmd = Command::new("powershell");
+            cmd.args(["-NoProfile", "-Sta", "-Command", &ps_script]);
+            #[cfg(target_os = "windows")]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+
+            let output = cmd.output().map_err(|e| e.to_string())?;
+            let selected_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if selected_path.is_empty() {
+                return Ok(None);
+            }
+            std::fs::write(&selected_path, &content_bytes)
+                .map_err(|e| format!("Не удалось сохранить файл: {}", e))?;
+            Ok(Some(selected_path))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -6493,6 +9140,14 @@ pub fn run() {
             down_bytes: 0,
             up_speed: 0,
             down_speed: 0,
+            enigma_tunnel: None,
+            active_telemetry: None,
+            bridge_active: false,
+            bridge_entry_profile_id: None,
+            bridge_entry_name: None,
+            bridge_exit_name: None,
+            bridge_entry_protocol: None,
+            bridge_exit_protocol: None,
         }));
         app.manage(shared_state.clone());
 
@@ -6507,6 +9162,11 @@ pub fn run() {
             }
         });
 
+        #[cfg(target_os = "windows")]
+        {
+            boost_process_priority_windows();
+        }
+
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             // Create System Tray
@@ -6518,7 +9178,7 @@ pub fn run() {
             let tray_cleanup = shared_state.clone();
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("NeuroVeil VPN — Hysteria 2 & TUIC")
+                .tooltip("NeuroVeil VPN v2.2.1")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| {
@@ -6580,7 +9240,7 @@ pub fn run() {
 
                 if should_start_minimized {
                     let _ = window.hide();
-                    println!("[NeuroVeil VPN 2.0] Window started minimized to system tray.");
+                    println!("[NeuroVeil VPN 2.2.1] Window started minimized to system tray.");
                 } else {
                     let _ = window.show();
                     apply_frameless_dark_border(&window);
@@ -6588,12 +9248,13 @@ pub fn run() {
                         let _ = window.unminimize();
                     }
                     let _ = window.set_focus();
-                    println!("[NeuroVeil VPN 2.0] Main window shown and focused.");
+                    println!("[NeuroVeil VPN 2.2.1] Main window shown and focused.");
                 }
             }
         }
 
-        // Clean up any orphaned sing-box.exe / stale Windows system proxy from a prior crash, then auto-connect
+        // Clean up any orphaned sing-box.exe / stale Windows system proxy from a prior crash,
+        // ensure Windows Task Scheduler autostart is synced to current exe with AboveNormal priority, then auto-connect
         let auto_connect_state = shared_state.clone();
         let app_handle_for_connect = app.handle().clone();
         tauri::async_runtime::spawn(async move {
@@ -6601,10 +9262,41 @@ pub fn run() {
             {
                 let cleanup_state = auto_connect_state.clone();
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    let local_port = cleanup_state
+                    let (local_port, autostart_enabled, start_minimized) = cleanup_state
                         .lock()
-                        .map(|rt| rt.persistent.routing.local_mixed_port)
-                        .unwrap_or(2080);
+                        .map(|rt| {
+                            (
+                                rt.persistent.routing.local_mixed_port,
+                                rt.persistent.autostart,
+                                rt.persistent.start_minimized,
+                            )
+                        })
+                        .unwrap_or((2080, false, false));
+
+                    if autostart_enabled {
+                        match set_windows_autostart(true, start_minimized) {
+                            Ok(()) => {
+                                if let Ok(mut rt) = cleanup_state.lock() {
+                                    push_log(
+                                        &mut rt.logs,
+                                        format!(
+                                            "[Автозапуск] Задача Windows 'NeuroVeil' синхронизирована (Priority=AboveNormal, minimized={}).",
+                                            start_minimized
+                                        ),
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                if let Ok(mut rt) = cleanup_state.lock() {
+                                    push_log(
+                                        &mut rt.logs,
+                                        format!("[Автозапуск] Предупреждение синхронизации: {}", err),
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     let mut kill_cmd = Command::new("taskkill");
                     kill_cmd
                         .args(["/F", "/IM", "sing-box.exe"])
@@ -6730,6 +9422,14 @@ pub fn run() {
             get_vpn_status,
             download_core,
             connect_vpn,
+            connect_bridge,
+            save_bridge_config,
+            save_bridge_pair_preset,
+            delete_bridge_pair_preset,
+            deploy_bridge_pair,
+            create_bridge_client_config,
+            delete_bridge_client_config,
+            export_bridge_router_singbox_json,
             reconnect_vpn,
             disconnect_vpn,
             add_or_update_profile,
@@ -6756,6 +9456,8 @@ pub fn run() {
             export_multi_profile_zip,
             export_awg_conf,
             export_awg_conf_file,
+            export_enigma_keybook,
+            pick_and_import_enigma_keybook,
             probe_awg_ports,
             probe_profile_ports,
             login_vps_admin,
@@ -6788,7 +9490,11 @@ pub fn run() {
             is_battery_optimization_ignored,
             request_battery_optimization_exemption,
             run_connection_speed_test,
-            cancel_connection_speed_test
+            cancel_connection_speed_test,
+            get_telemetry_report,
+            set_passive_telemetry_enabled,
+            clear_telemetry_history,
+            export_telemetry_file
         ])
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Tauri-приложения NeuroVeil VPN");

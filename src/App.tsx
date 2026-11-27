@@ -68,6 +68,11 @@ import {
   Box,
   Gauge,
   MapPin,
+  BarChart3,
+  Clock,
+  Waypoints,
+  ArrowRight,
+  ArrowLeftRight,
 } from "lucide-react";
 import QRCode from "qrcode";
 import appIconLogo from "./assets/app-icon.png";
@@ -76,12 +81,19 @@ import { LOCALES, Language } from "./locales";
 import {
   AppPersistentState,
   AppUpdateInfo,
+  BridgeClientConfig,
+  BridgeConfig,
+  BridgePairDeployRequest,
+  BridgePairDeployResult,
+  BridgePairPreset,
+  CreateBridgeClientRequest,
   DeployResult,
   PortProbeResult,
   RoutingConfig,
   RoutingPreset,
   RunningProcessInfo,
   SpeedTestProgressEvent,
+  TelemetryReportResponse,
   VpnProfile,
   VpnStatus,
   VpsAdminState,
@@ -92,7 +104,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2080";
+const APP_BUILD = "2210";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -100,6 +112,35 @@ function formatBytes(bytes: number): string {
   const sizes = ["Б", "КБ", "МБ", "ГБ"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+function formatTelemetryDuration(totalSecs: number): string {
+  const s = Math.max(0, Math.floor(totalSecs));
+  if (s < 60) return `${s} с`;
+  const m = Math.floor(s / 60);
+  const remS = s % 60;
+  if (m < 60) return remS > 0 ? `${m}м ${remS}с` : `${m} м`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}ч ${remM}м` : `${h} ч`;
+}
+
+function formatBpsToMbps(bps?: number | null): string {
+  if (bps == null || bps <= 0) return "—";
+  return ((bps * 8) / 1_000_000).toFixed(1);
+}
+
+function formatTelemetryTime(iso?: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 19).replace("T", " ");
+  return d.toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 interface ProtocolMeta {
@@ -128,6 +169,22 @@ const PROTOCOL_CATALOG: Record<string, ProtocolMeta> = {
     bg: "rgba(6, 182, 212, 0.14)",
     border: "rgba(34, 211, 238, 0.45)",
     text: "#67e8f9",
+  },
+  enigma: {
+    id: "enigma",
+    label: "Enigma v1 (Прототип)",
+    shortBadge: "UDP • Ротор .nvkey",
+    description:
+      "Полиморфный анти-DPI туннель: каждое рукопожатие уникально по 16КБ ключ-книге (.nvkey), ротация 3 роторов, мимикрия QUIC/STUN/DTLS/DNS и 1-RTT WireGuard внутри.",
+    accent: "#f59e0b",
+    accentTo: "#fb7185",
+    bg: "rgba(245, 158, 11, 0.16)",
+    border: "rgba(251, 191, 36, 0.58)",
+    text: "#fde68a",
+    gradient:
+      "linear-gradient(135deg, rgba(245, 158, 11, 0.28), rgba(249, 115, 22, 0.26), rgba(244, 63, 94, 0.28))",
+    gradientLine: "linear-gradient(180deg, #fbbf24 0%, #f97316 50%, #fb7185 100%)",
+    isHybrid: true,
   },
   amneziawg: {
     id: "amneziawg",
@@ -291,6 +348,13 @@ function getProtocolMeta(protocol: string, version?: string | null): ProtocolMet
 
 const LIGHT_PROTOCOL_COLORS: Record<string, { text: string; border: string; bg: string; gradient?: string }> = {
   vless: { text: "#0e7490", border: "rgba(14, 116, 144, 0.38)", bg: "rgba(6, 182, 212, 0.14)" },
+  enigma: {
+    text: "#b45309",
+    border: "rgba(217, 119, 6, 0.45)",
+    bg: "rgba(245, 158, 11, 0.15)",
+    gradient:
+      "linear-gradient(135deg, rgba(245, 158, 11, 0.20), rgba(249, 115, 22, 0.18), rgba(244, 63, 94, 0.20))",
+  },
   amneziawg: { text: "#047857", border: "rgba(4, 120, 87, 0.38)", bg: "rgba(16, 185, 129, 0.14)" },
   awg_quic: {
     text: "#0369a1",
@@ -363,6 +427,18 @@ const PROTOCOL_POWER_THEMES: Record<string, ProtocolPowerTheme> = {
     connectedIconBg: "#06b6d4",
     pulseOverlay: "rgba(34, 211, 238, 0.14)",
     dotColor: "#67e8f9",
+  },
+  enigma: {
+    idleBg: "linear-gradient(135deg, #24130a 0%, #5c240c 52%, #68132b 100%)",
+    idleBorder: "rgba(251, 191, 36, 0.62)",
+    idleGlow: "0 4px 16px -4px rgba(245, 158, 11, 0.34)",
+    idleIconBg: "linear-gradient(135deg, rgba(245, 158, 11, 0.36), rgba(244, 63, 94, 0.36))",
+    connectedBg: "linear-gradient(135deg, #b45309 0%, #ea580c 52%, #be123c 100%)",
+    connectedBorder: "rgba(253, 230, 138, 0.70)",
+    connectedGlow: "0 6px 20px -4px rgba(245, 158, 11, 0.48)",
+    connectedIconBg: "linear-gradient(135deg, #f59e0b, #f43f5e)",
+    pulseOverlay: "rgba(251, 191, 36, 0.15)",
+    dotColor: "#fde68a",
   },
   amneziawg: {
     idleBg: "linear-gradient(135deg, #0b1918 0%, #0b4432 100%)",
@@ -529,6 +605,7 @@ function getProtocolPowerTheme(meta: ProtocolMeta): ProtocolPowerTheme {
 
 type VpsDeviceProtocolId =
   | "vless"
+  | "enigma"
   | "amneziawg"
   | "awg_quic"
   | "awg_vless"
@@ -542,6 +619,7 @@ type VpsDeviceProtocolId =
 
 const VPS_DEVICE_PROTOCOLS: VpsDeviceProtocolId[] = [
   "vless",
+  "enigma",
   "amneziawg",
   "awg_quic",
   "awg_vless",
@@ -565,6 +643,8 @@ function isProtocolAvailableInContainer(
   switch (protoKey) {
     case "vless":
       return hasVless;
+    case "enigma":
+      return labels.includes("Enigma v1");
     case "amneziawg":
     case "awg_quic":
       return hasAwg31;
@@ -626,8 +706,70 @@ function NeuralWiresIcon({ className = "w-6 h-6" }: { className?: string }) {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<
-    "dashboard" | "vps" | "profiles" | "routing" | "settings" | "about"
+    "dashboard" | "vps" | "profiles" | "routing" | "bridge" | "settings" | "about"
   >("dashboard");
+
+  // Bridge Mode (2-Hop Cascade) state
+  const [bridgeConfig, setBridgeConfig] = useState<BridgeConfig>({
+    enabled: false,
+    entry_profile_id: null,
+    exit_profile_id: null,
+    saved_pairs: [],
+  });
+  const [bridgeEntryId, setBridgeEntryId] = useState<string>("");
+  const [bridgeExitId, setBridgeExitId] = useState<string>("");
+  const [bridgePairName, setBridgePairName] = useState<string>("");
+  const [bridgeConnecting, setBridgeConnecting] = useState<boolean>(false);
+  const [bridgeEntryPing, setBridgeEntryPing] = useState<number | null>(null);
+  const [bridgePingingEntry, setBridgePingingEntry] = useState<boolean>(false);
+  const [bridgeSavingPair, setBridgeSavingPair] = useState<boolean>(false);
+  const [selectedBridgePairId, setSelectedBridgePairId] = useState<string>("");
+  const [bridgePairForm, setBridgePairForm] = useState<BridgePairDeployRequest>({
+    pair_name: "",
+    entry_host: "",
+    entry_ssh_port: 22,
+    entry_username: "root",
+    entry_password: "",
+    entry_protocol: "vless",
+    exit_host: "",
+    exit_ssh_port: 22,
+    exit_username: "root",
+    exit_password: "",
+    exit_protocol: "amneziawg",
+    save_pair_preset: true,
+    auto_connect_after_deploy: true,
+  });
+  const [bridgeDeploying, setBridgeDeploying] = useState<boolean>(false);
+  const bridgeDeployingRef = useRef<boolean>(false);
+  const [bridgeDeployLogs, setBridgeDeployLogs] = useState<string[]>([]);
+  const bridgeDeployLogsEndRef = useRef<HTMLDivElement | null>(null);
+  const [bridgeTestingServer, setBridgeTestingServer] = useState<null | "entry" | "exit">(null);
+  const [showBridgeEntryPass, setShowBridgeEntryPass] = useState<boolean>(false);
+  const [showBridgeExitPass, setShowBridgeExitPass] = useState<boolean>(false);
+  const [bridgeLastDeployResult, setBridgeLastDeployResult] =
+    useState<BridgePairDeployResult | null>(null);
+  const [bridgeManageSection, setBridgeManageSection] = useState<"cascade" | "clients">("cascade");
+  const [bridgeClientForm, setBridgeClientForm] = useState<CreateBridgeClientRequest>({
+    name: "",
+    protocol: "wireguard",
+    entry_host: "",
+    entry_ssh_port: 22,
+    entry_username: "root",
+    entry_password: "",
+    exit_profile_id: "",
+    custom_port: 0,
+    reality_sni: "www.microsoft.com",
+  });
+  const [bridgeClientCreating, setBridgeClientCreating] = useState<boolean>(false);
+  const [bridgeClientLogs, setBridgeClientLogs] = useState<string[]>([]);
+  const bridgeClientLogsEndRef = useRef<HTMLDivElement | null>(null);
+  const [showBridgeClientPass, setShowBridgeClientPass] = useState<boolean>(false);
+  const [bridgeClientExpandedId, setBridgeClientExpandedId] = useState<string | null>(null);
+  const [bridgeClientQrOpenId, setBridgeClientQrOpenId] = useState<string | null>(null);
+  const [bridgeClientQrMap, setBridgeClientQrMap] = useState<Record<string, string>>({});
+  const [bridgeClientDeletingId, setBridgeClientDeletingId] = useState<string | null>(null);
+  const [bridgeClientRemoveFromServer, setBridgeClientRemoveFromServer] = useState<boolean>(true);
+  const [bridgeClientCopiedId, setBridgeClientCopiedId] = useState<string | null>(null);
 
   const [popupParams, setPopupParams] = useState<{
     mode: string | null;
@@ -715,6 +857,12 @@ export default function App() {
   const [speedTestData, setSpeedTestData] = useState<SpeedTestProgressEvent | null>(null);
   const [speedTestError, setSpeedTestError] = useState<string | null>(null);
   const [speedTestCopied, setSpeedTestCopied] = useState(false);
+  const [speedTestSubTab, setSpeedTestSubTab] = useState<"test" | "analytics">("test");
+  const [telemetryReport, setTelemetryReport] = useState<TelemetryReportResponse | null>(null);
+  const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [telemetryCopied, setTelemetryCopied] = useState(false);
+  const [telemetryClearConfirm, setTelemetryClearConfirm] = useState(false);
+  const [telemetryExportMsg, setTelemetryExportMsg] = useState<string | null>(null);
 
   // Sidebar Collapse state (persisted in localStorage)
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -973,6 +1121,7 @@ export default function App() {
       deploy_awg_quic: true,
       deploy_awg_vless: true,
       deploy_awg2: false,
+      deploy_enigma: true,
       deploy_ssh: true,
       deploy_shadowtls: true,
       shadowtls_port: 8443,
@@ -984,6 +1133,8 @@ export default function App() {
       webrtc_port: 3478,
       awg_port: autoAwgPort,
       awg_hop_ports: "20000:65000",
+      enigma_port: getRandomInt(21000, 55000),
+      enigma_hop_ports: "20000:65000",
       ...r31,
       enable_salamander: false,
       enable_port_hopping: true,
@@ -1163,6 +1314,7 @@ export default function App() {
   const [newPresetName, setNewPresetName] = useState("");
   const [newPresetOutbound, setNewPresetOutbound] = useState<"direct" | "proxy">("direct");
   const [isApplyingPreset, setIsApplyingPreset] = useState(false);
+  const [confirmResetPresets, setConfirmResetPresets] = useState(false);
 
   // Backup & Factory Reset state
   const [backupBusy, setBackupBusy] = useState<"idle" | "export" | "import">("idle");
@@ -1224,6 +1376,15 @@ export default function App() {
 
       if (restored.routing_presets) setRoutingPresets(restored.routing_presets);
       setActivePresetId(restored.active_preset_id || null);
+      if (restored.bridge) {
+        setBridgeConfig(restored.bridge);
+        setBridgeEntryId(restored.bridge.entry_profile_id || "");
+        setBridgeExitId(restored.bridge.exit_profile_id || "");
+      } else {
+        setBridgeConfig({ enabled: false, entry_profile_id: null, exit_profile_id: null, saved_pairs: [] });
+        setBridgeEntryId("");
+        setBridgeExitId("");
+      }
       if (restored.autostart !== undefined) setAutostart(restored.autostart);
       if (restored.start_minimized !== undefined) setStartMinimized(restored.start_minimized);
       if (restored.close_to_tray !== undefined) setCloseToTray(restored.close_to_tray);
@@ -1276,6 +1437,11 @@ export default function App() {
       setRouting(defState.routing);
       setRoutingPresets(defState.routing_presets || []);
       setActivePresetId(null);
+      setBridgeConfig({ enabled: false, entry_profile_id: null, exit_profile_id: null, saved_pairs: [] });
+      setBridgeEntryId("");
+      setBridgeExitId("");
+      setBridgePairName("");
+      setBridgeEntryPing(null);
       setDirectDomainsText("");
       setProxyDomainsText("");
       setDirectIpsText("");
@@ -1688,6 +1854,86 @@ export default function App() {
         if (appState.active_preset_id !== undefined) {
           setActivePresetId(appState.active_preset_id || null);
         }
+        if (appState.bridge) {
+          setBridgeConfig(appState.bridge);
+          setBridgePairForm((prev) => ({
+            ...prev,
+            entry_host: prev.entry_host || appState.bridge?.last_entry_host || "",
+            entry_ssh_port: prev.entry_host
+              ? prev.entry_ssh_port
+              : appState.bridge?.last_entry_ssh_port || prev.entry_ssh_port || 22,
+            entry_username: prev.entry_host
+              ? prev.entry_username
+              : appState.bridge?.last_entry_username || prev.entry_username || "root",
+            entry_protocol: prev.entry_host
+              ? prev.entry_protocol
+              : appState.bridge?.last_entry_protocol || prev.entry_protocol || "vless",
+            exit_host: prev.exit_host || appState.bridge?.last_exit_host || "",
+            exit_ssh_port: prev.exit_host
+              ? prev.exit_ssh_port
+              : appState.bridge?.last_exit_ssh_port || prev.exit_ssh_port || 22,
+            exit_username: prev.exit_host
+              ? prev.exit_username
+              : appState.bridge?.last_exit_username || prev.exit_username || "root",
+            exit_protocol: prev.exit_host
+              ? prev.exit_protocol
+              : appState.bridge?.last_exit_protocol || prev.exit_protocol || "amneziawg",
+          }));
+          const validIds = new Set(appState.profiles.map((p) => p.id));
+          const savedEntry =
+            appState.bridge.entry_profile_id && validIds.has(appState.bridge.entry_profile_id)
+              ? appState.bridge.entry_profile_id
+              : "";
+          const savedExit =
+            appState.bridge.exit_profile_id && validIds.has(appState.bridge.exit_profile_id)
+              ? appState.bridge.exit_profile_id
+              : "";
+          const savedEntryProf = appState.profiles.find((p) => p.id === savedEntry);
+          setBridgeClientForm((prev) => ({
+            ...prev,
+            entry_host:
+              prev.entry_host ||
+              appState.bridge?.last_entry_host ||
+              savedEntryProf?.server ||
+              "",
+            entry_ssh_port: prev.entry_host
+              ? prev.entry_ssh_port
+              : appState.bridge?.last_entry_ssh_port || prev.entry_ssh_port || 22,
+            entry_username: prev.entry_host
+              ? prev.entry_username
+              : appState.bridge?.last_entry_username || prev.entry_username || "root",
+            exit_profile_id:
+              (prev.exit_profile_id && validIds.has(prev.exit_profile_id)
+                ? prev.exit_profile_id
+                : "") ||
+              savedExit ||
+              appState.profiles.find((p) => p.id !== savedEntry && p.protocol !== "enigma")?.id ||
+              "",
+          }));
+          setBridgeEntryId((prev) => {
+            if (savedEntry) return savedEntry;
+            if (prev && validIds.has(prev)) return prev;
+            return appState.profiles[0]?.id || "";
+          });
+          setBridgeExitId((prev) => {
+            if (savedExit) return savedExit;
+            if (prev && validIds.has(prev)) return prev;
+            const fallbackExit = appState.profiles.find(
+              (p) => p.id !== (savedEntry || appState.profiles[0]?.id) && p.protocol !== "enigma"
+            );
+            return fallbackExit?.id || "";
+          });
+        } else if (appState.profiles.length > 0) {
+          const validIds = new Set(appState.profiles.map((p) => p.id));
+          setBridgeEntryId((prev) => (prev && validIds.has(prev) ? prev : appState.profiles[0]?.id || ""));
+          setBridgeExitId((prev) => {
+            if (prev && validIds.has(prev)) return prev;
+            const second = appState.profiles.find(
+              (p) => p.id !== appState.profiles[0]?.id && p.protocol !== "enigma"
+            );
+            return second?.id || "";
+          });
+        }
 
         if (appState.saved_vps) {
           const savedH1 = appState.saved_vps!.awg_h1;
@@ -1848,6 +2094,17 @@ export default function App() {
 
     const unlistenPromise = listen<string>("vps-log", (event) => {
       setVpsLogs((prev) => [...prev, event.payload]);
+      if (bridgeDeployingRef.current) {
+        setBridgeDeployLogs((prev) => [...prev, event.payload]);
+      }
+    });
+
+    const unlistenBridgeDeployLogPromise = listen<string>("bridge-deploy-log", (event) => {
+      setBridgeDeployLogs((prev) => [...prev, event.payload]);
+    });
+
+    const unlistenBridgeGatewayLogPromise = listen<string>("bridge-gateway-log", (event) => {
+      setBridgeClientLogs((prev) => [...prev, event.payload]);
     });
 
     const unlistenStatePromise = listen("state-updated", () => {
@@ -1901,12 +2158,22 @@ export default function App() {
       window.removeEventListener("popstate", handlePopState);
       unlistenUiPrefsPromise.then((unlisten) => unlisten());
       unlistenPromise.then((unlisten) => unlisten());
+      unlistenBridgeDeployLogPromise.then((unlisten) => unlisten());
+      unlistenBridgeGatewayLogPromise.then((unlisten) => unlisten());
       unlistenStatePromise.then((unlisten) => unlisten());
       unlistenPopupParamsPromise.then((unlisten) => unlisten());
       unlistenProcessPickedPromise.then((unlisten) => unlisten());
       unlistenConfirmCleanPromise.then((unlisten) => unlisten());
     };
   }, []);
+
+  useEffect(() => {
+    bridgeDeployLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [bridgeDeployLogs]);
+
+  useEffect(() => {
+    bridgeClientLogsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [bridgeClientLogs]);
 
   useEffect(() => {
     if (!status.is_connecting && !status.is_handshaking) return;
@@ -1981,6 +2248,92 @@ export default function App() {
     void loadRunningProcesses();
   }, [popupParams.mode, popupParams.submode]);
 
+  const loadTelemetryReport = async (showSpinner = false) => {
+    if (showSpinner) setTelemetryLoading(true);
+    try {
+      const rep = await invoke<TelemetryReportResponse>("get_telemetry_report");
+      setTelemetryReport(rep);
+    } catch {
+    } finally {
+      if (showSpinner) setTelemetryLoading(false);
+    }
+  };
+
+  const handleTogglePassiveTelemetry = async () => {
+    const next = !(telemetryReport?.enabled ?? true);
+    try {
+      await invoke<boolean>("set_passive_telemetry_enabled", { enabled: next });
+      await loadTelemetryReport(false);
+    } catch {}
+  };
+
+  const handleExportTelemetry = async (format: "csv" | "json") => {
+    setTelemetryExportMsg(null);
+    try {
+      const savedPath = await invoke<string | null>("export_telemetry_file", { format });
+      if (savedPath) {
+        setTelemetryExportMsg(`Сохранено: ${savedPath}`);
+        setTimeout(() => setTelemetryExportMsg(null), 5000);
+      }
+    } catch (e: any) {
+      setTelemetryExportMsg(`Ошибка экспорта: ${String(e)}`);
+    }
+  };
+
+  const handleClearTelemetry = async () => {
+    if (!telemetryClearConfirm) {
+      setTelemetryClearConfirm(true);
+      setTimeout(() => setTelemetryClearConfirm(false), 4000);
+      return;
+    }
+    setTelemetryClearConfirm(false);
+    try {
+      const rep = await invoke<TelemetryReportResponse>("clear_telemetry_history");
+      setTelemetryReport(rep);
+    } catch {}
+  };
+
+  const handleCopyTelemetryComparison = async () => {
+    if (!telemetryReport) return;
+    const lines: string[] = [
+      `NeuroVeil VPN v${APP_VERSION} — Сравнение протоколов и аналитика`,
+      `Пассивный сбор: ${telemetryReport.enabled ? "ВКЛ" : "ВЫКЛ"} | Сессий: ${telemetryReport.sessions.length} | Speedtest: ${telemetryReport.speedtests.length}`,
+      "",
+      "=== СВОДКА ПО ПРОТОКОЛАМ ===",
+      ...telemetryReport.summaries.map(
+        (s) =>
+          `${s.protocol.toUpperCase()}: сессий ${s.sessions_count} (${formatTelemetryDuration(
+            s.total_duration_secs
+          )}) | HS ${
+            s.handshake_success_pct != null ? `${s.handshake_success_pct.toFixed(0)}%` : "—"
+          } (${s.avg_handshake_ms ?? "—"} мс) | Актив ↓${
+            s.avg_active_down_mbps != null ? s.avg_active_down_mbps.toFixed(1) : "—"
+          } / ↑${
+            s.avg_active_up_mbps != null ? s.avg_active_up_mbps.toFixed(1) : "—"
+          } Мбит/с (Пик ↓${
+            s.peak_down_mbps != null ? s.peak_down_mbps.toFixed(1) : "—"
+          } / ↑${
+            s.peak_up_mbps != null ? s.peak_up_mbps.toFixed(1) : "—"
+          }) | Пинг ${
+            s.avg_ping_ms != null ? Math.round(s.avg_ping_ms) : "—"
+          } мс (P95 ${s.p95_ping_ms ?? "—"}, джит ${
+            s.avg_jitter_ms != null ? s.avg_jitter_ms.toFixed(1) : "—"
+          }, потери ${
+            s.packet_loss_pct != null ? `${s.packet_loss_pct.toFixed(1)}%` : "—"
+          }, зависаний ${s.stalls_total}) | Speedtest (${s.speedtest_count}): ↓${
+            s.speedtest_avg_down_mbps != null ? s.speedtest_avg_down_mbps.toFixed(1) : "—"
+          } / ↑${
+            s.speedtest_avg_up_mbps != null ? s.speedtest_avg_up_mbps.toFixed(1) : "—"
+          } Мбит/с`
+      ),
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join("\n"));
+      setTelemetryCopied(true);
+      setTimeout(() => setTelemetryCopied(false), 2000);
+    } catch {}
+  };
+
   const handleRunSpeedTest = async (quickOnly = false, overrideUseVpn?: boolean) => {
     const useVpn = overrideUseVpn !== undefined ? overrideUseVpn : speedTestUseVpn;
     setSpeedTestRunning(true);
@@ -1992,6 +2345,7 @@ export default function App() {
         quickOnly,
       });
       setSpeedTestData(res);
+      void loadTelemetryReport(false);
     } catch (e: any) {
       setSpeedTestError(String(e));
     } finally {
@@ -2048,6 +2402,7 @@ export default function App() {
     const unlistenPromise = listen<SpeedTestProgressEvent>("speedtest-progress", (ev) => {
       if (active) setSpeedTestData(ev.payload);
     });
+    void loadTelemetryReport(true);
     // Auto-run lightweight ping + GeoIP + service check on modal open
     void handleRunSpeedTest(true);
     return () => {
@@ -2056,6 +2411,15 @@ export default function App() {
       unlistenPromise.then((u) => u());
     };
   }, [popupParams.mode]);
+
+  useEffect(() => {
+    if (popupParams.mode !== "speedtest" || speedTestSubTab !== "analytics") return;
+    void loadTelemetryReport(false);
+    const id = window.setInterval(() => {
+      void loadTelemetryReport(false);
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [popupParams.mode, speedTestSubTab]);
 
   useEffect(() => {
     if (popupParams.mode !== "routing_rules" && popupParams.mode !== "save_preset") return;
@@ -2082,10 +2446,46 @@ export default function App() {
   const dashboardProfiles = profiles.filter((p) => p.pinned_on_pc !== false);
   const effectiveDashboardProfiles = dashboardProfiles.length > 0 ? dashboardProfiles : profiles;
 
+  const isBridgeAutoProfileName = (name?: string | null) => {
+    const n = (name || "").trim();
+    return (
+      n.startsWith("Мост Вход • ") ||
+      n.startsWith("Мост Выход • ") ||
+      n.endsWith(" [Вход]") ||
+      n.endsWith(" [Выход]")
+    );
+  };
+
+  const validSavedBridgePairs = (bridgeConfig.saved_pairs || []).filter(
+    (pair) =>
+      profiles.some((p) => p.id === pair.entry_profile_id) &&
+      profiles.some((p) => p.id === pair.exit_profile_id)
+  );
+
+  const hiddenBridgeServiceIds = new Set<string>();
+  for (const pair of validSavedBridgePairs) {
+    const entryP = profiles.find((p) => p.id === pair.entry_profile_id);
+    const exitP = profiles.find((p) => p.id === pair.exit_profile_id);
+    if (entryP && isBridgeAutoProfileName(entryP.name)) {
+      hiddenBridgeServiceIds.add(entryP.id);
+    }
+    if (exitP && isBridgeAutoProfileName(exitP.name)) {
+      hiddenBridgeServiceIds.add(exitP.id);
+    }
+  }
+
+  const visibleDashboardProfiles = effectiveDashboardProfiles.filter(
+    (p) => !hiddenBridgeServiceIds.has(p.id)
+  );
+
   // Sync block in Tab 3 ONLY shows active server profiles when logged in as VPS admin,
   // and completely clears them upon logout or disconnection.
   const serverProfiles = isVpsAdmin ? syncedServerProfiles : [];
   const effectiveClientProfiles = dashboardProfiles.length > 0 ? dashboardProfiles : profiles;
+  const visibleClientProfiles = effectiveClientProfiles.filter(
+    (p) => !hiddenBridgeServiceIds.has(p.id)
+  );
+  const totalVisibleTunnelCount = validSavedBridgePairs.length + visibleDashboardProfiles.length;
 
   const selectedProfile =
     dashboardProfiles.find((p) => p.id === selectedProfileId) ||
@@ -2093,6 +2493,33 @@ export default function App() {
     profiles.find((p) => p.id === selectedProfileId) ||
     profiles[0] ||
     null;
+
+  const selectedBridgePair: BridgePairPreset | null = (() => {
+    if ((status.connected || status.is_connecting) && status.bridge_active) {
+      const livePair = validSavedBridgePairs.find(
+        (pair) =>
+          pair.entry_profile_id === status.bridge_entry_profile_id &&
+          pair.exit_profile_id === status.active_profile_id
+      );
+      if (livePair) return livePair;
+    }
+    if (selectedBridgePairId) {
+      const picked = validSavedBridgePairs.find((pair) => pair.id === selectedBridgePairId);
+      if (picked) return picked;
+    }
+    if (selectedProfile && hiddenBridgeServiceIds.has(selectedProfile.id)) {
+      const matching = validSavedBridgePairs.find(
+        (pair) =>
+          pair.exit_profile_id === selectedProfile.id ||
+          pair.entry_profile_id === selectedProfile.id
+      );
+      if (matching) return matching;
+    }
+    if (visibleDashboardProfiles.length === 0 && validSavedBridgePairs.length > 0) {
+      return validSavedBridgePairs[0];
+    }
+    return null;
+  })();
 
   const activeRoutingProfile =
     dashboardProfiles.find((p) => p.id === (routingProfileId || selectedProfileId)) ||
@@ -2103,6 +2530,7 @@ export default function App() {
 
   const hasTunnelsOrVps =
     effectiveDashboardProfiles.length > 0 ||
+    validSavedBridgePairs.length > 0 ||
     Boolean(vpsCreds.host && vpsCreds.host.trim().length > 0) ||
     isVpsAdmin;
 
@@ -2165,7 +2593,77 @@ export default function App() {
     }
   };
 
+  const handleQuickSelectBridgePair = async (pair: BridgePairPreset) => {
+    setSelectedBridgePairId(pair.id);
+    setSelectedProfileId(pair.exit_profile_id);
+    setRoutingProfileId(pair.exit_profile_id);
+    setBridgeEntryId(pair.entry_profile_id);
+    setBridgeExitId(pair.exit_profile_id);
+    void invoke("select_profile", { profileId: pair.exit_profile_id }).catch(() => {});
+    void persistBridgeSelection(pair.entry_profile_id, pair.exit_profile_id);
+
+    const exitProf = profiles.find((p) => p.id === pair.exit_profile_id);
+    if (exitProf) {
+      const targetRouting = { ...(exitProf.routing || routing), mode: routing.mode };
+      setRouting(targetRouting);
+      setDirectDomainsText((targetRouting.direct_domains || []).join("\n"));
+      setProxyDomainsText((targetRouting.proxy_domains || []).join("\n"));
+      setDirectIpsText((targetRouting.direct_ips || []).join("\n"));
+      setProxyIpsText((targetRouting.proxy_ips || []).join("\n"));
+      setDirectProcessesList(targetRouting.direct_processes || []);
+      setProxyProcessesList(targetRouting.proxy_processes || []);
+    }
+
+    const isSameLiveBridge =
+      status.connected &&
+      status.bridge_active &&
+      status.bridge_entry_profile_id === pair.entry_profile_id &&
+      status.active_profile_id === pair.exit_profile_id;
+
+    if (status.connected && !connecting && !bridgeConnecting && !isSameLiveBridge) {
+      await handleConnectBridge(pair.entry_profile_id, pair.exit_profile_id);
+    }
+  };
+
+  const handleDeleteBridgePairAndServiceProfiles = async (pair: BridgePairPreset) => {
+    try {
+      const updatedBridge = await invoke<BridgeConfig>("delete_bridge_pair_preset", {
+        pairId: pair.id,
+      });
+      setBridgeConfig(updatedBridge);
+      if (selectedBridgePairId === pair.id) {
+        setSelectedBridgePairId("");
+      }
+
+      const remainingIds = new Set<string>();
+      for (const rem of updatedBridge.saved_pairs || []) {
+        remainingIds.add(rem.entry_profile_id);
+        remainingIds.add(rem.exit_profile_id);
+      }
+
+      const toDeleteIds = [pair.entry_profile_id, pair.exit_profile_id].filter((pid) => {
+        if (remainingIds.has(pid)) return false;
+        const prof = profiles.find((p) => p.id === pid);
+        return Boolean(prof && isBridgeAutoProfileName(prof.name));
+      });
+
+      let latestProfiles: VpnProfile[] | null = null;
+      for (const pid of toDeleteIds) {
+        try {
+          latestProfiles = await invoke<VpnProfile[]>("delete_profile", { id: pid });
+        } catch {}
+      }
+      if (latestProfiles) {
+        setProfiles(latestProfiles);
+      }
+      showNotice("info", `Связка моста «${pair.name}» удалена.`);
+    } catch (err: any) {
+      showNotice("error", String(err));
+    }
+  };
+
   const handleQuickSwitchProfile = async (profileId: string) => {
+    setSelectedBridgePairId("");
     setSelectedProfileId(profileId);
     setRoutingProfileId(profileId);
     void invoke("select_profile", { profileId }).catch(() => {});
@@ -2179,18 +2677,36 @@ export default function App() {
     setDirectProcessesList(targetRouting.direct_processes || []);
     setProxyProcessesList(targetRouting.proxy_processes || []);
 
-    if (status.connected && !connecting && status.active_profile_id !== profileId) {
+    if (
+      status.connected &&
+      !connecting &&
+      (status.active_profile_id !== profileId || status.bridge_active)
+    ) {
       if (
         target?.protocol === "amneziawg" ||
         target?.protocol === "awg_quic" ||
         target?.protocol === "awg_vless" ||
-        target?.protocol === "awg2"
+        target?.protocol === "awg2" ||
+        target?.protocol === "enigma"
       ) {
         const privKey = (target.awg_private_key || target.password || "").trim();
         if (!privKey) {
           showNotice(
             "error",
-            "В профиле Amnezia не указан приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
+            target.protocol === "enigma"
+              ? "В профиле Enigma не указан приватный ключ (Private Key). Откройте настройки (✏️)."
+              : "В профиле Amnezia не указан приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
+          );
+          handleOpenEditModal(target);
+          return;
+        }
+        if (
+          target.protocol === "enigma" &&
+          !(target.enigma_keybook || target.enigma_key_path || "").trim()
+        ) {
+          showNotice(
+            "error",
+            "В профиле Enigma отсутствует файл чтения (.nvkey). Импортируйте .nvkey в настройках профиля (✏️)."
           );
           handleOpenEditModal(target);
           return;
@@ -2379,6 +2895,14 @@ export default function App() {
       return;
     }
 
+    if (selectedBridgePair) {
+      await handleConnectBridge(
+        selectedBridgePair.entry_profile_id,
+        selectedBridgePair.exit_profile_id
+      );
+      return;
+    }
+
     const myGen = ++connectAttemptGenRef.current;
     setConnecting(true);
     try {
@@ -2394,13 +2918,27 @@ export default function App() {
         selectedProfile.protocol === "amneziawg" ||
         selectedProfile.protocol === "awg_quic" ||
         selectedProfile.protocol === "awg_vless" ||
-        selectedProfile.protocol === "awg2"
+        selectedProfile.protocol === "awg2" ||
+        selectedProfile.protocol === "enigma"
       ) {
         const privKey = (selectedProfile.awg_private_key || selectedProfile.password || "").trim();
         if (!privKey) {
           showNotice(
             "error",
-            "В профиле Amnezia отсутствует приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
+            selectedProfile.protocol === "enigma"
+              ? "В профиле Enigma отсутствует приватный ключ (Private Key). Откройте настройки (✏️)."
+              : "В профиле Amnezia отсутствует приватный ключ (Private Key). Введите ключ в настройках профиля (✏️) или выберите файл .conf."
+          );
+          handleOpenEditModal(selectedProfile);
+          return;
+        }
+        if (
+          selectedProfile.protocol === "enigma" &&
+          !(selectedProfile.enigma_keybook || selectedProfile.enigma_key_path || "").trim()
+        ) {
+          showNotice(
+            "error",
+            "В профиле Enigma отсутствует файл чтения (.nvkey). Импортируйте .nvkey в настройках профиля (✏️)."
           );
           handleOpenEditModal(selectedProfile);
           return;
@@ -2439,6 +2977,546 @@ export default function App() {
       if (connectAttemptGenRef.current === myGen) {
         setConnecting(false);
       }
+    }
+  };
+
+  // Bridge Mode (2-Hop Cascade) helpers & handlers
+  const bridgeEntryProfile = profiles.find((p) => p.id === bridgeEntryId) || null;
+  const bridgeExitProfile = profiles.find((p) => p.id === bridgeExitId) || null;
+
+  const getBridgeCompatError = (
+    entry: VpnProfile | null,
+    exit: VpnProfile | null
+  ): string | null => {
+    if (!entry || !exit) return "Выберите Входной мост и Выходной сервер.";
+    if (entry.id === exit.id) return "Входной мост и Выходной сервер должны быть разными профилями.";
+    if (exit.protocol === "enigma") {
+      return "Enigma не может быть Выходным сервером (использует локальный UDP-шлюз). Поставьте Enigma на Входной мост.";
+    }
+    const isTcpOnlyEntry = entry.protocol === "ssh" || entry.protocol === "shadowtls";
+    const isUdpOnlyExit =
+      exit.protocol === "wireguard" ||
+      exit.protocol === "amneziawg" ||
+      exit.protocol === "awg2" ||
+      exit.protocol === "awg_quic" ||
+      exit.protocol === "hysteria2" ||
+      exit.protocol === "tuic";
+    if (isTcpOnlyEntry && isUdpOnlyExit) {
+      return `TCP-вход (${entry.protocol.toUpperCase()}) не передаёт чистый UDP-выход (${exit.protocol.toUpperCase()}). Выберите на Выход TCP-протокол (VLESS Reality, AWG+VLESS, VLESS WS, WebRTC, Shadowsocks) или смените Входной мост.`;
+    }
+    return null;
+  };
+
+  const bridgeCompatError = getBridgeCompatError(bridgeEntryProfile, bridgeExitProfile);
+
+  const persistBridgeSelection = async (nextEntryId: string, nextExitId: string) => {
+    const nextCfg: BridgeConfig = {
+      ...bridgeConfig,
+      entry_profile_id: nextEntryId || null,
+      exit_profile_id: nextExitId || null,
+    };
+    setBridgeConfig(nextCfg);
+    try {
+      await invoke<BridgeConfig>("save_bridge_config", { config: nextCfg });
+    } catch {}
+  };
+
+  const handleSelectBridgeEntry = (id: string) => {
+    setBridgeEntryId(id);
+    setBridgeEntryPing(null);
+    let nextExit = bridgeExitId;
+    if (nextExit === id) {
+      const other = profiles.find((p) => p.id !== id && p.protocol !== "enigma");
+      nextExit = other?.id || "";
+      setBridgeExitId(nextExit);
+    }
+    void persistBridgeSelection(id, nextExit);
+  };
+
+  const handleSelectBridgeExit = (id: string) => {
+    setBridgeExitId(id);
+    let nextEntry = bridgeEntryId;
+    if (nextEntry === id) {
+      const other = profiles.find((p) => p.id !== id);
+      nextEntry = other?.id || "";
+      setBridgeEntryId(nextEntry);
+    }
+    void persistBridgeSelection(nextEntry, id);
+  };
+
+  const handleSwapBridgeNodes = () => {
+    if (!bridgeEntryId || !bridgeExitId) return;
+    const prevEntry = profiles.find((p) => p.id === bridgeEntryId);
+    if (prevEntry?.protocol === "enigma") {
+      showNotice("error", "Enigma нельзя перенести на Выходной сервер — оставьте его на Входе.");
+      return;
+    }
+    const nextEntry = bridgeExitId;
+    const nextExit = bridgeEntryId;
+    setBridgeEntryId(nextEntry);
+    setBridgeExitId(nextExit);
+    setBridgeEntryPing(null);
+    void persistBridgeSelection(nextEntry, nextExit);
+  };
+
+  const handlePingBridgeEntry = async () => {
+    if (!bridgeEntryId || bridgePingingEntry) return;
+    setBridgePingingEntry(true);
+    try {
+      const ms = await invoke<number>("ping_profile", { id: bridgeEntryId });
+      setBridgeEntryPing(ms);
+      showNotice("success", `Входной мост доступен: ${ms} мс`);
+    } catch (err: any) {
+      setBridgeEntryPing(-1);
+      showNotice("error", `Входной мост недоступен: ${String(err)}`);
+    } finally {
+      setBridgePingingEntry(false);
+    }
+  };
+
+  const handleConnectBridge = async (overrideEntryId?: string, overrideExitId?: string) => {
+    if (disconnecting || reconnectCooldown || bridgeConnecting) return;
+    const targetEntryId = overrideEntryId ?? bridgeEntryId;
+    const targetExitId = overrideExitId ?? bridgeExitId;
+
+    const isSameActiveBridge =
+      status.connected &&
+      status.bridge_active &&
+      status.bridge_entry_profile_id === targetEntryId &&
+      status.active_profile_id === targetExitId;
+
+    if (isSameActiveBridge && !overrideEntryId && !overrideExitId) {
+      await handleToggleConnect();
+      return;
+    }
+
+    const entryProf = profiles.find((p) => p.id === targetEntryId) || null;
+    const exitProf = profiles.find((p) => p.id === targetExitId) || null;
+    const compatErr = getBridgeCompatError(entryProf, exitProf);
+    if (compatErr) {
+      showNotice("error", compatErr);
+      return;
+    }
+
+    if (overrideEntryId && overrideExitId) {
+      setBridgeEntryId(overrideEntryId);
+      setBridgeExitId(overrideExitId);
+    }
+
+    setBridgeConnecting(true);
+    try {
+      const profRouting = exitProf?.routing || routing;
+      const st = await invoke<VpnStatus>("connect_bridge", {
+        entryProfileId: targetEntryId,
+        exitProfileId: targetExitId,
+        mode: routing.mode || profRouting.mode,
+        splitTunneling: profRouting.split_tunneling,
+      });
+      applyStatusUpdate(st);
+      if (st.connected || st.is_connecting) {
+        showNotice(
+          "success",
+          `Мост 2-Hop запущен: ${entryProf?.name} → ${exitProf?.name}`
+        );
+      } else {
+        showNotice("error", "Не удалось запустить каскад Моста 2-Hop");
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setBridgeConnecting(false);
+    }
+  };
+
+  const handleSaveBridgePair = async () => {
+    if (bridgeSavingPair) return;
+    if (bridgeCompatError) {
+      showNotice("error", bridgeCompatError);
+      return;
+    }
+    setBridgeSavingPair(true);
+    try {
+      const preset: BridgePairPreset = {
+        id: "",
+        name:
+          bridgePairName.trim() ||
+          `${bridgeEntryProfile?.name || "Вход"} → ${bridgeExitProfile?.name || "Выход"}`,
+        entry_profile_id: bridgeEntryId,
+        exit_profile_id: bridgeExitId,
+      };
+      const updated = await invoke<BridgeConfig>("save_bridge_pair_preset", { preset });
+      setBridgeConfig(updated);
+      setBridgePairName("");
+      showNotice("success", `Связка «${preset.name}» сохранена!`);
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setBridgeSavingPair(false);
+    }
+  };
+
+  const handleDeleteBridgePair = async (pairId: string) => {
+    try {
+      const updated = await invoke<BridgeConfig>("delete_bridge_pair_preset", { pairId });
+      setBridgeConfig(updated);
+      showNotice("info", "Связка моста удалена.");
+    } catch (err: any) {
+      showNotice("error", String(err));
+    }
+  };
+
+  const bridgeDeployCompatError = (() => {
+    const eHost = bridgePairForm.entry_host.trim();
+    const xHost = bridgePairForm.exit_host.trim();
+    if (eHost && xHost && eHost.toLowerCase() === xHost.toLowerCase()) {
+      return "IP / хост Сервера 1 (Вход) и Сервера 2 (Выход) должны отличаться.";
+    }
+    const isTcpOnlyEntry = bridgePairForm.entry_protocol === "shadowtls";
+    const isUdpOnlyExit =
+      bridgePairForm.exit_protocol === "amneziawg" ||
+      bridgePairForm.exit_protocol === "hysteria2" ||
+      bridgePairForm.exit_protocol === "tuic";
+    if (isTcpOnlyEntry && isUdpOnlyExit) {
+      return `TCP-вход (${bridgePairForm.entry_protocol.toUpperCase()}) не передаёт чистый UDP-выход (${bridgePairForm.exit_protocol.toUpperCase()}). Выберите на Выход VLESS Reality, AWG+VLESS или Shadowsocks, либо смените Входной протокол.`;
+    }
+    return null;
+  })();
+
+  const handleSwapBridgeDeployServers = () => {
+    if (bridgeDeploying) return;
+    setBridgePairForm((prev) => ({
+      ...prev,
+      entry_host: prev.exit_host,
+      entry_ssh_port: prev.exit_ssh_port,
+      entry_username: prev.exit_username,
+      entry_password: prev.exit_password,
+      exit_host: prev.entry_host,
+      exit_ssh_port: prev.entry_ssh_port,
+      exit_username: prev.entry_username,
+      exit_password: prev.entry_password,
+    }));
+  };
+
+  const handleTestBridgeServerSsh = async (which: "entry" | "exit") => {
+    if (bridgeTestingServer || bridgeDeploying) return;
+    const host = (which === "entry" ? bridgePairForm.entry_host : bridgePairForm.exit_host).trim();
+    const port = which === "entry" ? bridgePairForm.entry_ssh_port : bridgePairForm.exit_ssh_port;
+    const username = (which === "entry" ? bridgePairForm.entry_username : bridgePairForm.exit_username).trim() || "root";
+    const password = which === "entry" ? bridgePairForm.entry_password : bridgePairForm.exit_password;
+    const label = which === "entry" ? "Сервер 1 (Вход)" : "Сервер 2 (Выход)";
+
+    if (!host || !password) {
+      showNotice("error", `${label}: укажите IP/хост и SSH пароль.`);
+      return;
+    }
+
+    setBridgeTestingServer(which);
+    try {
+      const res = await invoke<string>("test_single_vps_ssh", {
+        host,
+        port: Number(port) || 22,
+        username,
+        password,
+        proxy: null,
+      });
+      showNotice("success", `${label}: ${res}`);
+    } catch (err: any) {
+      const msg = String(err);
+      if (which === "exit") {
+        showNotice(
+          "info",
+          `${label} недоступен напрямую (${msg}) — при запуске настройки установщик автоматически подключится к нему через Сервер 1!`
+        );
+      } else {
+        showNotice("error", `${label}: ${msg}`);
+      }
+    } finally {
+      setBridgeTestingServer(null);
+    }
+  };
+
+  const handleDeployBridgePair = async () => {
+    if (bridgeDeploying) return;
+    if (!bridgePairForm.entry_host.trim() || !bridgePairForm.entry_password) {
+      showNotice("error", "Укажите IP/хост и SSH пароль для Сервера 1 (Входной мост).");
+      return;
+    }
+    if (!bridgePairForm.exit_host.trim() || !bridgePairForm.exit_password) {
+      showNotice("error", "Укажите IP/хост и SSH пароль для Сервера 2 (Выходной сервер).");
+      return;
+    }
+    if (bridgeDeployCompatError) {
+      showNotice("error", bridgeDeployCompatError);
+      return;
+    }
+
+    setBridgeDeploying(true);
+    bridgeDeployingRef.current = true;
+    setBridgeLastDeployResult(null);
+    setBridgeDeployLogs([
+      `[Мост] Запуск автоматической настройки пары серверов: ${bridgePairForm.entry_host.trim()} → ${bridgePairForm.exit_host.trim()}...`,
+    ]);
+
+    try {
+      const reqPayload: BridgePairDeployRequest = {
+        ...bridgePairForm,
+        pair_name: bridgePairForm.pair_name.trim(),
+        entry_host: bridgePairForm.entry_host.trim(),
+        entry_ssh_port: Number(bridgePairForm.entry_ssh_port) || 22,
+        entry_username: bridgePairForm.entry_username.trim() || "root",
+        exit_host: bridgePairForm.exit_host.trim(),
+        exit_ssh_port: Number(bridgePairForm.exit_ssh_port) || 22,
+        exit_username: bridgePairForm.exit_username.trim() || "root",
+      };
+
+      const res = await invoke<BridgePairDeployResult>("deploy_bridge_pair", {
+        req: reqPayload,
+      });
+
+      const appState = await invoke<AppPersistentState>("get_app_state");
+      setProfiles(appState.profiles || []);
+      if (appState.bridge) {
+        setBridgeConfig(appState.bridge);
+      }
+      setBridgeEntryId(res.entry_profile.id);
+      setBridgeExitId(res.exit_profile.id);
+      if (res.saved_pair?.id) {
+        setSelectedBridgePairId(res.saved_pair.id);
+      }
+      setBridgePairForm((prev) => ({
+        ...prev,
+        entry_ssh_port: res.entry_new_ssh_port ?? prev.entry_ssh_port,
+        exit_ssh_port: res.exit_new_ssh_port ?? prev.exit_ssh_port,
+      }));
+      setBridgeLastDeployResult(res);
+
+      const st = await invoke<VpnStatus>("get_vpn_status");
+      applyStatusUpdate(st);
+
+      showNotice("success", res.message);
+    } catch (err: any) {
+      const msg = String(err);
+      setBridgeDeployLogs((prev) => [...prev, `[ОШИБКА] ${msg}`]);
+      showNotice("error", `Ошибка настройки пары моста: ${msg}`);
+    } finally {
+      bridgeDeployingRef.current = false;
+      setBridgeDeploying(false);
+    }
+  };
+
+  const getBridgeClientProtocolLabel = (proto: string): string => {
+    switch (proto) {
+      case "wireguard":
+        return "WireGuard (.conf)";
+      case "amneziawg_router":
+        return "AmneziaWG 1.0 (.conf)";
+      case "amneziawg":
+        return "AmneziaWG 3.1";
+      case "vless":
+        return "VLESS Reality";
+      case "shadowsocks":
+        return "Shadowsocks";
+      case "hysteria2":
+        return "Hysteria 2";
+      default:
+        return proto.toUpperCase();
+    }
+  };
+
+  const handleCreateBridgeClientConfig = async () => {
+    if (bridgeClientCreating) return;
+    const resolvedEntryHost =
+      bridgeClientForm.entry_host.trim() ||
+      bridgeEntryProfile?.server ||
+      bridgeConfig.last_entry_host ||
+      "";
+    const resolvedExitId =
+      bridgeClientForm.exit_profile_id ||
+      bridgeExitId ||
+      profiles.find((p) => p.id !== bridgeEntryId && p.protocol !== "enigma")?.id ||
+      "";
+    const resolvedPassword =
+      bridgeClientForm.entry_password || bridgePairForm.entry_password || "";
+
+    if (!resolvedEntryHost) {
+      showNotice("error", "Укажите IP-адрес Входного моста (Сервер 1).");
+      return;
+    }
+    if (!resolvedPassword.trim()) {
+      showNotice("error", "Введите SSH-пароль Входного моста (Сервер 1).");
+      return;
+    }
+    if (!resolvedExitId) {
+      showNotice("error", "Выберите Выходной сервер (Сервер 2).");
+      return;
+    }
+
+    setBridgeClientCreating(true);
+    setBridgeClientLogs([
+      `Запуск создания шлюза (${getBridgeClientProtocolLabel(bridgeClientForm.protocol)}) на ${resolvedEntryHost}...`,
+    ]);
+    try {
+      const req: CreateBridgeClientRequest = {
+        name: bridgeClientForm.name.trim(),
+        protocol: bridgeClientForm.protocol,
+        entry_host: resolvedEntryHost,
+        entry_ssh_port: Number(bridgeClientForm.entry_ssh_port) || 22,
+        entry_username: bridgeClientForm.entry_username.trim() || "root",
+        entry_password: resolvedPassword,
+        exit_profile_id: resolvedExitId,
+        custom_port: Number(bridgeClientForm.custom_port) || 0,
+        reality_sni: bridgeClientForm.reality_sni.trim(),
+      };
+      const created = await invoke<BridgeClientConfig>("create_bridge_client_config", { req });
+      const appState = await invoke<AppPersistentState>("get_app_state");
+      if (appState.bridge) {
+        setBridgeConfig(appState.bridge);
+      }
+      setBridgeClientForm((prev) => ({
+        ...prev,
+        name: "",
+        custom_port: 0,
+        entry_host: resolvedEntryHost,
+        entry_password: resolvedPassword,
+      }));
+      setBridgeClientExpandedId(created.id);
+      showNotice(
+        "success",
+        `Конфиг «${created.name}» (${getBridgeClientProtocolLabel(created.protocol)}) создан на ${created.entry_host}:${created.listen_port}!`
+      );
+    } catch (err: any) {
+      const msg = String(err);
+      setBridgeClientLogs((prev) => [...prev, `[ОШИБКА] ${msg}`]);
+      showNotice("error", `Не удалось создать конфиг через мост: ${msg}`);
+    } finally {
+      setBridgeClientCreating(false);
+    }
+  };
+
+  const handleDeleteBridgeClientConfig = async (
+    cfg: BridgeClientConfig,
+    removeFromServer: boolean
+  ) => {
+    if (bridgeClientDeletingId) return;
+    const pass = bridgeClientForm.entry_password || bridgePairForm.entry_password || "";
+    if (removeFromServer && !pass.trim()) {
+      showNotice(
+        "error",
+        "Введите SSH-пароль Входного моста выше, чтобы остановить шлюз на сервере (или снимите галочку «Удалить с сервера»)."
+      );
+      return;
+    }
+    setBridgeClientDeletingId(cfg.id);
+    try {
+      const msg = await invoke<string>("delete_bridge_client_config", {
+        req: {
+          config_id: cfg.id,
+          remove_from_server: removeFromServer,
+          entry_password: pass,
+        },
+      });
+      const appState = await invoke<AppPersistentState>("get_app_state");
+      if (appState.bridge) {
+        setBridgeConfig(appState.bridge);
+      }
+      if (bridgeClientExpandedId === cfg.id) setBridgeClientExpandedId(null);
+      if (bridgeClientQrOpenId === cfg.id) setBridgeClientQrOpenId(null);
+      showNotice("success", msg);
+    } catch (err: any) {
+      showNotice("error", String(err));
+    } finally {
+      setBridgeClientDeletingId(null);
+    }
+  };
+
+  const handleCopyBridgeClientConfig = async (cfg: BridgeClientConfig, preferUri = false) => {
+    try {
+      const text = preferUri && cfg.uri ? cfg.uri : cfg.config_text || cfg.uri;
+      await navigator.clipboard.writeText(text);
+      setBridgeClientCopiedId(cfg.id);
+      setTimeout(() => {
+        setBridgeClientCopiedId((prev) => (prev === cfg.id ? null : prev));
+      }, 1800);
+      showNotice(
+        "success",
+        cfg.config_format === "conf" && !preferUri
+          ? `Конфиг .conf «${cfg.name}» скопирован в буфер`
+          : `Ключ «${cfg.name}» скопирован в буфер`
+      );
+    } catch (err: any) {
+      showNotice("error", `Ошибка копирования: ${String(err)}`);
+    }
+  };
+
+  const handleDownloadBridgeClientConfig = (cfg: BridgeClientConfig) => {
+    try {
+      const cleanName =
+        (cfg.name || "bridge_router")
+          .replace(/[^\w\d_а-яА-Я]/g, "_")
+          .replace(/_+/g, "_")
+          .replace(/^_|_$/g, "") || "bridge_router";
+      const ext = cfg.config_format === "conf" ? "conf" : "txt";
+      const content = cfg.config_text || cfg.uri;
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${cleanName}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showNotice("success", `Файл ${cleanName}.${ext} сохранён`);
+    } catch (err: any) {
+      showNotice("error", `Ошибка сохранения файла: ${String(err)}`);
+    }
+  };
+
+  const handleToggleBridgeClientQr = async (cfg: BridgeClientConfig) => {
+    if (bridgeClientQrOpenId === cfg.id) {
+      setBridgeClientQrOpenId(null);
+      return;
+    }
+    setBridgeClientQrOpenId(cfg.id);
+    if (bridgeClientQrMap[cfg.id]) return;
+    try {
+      const qrPayload = cfg.config_format === "conf" ? cfg.config_text : cfg.uri;
+      const dataUrl = await QRCode.toDataURL(qrPayload, {
+        width: 240,
+        margin: 2,
+        color: { dark: "#0f172a", light: "#ffffff" },
+      });
+      setBridgeClientQrMap((prev) => ({ ...prev, [cfg.id]: dataUrl }));
+    } catch (err: any) {
+      showNotice("error", `Не удалось сгенерировать QR-код: ${String(err)}`);
+    }
+  };
+
+  const handleExportRouterSingboxJson = async (mode: "copy" | "download") => {
+    const entryId = bridgeEntryId;
+    const exitId = bridgeClientForm.exit_profile_id || bridgeExitId;
+    if (!entryId || !exitId) {
+      showNotice("error", "Сначала выберите Входной мост и Выходной сервер.");
+      return;
+    }
+    try {
+      const jsonText = await invoke<string>("export_bridge_router_singbox_json", {
+        entryProfileId: entryId,
+        exitProfileId: exitId,
+      });
+      if (mode === "copy") {
+        await navigator.clipboard.writeText(jsonText);
+        showNotice("success", "2-Hop sing-box JSON для роутера (OpenWrt / XKeen) скопирован!");
+      } else {
+        const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "neuroveil_bridge_2hop_singbox.json";
+        a.click();
+        URL.revokeObjectURL(url);
+        showNotice("success", "Файл neuroveil_bridge_2hop_singbox.json сохранён!");
+      }
+    } catch (err: any) {
+      showNotice("error", String(err));
     }
   };
 
@@ -2674,6 +3752,7 @@ export default function App() {
       vpsCreds.deploy_awg_quic ||
       vpsCreds.deploy_awg_vless ||
       vpsCreds.deploy_awg2 ||
+      vpsCreds.deploy_enigma ||
       vpsCreds.deploy_ssh ||
       vpsCreds.deploy_shadowtls ||
       vpsCreds.deploy_vless_ws ||
@@ -2682,7 +3761,7 @@ export default function App() {
     if (!hasAnyProtocol) {
       showNotice(
         "error",
-        "Выберите хотя бы один протокол для развертывания (VLESS, Hysteria 2, TUIC, Shadowsocks, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH)"
+        "Выберите хотя бы один протокол для развертывания (VLESS, Enigma v1, Hysteria 2, TUIC, Shadowsocks, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH)"
       );
       return;
     }
@@ -2692,13 +3771,20 @@ export default function App() {
     const r31 = generateRandomAwg31Params();
 
     const autoAwg2Port = (vpsCreds.awg2_port && vpsCreds.awg2_port !== 51821 && vpsCreds.awg2_port !== 51820) ? vpsCreds.awg2_port : getRandomInt(21000, 55000);
+    const autoEnigmaPort =
+      vpsCreds.enigma_port && vpsCreds.enigma_port > 0
+        ? vpsCreds.enigma_port
+        : getRandomInt(21000, 55000);
 
     const deployedCreds: VpsCredentials = {
       ...vpsCreds,
       deploy_awg_quic: vpsCreds.deploy_awg_quic ?? true,
       deploy_awg_vless: vpsCreds.deploy_awg_vless ?? true,
       deploy_awg2: vpsCreds.deploy_awg2 ?? false,
+      deploy_enigma: vpsCreds.deploy_enigma ?? true,
       awg2_port: autoAwg2Port,
+      enigma_port: autoEnigmaPort,
+      enigma_hop_ports: vpsCreds.enigma_hop_ports || vpsCreds.awg_hop_ports || "20000:65000",
       ...r31,
       awg_port: autoAwgPort,
       awg_disable_cookies: vpsCreds.awg_disable_cookies ?? true,
@@ -2713,6 +3799,9 @@ export default function App() {
     ];
     if (vpsCreds.deploy_awg2) {
       logMessages.push(`[Авто-рандомизация] Сгенерирован порт AmneziaWG 2.0 (UDP ${autoAwg2Port}).`);
+    }
+    if (deployedCreds.deploy_enigma) {
+      logMessages.push(`[Enigma v1] Выбран внешний шлюз-порт UDP ${autoEnigmaPort} + роторная книга .nvkey (16 384 Б).`);
     }
     setVpsLogs((prev) => [
       ...prev,
@@ -2819,6 +3908,8 @@ export default function App() {
           ? "SSH Tunnel"
           : newProfile.protocol === "vless"
           ? "VLESS Reality"
+          : newProfile.protocol === "enigma"
+          ? "Enigma v1"
           : newProfile.protocol === "vless_ws"
           ? "VLESS CDN Shield"
           : newProfile.protocol === "webrtc"
@@ -2845,7 +3936,8 @@ export default function App() {
         newProfile.protocol === "awg_quic" ||
         newProfile.protocol === "awg_vless";
       const isAwg20 = newProfile.protocol === "awg2";
-      const isProfileAwg = isAwg31 || isAwg20 || newProfile.protocol === "wireguard";
+      const isEnigma = newProfile.protocol === "enigma";
+      const isProfileAwg = isAwg31 || isAwg20 || isEnigma || newProfile.protocol === "wireguard";
       const isUuidProto =
         newProfile.protocol === "vless" ||
         newProfile.protocol === "vless_ws" ||
@@ -2856,22 +3948,27 @@ export default function App() {
         uuid: isUuidProto ? newProfile.uuid || newProfile.password : newProfile.uuid,
         awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
         awg_private_key: isProfileAwg ? (newProfile.awg_private_key || newProfile.password) : newProfile.awg_private_key,
-        awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : newProfile.awg_local_address,
-        awg_hop_ports: isAwg31 ? newProfile.awg_hop_ports : undefined,
-        hop_ports: isAwg31 ? newProfile.hop_ports : isAwg20 ? undefined : newProfile.hop_ports,
-        awg_jc: isAwg20 ? undefined : newProfile.awg_jc,
-        awg_jmin: isAwg20 ? undefined : newProfile.awg_jmin,
-        awg_jmax: isAwg20 ? undefined : newProfile.awg_jmax,
-        awg_s1: isAwg20 ? undefined : newProfile.awg_s1,
-        awg_s2: isAwg20 ? undefined : newProfile.awg_s2,
-        awg_s3: isAwg20 ? undefined : newProfile.awg_s3,
-        awg_s4: isAwg20 ? undefined : newProfile.awg_s4,
-        awg_h1: isAwg20 ? undefined : newProfile.awg_h1,
-        awg_h2: isAwg20 ? undefined : newProfile.awg_h2,
-        awg_h3: isAwg20 ? undefined : newProfile.awg_h3,
-        awg_h4: isAwg20 ? undefined : newProfile.awg_h4,
-        awg_persistent_keepalive: isAwg20 ? undefined : newProfile.awg_persistent_keepalive,
-        awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 ? false : newProfile.awg_port_probing,
+        awg_local_address: isEnigma
+          ? (newProfile.awg_local_address || "10.8.7.2/24")
+          : isAwg20
+          ? (newProfile.awg_local_address || "10.8.1.2/24")
+          : newProfile.awg_local_address,
+        awg_hop_ports: isAwg31 || isEnigma ? newProfile.awg_hop_ports : undefined,
+        hop_ports: isAwg31 || isEnigma ? (newProfile.hop_ports || newProfile.awg_hop_ports) : isAwg20 ? undefined : newProfile.hop_ports,
+        enigma_mimic: isEnigma ? (newProfile.enigma_mimic || "auto") : newProfile.enigma_mimic,
+        awg_jc: isAwg20 || isEnigma ? undefined : newProfile.awg_jc,
+        awg_jmin: isAwg20 || isEnigma ? undefined : newProfile.awg_jmin,
+        awg_jmax: isAwg20 || isEnigma ? undefined : newProfile.awg_jmax,
+        awg_s1: isAwg20 || isEnigma ? undefined : newProfile.awg_s1,
+        awg_s2: isAwg20 || isEnigma ? undefined : newProfile.awg_s2,
+        awg_s3: isAwg20 || isEnigma ? undefined : newProfile.awg_s3,
+        awg_s4: isAwg20 || isEnigma ? undefined : newProfile.awg_s4,
+        awg_h1: isAwg20 || isEnigma ? undefined : newProfile.awg_h1,
+        awg_h2: isAwg20 || isEnigma ? undefined : newProfile.awg_h2,
+        awg_h3: isAwg20 || isEnigma ? undefined : newProfile.awg_h3,
+        awg_h4: isAwg20 || isEnigma ? undefined : newProfile.awg_h4,
+        awg_persistent_keepalive: isAwg20 || isEnigma ? undefined : newProfile.awg_persistent_keepalive,
+        awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 || isEnigma ? false : newProfile.awg_port_probing,
         name:
           newProfile.name.trim() ||
           `${defaultLabel} (${newProfile.server.trim()})`,
@@ -2920,6 +4017,56 @@ export default function App() {
       showNotice("success", `Файл конфигурации ${cleanName}.conf для Amnezia скачан`);
     } catch (err: any) {
       showNotice("error", `Ошибка экспорта .conf: ${String(err)}`);
+    }
+  };
+
+  const handleExportEnigmaKeybook = async (profile: VpnProfile) => {
+    try {
+      const rawName = (profile.name || "enigma").split("—")[0].split("-")[0].trim();
+      const cleanName = rawName.replace(/[^\w\d_а-яА-Я]/g, "") || "enigma";
+      const savedPath = await invoke<string | null>("export_enigma_keybook", {
+        profileId: profile.id,
+        profile,
+        filename: `${cleanName}.nvkey`,
+      });
+      if (savedPath) {
+        showNotice("success", `Файл чтения .nvkey сохранён: ${savedPath}`);
+        const appState = await invoke<AppPersistentState>("get_app_state");
+        setProfiles(appState.profiles);
+        if (editingProfile && editingProfile.id === profile.id) {
+          const fresh = appState.profiles.find((p) => p.id === profile.id);
+          if (fresh) {
+            setEditingProfile(fresh);
+            setEditForm({ ...fresh });
+          }
+        }
+      }
+    } catch (err: any) {
+      showNotice("error", `Ошибка экспорта .nvkey: ${String(err)}`);
+    }
+  };
+
+  const handleImportEnigmaKeybook = async (profileId: string) => {
+    try {
+      const updated = await invoke<VpnProfile | null>("pick_and_import_enigma_keybook", {
+        profileId,
+      });
+      if (updated) {
+        const appState = await invoke<AppPersistentState>("get_app_state");
+        setProfiles(appState.profiles);
+        if (editingProfile && editingProfile.id === profileId) {
+          setEditingProfile(updated);
+          setEditForm((prev) => ({
+            ...prev,
+            enigma_keybook: updated.enigma_keybook,
+            enigma_key_path: updated.enigma_key_path,
+            uri: updated.uri,
+          }));
+        }
+        showNotice("success", `Ключевая книга .nvkey загружена для «${updated.name}»!`);
+      }
+    } catch (err: any) {
+      showNotice("error", `Ошибка импорта .nvkey: ${String(err)}`);
     }
   };
 
@@ -3844,7 +4991,9 @@ export default function App() {
   const renderProtocolBadge = (protocol: string, version?: string | null) => {
     const meta = getProtocolMeta(protocol, version);
     const shortLabel =
-      meta.id === "awg2"
+      meta.id === "enigma"
+        ? "ENIGMA v1"
+        : meta.id === "awg2"
         ? "AWG 2.0"
         : meta.id === "awg_quic"
         ? "AWG + QUIC"
@@ -3874,11 +5023,1664 @@ export default function App() {
     );
   };
 
+  const renderBridgeClientsSection = () => {
+    const clientConfigs = bridgeConfig.client_configs || [];
+    const selectedExitForClient =
+      profiles.find((p) => p.id === (bridgeClientForm.exit_profile_id || bridgeExitId)) || null;
+    const isExitWg = selectedExitForClient
+      ? ["amneziawg", "awg", "awg2", "wireguard", "wg", "awg_vless"].includes(
+          selectedExitForClient.protocol
+        )
+      : false;
+    const resolvedEntryDisplay =
+      bridgeClientForm.entry_host.trim() ||
+      bridgeEntryProfile?.server ||
+      bridgeConfig.last_entry_host ||
+      "Входной VPS";
+
+    const protocolOptions: {
+      id: string;
+      title: string;
+      badge: string;
+      devices: string;
+      recommended?: boolean;
+    }[] = [
+      {
+        id: "wireguard",
+        title: "WireGuard (.conf)",
+        badge: "UDP • .conf",
+        devices: "Keenetic, MikroTik, OpenWrt, Asus, iOS/Android",
+        recommended: true,
+      },
+      {
+        id: "amneziawg_router",
+        title: "AmneziaWG 1.0 (.conf)",
+        badge: "UDP • DPI",
+        devices: "Keenetic AWG, OpenWrt, AmneziaWG app",
+      },
+      {
+        id: "vless",
+        title: "VLESS Reality",
+        badge: "TCP • TLS 1.3",
+        devices: "Keenetic XKeen, OpenWrt, Hiddify, v2rayNG, Happ",
+      },
+      {
+        id: "shadowsocks",
+        title: "Shadowsocks",
+        badge: "TCP+UDP • AEAD",
+        devices: "Keenetic, OpenWrt, Asus, TV, Shadowrocket",
+      },
+      {
+        id: "hysteria2",
+        title: "Hysteria 2",
+        badge: "UDP • QUIC",
+        devices: "OpenWrt, Hiddify, Nekobox, Streisand, Happ",
+      },
+      {
+        id: "amneziawg",
+        title: "AmneziaWG 3.1",
+        badge: "UDP • HPK",
+        devices: "NeuroVeil, sing-box-lx (макс. маскировка)",
+      },
+    ];
+
+    const showSniField =
+      bridgeClientForm.protocol === "vless" || bridgeClientForm.protocol === "hysteria2";
+
+    return (
+      <div className="space-y-3.5">
+        {/* Visual Router-Through-Bridge Pipeline */}
+        <div
+          className={`p-3 rounded-2xl border soft-edge-block space-y-2 ${currentTheme.styles.cardBorder}`}
+          style={{ backgroundColor: currentTheme.styles.cardBg }}
+        >
+          <div className="flex items-center justify-between gap-1 text-[10px]">
+            <div className="flex flex-col items-center gap-1 min-w-[54px]">
+              <div className="w-8 h-8 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center text-cyan-300">
+                <Wifi className="w-4 h-4" />
+              </div>
+              <span className="text-[9px] font-semibold text-cyan-200 text-center leading-tight">
+                Роутер / ТВ
+              </span>
+            </div>
+
+            <ArrowRight className="w-3.5 h-3.5 shrink-0 text-violet-400" />
+
+            <div className="flex-1 min-w-0 p-2 rounded-xl bg-[#0b1120]/90 border border-violet-500/35 text-center">
+              <div className="text-[8.5px] uppercase tracking-wider font-bold text-violet-300">
+                Шлюз на Входном мосте
+              </div>
+              <div className="text-[11px] font-bold text-white font-mono truncate mt-0.5">
+                {resolvedEntryDisplay}
+              </div>
+              <div className="text-[9px] text-slate-400 truncate">
+                {getBridgeClientProtocolLabel(bridgeClientForm.protocol)}
+              </div>
+            </div>
+
+            <ArrowRight className="w-3.5 h-3.5 shrink-0 text-cyan-400" />
+
+            <div className="flex-1 min-w-0 p-2 rounded-xl bg-[#0b1120]/90 border border-cyan-500/35 text-center">
+              <div className="text-[8.5px] uppercase tracking-wider font-bold text-cyan-300">
+                Выходной сервер
+              </div>
+              <div className="text-[11px] font-bold text-white truncate mt-0.5">
+                {selectedExitForClient ? selectedExitForClient.name : "Не выбран"}
+              </div>
+              <div className="text-[9px] font-mono text-slate-400 truncate">
+                {selectedExitForClient ? selectedExitForClient.server : "—"}
+              </div>
+            </div>
+
+            <ArrowRight className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+
+            <div className="flex flex-col items-center gap-1 min-w-[40px]">
+              <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-400/40 flex items-center justify-center text-emerald-300">
+                <Globe className="w-4 h-4" />
+              </div>
+              <span className="text-[9px] font-semibold text-slate-400">Сеть</span>
+            </div>
+          </div>
+
+          <p className="text-[10.5px] text-slate-400 leading-relaxed pt-1 border-t border-slate-800/80">
+            На <b>Входном мосте</b> поднимается отдельный шлюз, который принимает <b>1 обычный конфиг</b> от вашего роутера, телефона или ТВ и автоматически заворачивает весь трафик в <b>Выходной сервер</b>. Роутеру не нужна поддержка двойного VPN!
+          </p>
+        </div>
+
+        {/* Create New Config Through Bridge Card */}
+        <div
+          className={`p-3.5 rounded-2xl border soft-edge-block space-y-3 ${currentTheme.styles.cardBorder}`}
+          style={{ backgroundColor: currentTheme.styles.cardBg }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Key className="w-4 h-4 text-cyan-400" />
+              <span>Создать конфиг через мост</span>
+            </h3>
+            {validSavedBridgePairs.length > 0 && (
+              <select
+                value=""
+                onChange={(e) => {
+                  const p = validSavedBridgePairs.find((x) => x.id === e.target.value);
+                  if (!p) return;
+                  const entryP = profiles.find((pr) => pr.id === p.entry_profile_id);
+                  setBridgeClientForm((prev) => ({
+                    ...prev,
+                    entry_host: entryP?.server || prev.entry_host,
+                    exit_profile_id: p.exit_profile_id,
+                  }));
+                  setBridgeEntryId(p.entry_profile_id);
+                  setBridgeExitId(p.exit_profile_id);
+                }}
+                className="px-2 py-1 rounded-lg bg-[#0a0f1d] border border-violet-500/40 text-[10.5px] text-violet-200 outline-none cursor-pointer max-w-[210px]"
+                title="Подставить серверы из сохранённой связки моста"
+              >
+                <option value="">Заполнить из связки...</option>
+                {validSavedBridgePairs.map((pair) => (
+                  <option key={pair.id} value={pair.id}>
+                    {pair.name}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          {/* Device Name + Exit Server */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div className="space-y-1">
+              <label className="text-[10.5px] font-semibold text-slate-300">
+                Название устройства / конфига
+              </label>
+              <input
+                type="text"
+                value={bridgeClientForm.name}
+                onChange={(e) =>
+                  setBridgeClientForm((prev) => ({ ...prev, name: e.target.value }))
+                }
+                placeholder="Напр. Роутер Keenetic / iPhone / ТВ"
+                className="w-full px-2.5 py-2 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs text-white placeholder-slate-500 outline-none transition"
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-[10.5px] font-semibold text-cyan-300">
+                Выходной сервер (куда пойдёт трафик)
+              </label>
+              <select
+                value={bridgeClientForm.exit_profile_id || bridgeExitId}
+                onChange={(e) =>
+                  setBridgeClientForm((prev) => ({
+                    ...prev,
+                    exit_profile_id: e.target.value,
+                  }))
+                }
+                className="w-full px-2.5 py-2 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs text-white outline-none transition"
+              >
+                <option value="">— Выберите Выходной сервер —</option>
+                {profiles.map((p) => {
+                  const pm = getProtocolMeta(p.protocol, p.awg_version);
+                  const disabledOpt = p.protocol === "enigma";
+                  return (
+                    <option key={p.id} value={p.id} disabled={disabledOpt}>
+                      {p.name} ({pm.label} • {p.server})
+                      {disabledOpt ? " [не для Выхода]" : ""}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+          </div>
+
+          {isExitWg && (
+            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/35 flex items-start gap-2 text-[10.5px] text-amber-100 leading-snug">
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+              <span>
+                Выходной сервер использует <b>WireGuard / AmneziaWG</b>: один ключ WG нельзя использовать одновременно с ПК и шлюза роутера (будет конфликт сессий). Для одновременной работы многих устройств лучше выбрать <b>VLESS Reality / Hysteria 2</b> на Выходе или подключать ПК тоже через шлюз.
+              </span>
+            </div>
+          )}
+
+          {/* Protocol Grid Picker */}
+          <div className="space-y-1.5">
+            <label className="text-[10.5px] font-semibold text-slate-300">
+              Протокол для роутера / устройства (подключение к Входному мосту)
+            </label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {protocolOptions.map((opt) => {
+                const active = bridgeClientForm.protocol === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() =>
+                      setBridgeClientForm((prev) => ({
+                        ...prev,
+                        protocol: opt.id,
+                        reality_sni:
+                          opt.id === "hysteria2"
+                            ? prev.reality_sni === "www.microsoft.com" || !prev.reality_sni
+                              ? "www.bing.com"
+                              : prev.reality_sni
+                            : opt.id === "vless"
+                            ? prev.reality_sni === "www.bing.com" || !prev.reality_sni
+                              ? "www.microsoft.com"
+                              : prev.reality_sni
+                            : prev.reality_sni,
+                      }))
+                    }
+                    className={`p-2.5 rounded-xl border text-left transition cursor-pointer ${
+                      active
+                        ? "bg-gradient-to-br from-violet-600/25 via-indigo-600/20 to-cyan-600/20 border-cyan-400/70 shadow-md shadow-cyan-500/10"
+                        : "bg-[#0a0f1d]/80 border-slate-800/90 hover:border-slate-700"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[11.5px] font-bold text-white flex items-center gap-1.5">
+                        <span>{opt.title}</span>
+                        {opt.recommended && (
+                          <span className="text-[8.5px] px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold">
+                            РОУТЕРЫ
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800/90 text-slate-300 shrink-0">
+                        {opt.badge}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-slate-400 mt-1 leading-snug">
+                      {opt.devices}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Entry VPS SSH Access + Port / SNI */}
+          <div className="p-2.5 rounded-xl bg-[#0a0f1d]/75 border border-violet-500/25 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[10.5px] font-bold text-violet-300 flex items-center gap-1.5">
+                <Server className="w-3.5 h-3.5" />
+                <span>SSH-доступ к Входному мосту (Сервер 1)</span>
+              </span>
+              <span className="text-[9.5px] text-slate-500">Пароль не сохраняется на диск</span>
+            </div>
+
+            <div className="grid grid-cols-12 gap-2">
+              <div className="col-span-6 sm:col-span-5 space-y-1">
+                <label className="text-[10px] text-slate-400">IP Входного моста</label>
+                <input
+                  type="text"
+                  value={bridgeClientForm.entry_host}
+                  onChange={(e) =>
+                    setBridgeClientForm((prev) => ({ ...prev, entry_host: e.target.value }))
+                  }
+                  placeholder={bridgeEntryProfile?.server || "109.248.x.x"}
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-violet-400/70 text-[11.5px] font-mono text-white outline-none"
+                />
+              </div>
+              <div className="col-span-3 sm:col-span-2 space-y-1">
+                <label className="text-[10px] text-slate-400">SSH порт</label>
+                <input
+                  type="number"
+                  value={bridgeClientForm.entry_ssh_port}
+                  onChange={(e) =>
+                    setBridgeClientForm((prev) => ({
+                      ...prev,
+                      entry_ssh_port: Number(e.target.value) || 22,
+                    }))
+                  }
+                  className="w-full px-2 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-violet-400/70 text-[11.5px] font-mono text-white outline-none"
+                />
+              </div>
+              <div className="col-span-3 sm:col-span-2 space-y-1">
+                <label className="text-[10px] text-slate-400">Логин</label>
+                <input
+                  type="text"
+                  value={bridgeClientForm.entry_username}
+                  onChange={(e) =>
+                    setBridgeClientForm((prev) => ({ ...prev, entry_username: e.target.value }))
+                  }
+                  placeholder="root"
+                  className="w-full px-2 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-violet-400/70 text-[11.5px] font-mono text-white outline-none"
+                />
+              </div>
+              <div className="col-span-12 sm:col-span-3 space-y-1">
+                <label className="text-[10px] text-slate-400">Пароль SSH</label>
+                <div className="relative">
+                  <input
+                    type={showBridgeClientPass ? "text" : "password"}
+                    value={bridgeClientForm.entry_password}
+                    onChange={(e) =>
+                      setBridgeClientForm((prev) => ({
+                        ...prev,
+                        entry_password: e.target.value,
+                      }))
+                    }
+                    placeholder={
+                      bridgePairForm.entry_password ? "•••• (из деплоя)" : "Пароль root"
+                    }
+                    className="w-full pl-2.5 pr-7 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-violet-400/70 text-[11.5px] text-white outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowBridgeClientPass((v) => !v)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                  >
+                    {showBridgeClientPass ? (
+                      <EyeOff className="w-3.5 h-3.5" />
+                    ) : (
+                      <Eye className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Optional Custom Port & SNI */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <label className="text-[10px] text-slate-400">
+                  Порт шлюза на Входном мосте (0 = автоподбор)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={65535}
+                  value={bridgeClientForm.custom_port}
+                  onChange={(e) =>
+                    setBridgeClientForm((prev) => ({
+                      ...prev,
+                      custom_port: Math.max(0, Math.min(65535, Number(e.target.value) || 0)),
+                    }))
+                  }
+                  placeholder="0 (авто)"
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-cyan-400/70 text-[11.5px] font-mono text-white outline-none"
+                />
+              </div>
+              {showSniField && (
+                <div className="space-y-1">
+                  <label className="text-[10px] text-slate-400">
+                    SNI хост маскировки ({bridgeClientForm.protocol === "vless" ? "Reality" : "TLS"})
+                  </label>
+                  <input
+                    type="text"
+                    value={bridgeClientForm.reality_sni}
+                    onChange={(e) =>
+                      setBridgeClientForm((prev) => ({
+                        ...prev,
+                        reality_sni: e.target.value,
+                      }))
+                    }
+                    placeholder={
+                      bridgeClientForm.protocol === "vless"
+                        ? "www.microsoft.com"
+                        : "www.bing.com"
+                    }
+                    className="w-full px-2.5 py-1.5 rounded-lg bg-[#0d1424] border border-slate-700/80 focus:border-cyan-400/70 text-[11.5px] font-mono text-white outline-none"
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Create Gateway Primary CTA */}
+          <button
+            type="button"
+            disabled={bridgeClientCreating}
+            onClick={() => void handleCreateBridgeClientConfig()}
+            className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 hover:from-violet-500 hover:via-indigo-500 hover:to-cyan-500 disabled:opacity-45 text-white text-xs font-extrabold tracking-wide shadow-lg shadow-violet-500/20 transition flex items-center justify-center gap-2 cursor-pointer keep-white"
+          >
+            {bridgeClientCreating ? (
+              <RefreshCw className="w-4 h-4 animate-spin" />
+            ) : (
+              <Plus className="w-4 h-4" />
+            )}
+            <span>
+              {bridgeClientCreating
+                ? "Развёртывание шлюза на Входном мосте..."
+                : `Создать конфиг (${getBridgeClientProtocolLabel(bridgeClientForm.protocol)}) через мост`}
+            </span>
+          </button>
+
+          {/* Live Bridge Gateway Deployment Logs */}
+          {bridgeClientLogs.length > 0 && (
+            <div className="p-2.5 rounded-xl bg-[#070b14] border border-slate-800/90 max-h-32 overflow-y-auto font-mono text-[10.5px] space-y-1">
+              {bridgeClientLogs.map((line, idx) => (
+                <div
+                  key={idx}
+                  className={
+                    line.includes("[ОШИБКА]")
+                      ? "text-rose-400"
+                      : line.startsWith("5/5")
+                      ? "text-emerald-400 font-semibold"
+                      : "text-slate-300"
+                  }
+                >
+                  {line}
+                </div>
+              ))}
+              <div ref={bridgeClientLogsEndRef} />
+            </div>
+          )}
+
+          {/* Quick Local 2-Hop sing-box JSON Export (No SSH required!) */}
+          <div className="pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="text-[10.5px] font-bold text-slate-200 flex items-center gap-1.5">
+                <FileCode className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>Локальный 2-Hop sing-box JSON (без SSH)</span>
+              </div>
+              <div className="text-[9.5px] text-slate-400">
+                Для роутеров OpenWrt (HomeProxy / sing-box), Keenetic (XKeen), Hiddify, Nekobox
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                disabled={!bridgeEntryId || !(bridgeClientForm.exit_profile_id || bridgeExitId)}
+                onClick={() => void handleExportRouterSingboxJson("copy")}
+                className="px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10.5px] font-semibold text-slate-200 disabled:opacity-40 transition flex items-center gap-1 cursor-pointer"
+              >
+                <Copy className="w-3 h-3 text-cyan-400" />
+                <span>Копировать JSON</span>
+              </button>
+              <button
+                type="button"
+                disabled={!bridgeEntryId || !(bridgeClientForm.exit_profile_id || bridgeExitId)}
+                onClick={() => void handleExportRouterSingboxJson("download")}
+                className="px-2.5 py-1.5 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/35 border border-cyan-400/40 text-[10.5px] font-semibold text-cyan-200 disabled:opacity-40 transition flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3 h-3" />
+                <span>.json</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Created Bridge Client Configs List */}
+        <div
+          className={`p-3.5 rounded-2xl border soft-edge-block space-y-2.5 ${currentTheme.styles.cardBorder}`}
+          style={{ backgroundColor: currentTheme.styles.cardBg }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+              <Layers className="w-4 h-4 text-violet-400" />
+              <span>Созданные конфиги через мост</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full bg-violet-500/20 border border-violet-400/35 text-violet-200">
+                {clientConfigs.length}
+              </span>
+            </h3>
+            <label className="flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={bridgeClientRemoveFromServer}
+                onChange={(e) => setBridgeClientRemoveFromServer(e.target.checked)}
+                className="accent-rose-500 rounded"
+              />
+              <span>При удалении останавливать шлюз на VPS</span>
+            </label>
+          </div>
+
+          {clientConfigs.length === 0 ? (
+            <div className="p-4 rounded-xl bg-[#0a0f1d]/70 border border-slate-800/80 text-center space-y-1">
+              <div className="text-[11.5px] font-semibold text-slate-300">
+                Пока нет созданных конфигов для роутера и других устройств
+              </div>
+              <div className="text-[10px] text-slate-500">
+                Выберите протокол выше (например, WireGuard или AmneziaWG 1.0 для Keenetic / OpenWrt), введите SSH-пароль Входного моста и нажмите «Создать конфиг».
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {clientConfigs.map((cfg) => {
+                const isExpanded = bridgeClientExpandedId === cfg.id;
+                const isQrOpen = bridgeClientQrOpenId === cfg.id;
+                const isDeleting = bridgeClientDeletingId === cfg.id;
+                const isCopied = bridgeClientCopiedId === cfg.id;
+                return (
+                  <div
+                    key={cfg.id}
+                    className="p-3 rounded-xl bg-[#0a0f1d]/85 border border-slate-800/90 hover:border-violet-500/40 transition space-y-2"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[12px] font-bold text-white truncate">
+                            {cfg.name}
+                          </span>
+                          <span className="text-[9.5px] font-bold px-1.5 py-0.5 rounded bg-violet-500/20 border border-violet-400/35 text-violet-200">
+                            {getBridgeClientProtocolLabel(cfg.protocol)}
+                          </span>
+                          <span className="text-[9px] font-mono text-slate-500">
+                            {cfg.created_at}
+                          </span>
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-400 mt-1 flex items-center gap-1 flex-wrap">
+                          <span className="text-violet-300">
+                            {cfg.entry_host}:{cfg.listen_port}
+                          </span>
+                          <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                          <span className="text-cyan-300">
+                            {cfg.exit_server} ({cfg.exit_protocol.toUpperCase()})
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyBridgeClientConfig(cfg, false)}
+                          className="px-2 py-1 rounded-lg bg-cyan-600/20 hover:bg-cyan-600/35 border border-cyan-400/40 text-cyan-200 text-[10px] font-bold transition flex items-center gap-1 cursor-pointer"
+                          title={
+                            cfg.config_format === "conf"
+                              ? "Скопировать текст .conf"
+                              : "Скопировать ключ подключения"
+                          }
+                        >
+                          {isCopied ? (
+                            <Check className="w-3 h-3 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          <span>{isCopied ? "Скопировано" : "Копировать"}</span>
+                        </button>
+
+                        {cfg.protocol === "amneziawg" && cfg.uri && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyBridgeClientConfig(cfg, true)}
+                            className="px-2 py-1 rounded-lg bg-violet-600/20 hover:bg-violet-600/35 border border-violet-400/40 text-violet-200 text-[10px] font-bold transition cursor-pointer"
+                            title="Скопировать ссылку awg:// для импорта в NeuroVeil"
+                          >
+                            awg://
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadBridgeClientConfig(cfg)}
+                          className="px-2 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-slate-200 text-[10px] font-semibold transition flex items-center gap-1 cursor-pointer"
+                          title="Сохранить файл конфигурации на диск"
+                        >
+                          <Download className="w-3 h-3 text-emerald-400" />
+                          <span>{cfg.config_format === "conf" ? ".conf" : ".txt"}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => void handleToggleBridgeClientQr(cfg)}
+                          className={`p-1.5 rounded-lg border transition cursor-pointer ${
+                            isQrOpen
+                              ? "bg-cyan-500/25 border-cyan-400/60 text-cyan-200"
+                              : "bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-slate-300"
+                          }`}
+                          title="Показать QR-код для телефона"
+                        >
+                          <QrCode className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setBridgeClientExpandedId(isExpanded ? null : cfg.id)
+                          }
+                          className={`p-1.5 rounded-lg border transition cursor-pointer ${
+                            isExpanded
+                              ? "bg-violet-500/25 border-violet-400/60 text-violet-200"
+                              : "bg-slate-800/90 hover:bg-slate-700 border-slate-700 text-slate-300"
+                          }`}
+                          title="Показать / скрыть текст конфигурации"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isDeleting}
+                          onClick={() =>
+                            void handleDeleteBridgeClientConfig(
+                              cfg,
+                              bridgeClientRemoveFromServer
+                            )
+                          }
+                          className="p-1.5 rounded-lg bg-slate-800/90 hover:bg-rose-600/30 border border-slate-700 hover:border-rose-500/50 text-slate-400 hover:text-rose-300 disabled:opacity-40 transition cursor-pointer"
+                          title={
+                            bridgeClientRemoveFromServer
+                              ? "Остановить на Входном VPS и удалить"
+                              : "Удалить только из списка"
+                          }
+                        >
+                          {isDeleting ? (
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Inline QR Code Preview */}
+                    {isQrOpen && (
+                      <div className="pt-2 border-t border-slate-800/80 flex flex-col items-center gap-1.5">
+                        {bridgeClientQrMap[cfg.id] ? (
+                          <div className="p-2.5 rounded-xl bg-white shadow-lg">
+                            <img
+                              src={bridgeClientQrMap[cfg.id]}
+                              alt={`QR ${cfg.name}`}
+                              className="w-44 h-44 object-contain"
+                            />
+                          </div>
+                        ) : (
+                          <div className="text-[11px] text-slate-400 py-4">
+                            Генерация QR-кода...
+                          </div>
+                        )}
+                        <span className="text-[10px] text-slate-400">
+                          Отсканируйте в WireGuard / AmneziaWG / v2rayNG / Hiddify / Happ
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Expandable Raw Config Text */}
+                    {isExpanded && (
+                      <div className="pt-2 border-t border-slate-800/80">
+                        <pre className="p-2.5 rounded-lg bg-[#060912] border border-slate-800 text-[10px] font-mono text-cyan-200 overflow-x-auto whitespace-pre-wrap break-all max-h-48 overflow-y-auto select-all">
+                          {cfg.config_text}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const renderBridgeManageContent = (_isPopup: boolean) => (
+    <div className="space-y-3.5">
+      {/* Section Switcher: 2-Hop PC Control vs Configs */}
+      <div
+        className={`p-1 rounded-2xl border grid grid-cols-2 gap-1 ${currentTheme.styles.cardBorder}`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        <button
+          type="button"
+          onClick={() => setBridgeManageSection("cascade")}
+          className={`py-2 px-3 rounded-xl text-[11.5px] font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+            bridgeManageSection === "cascade"
+              ? "bg-gradient-to-r from-violet-600/85 to-indigo-600/85 text-white shadow-md shadow-violet-500/20 keep-white"
+              : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+          }`}
+        >
+          <Waypoints className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">Связка 2-Hop (ПК)</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setBridgeManageSection("clients")}
+          className={`py-2 px-3 rounded-xl text-[11.5px] font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+            bridgeManageSection === "clients"
+              ? "bg-gradient-to-r from-indigo-600/85 to-cyan-600/85 text-white shadow-md shadow-cyan-500/20 keep-white"
+              : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+          }`}
+        >
+          <Wifi className="w-3.5 h-3.5 shrink-0" />
+          <span className="truncate">Добавление конфигов</span>
+          {(bridgeConfig.client_configs || []).length > 0 && (
+            <span className="text-[9.5px] font-mono px-1.5 py-0.2 rounded-full bg-black/25 text-white">
+              {(bridgeConfig.client_configs || []).length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {bridgeManageSection === "clients" ? (
+        renderBridgeClientsSection()
+      ) : (
+        <div className="space-y-3.5">
+      {/* Not enough profiles banner */}
+      {profiles.length < 2 && (
+        <div className="p-3 rounded-2xl bg-amber-500/12 border border-amber-500/35 space-y-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-[11px] text-amber-100 leading-relaxed">
+              Для каскада нужны как минимум <b>2 профиля</b>: один доступный <b>Входной мост</b> (например, RU-VPS) и один <b>Выходной сервер</b> (зарубежный VPS). Вы можете настроить сразу оба сервера в связке за 1 клик в разделе Автодеплой!
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => void openPopupWindow("bridge_deploy")}
+            className="w-full py-2 px-3 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-100 text-[11px] font-bold transition flex items-center justify-center gap-1.5 cursor-pointer"
+          >
+            <Server className="w-3.5 h-3.5" />
+            <span>Деплой моста (настроить сразу 2 VPS)</span>
+          </button>
+        </div>
+      )}
+
+      {/* Visual 2-Hop Pipeline Card */}
+      <div
+        className={`p-3 rounded-2xl border soft-edge-block space-y-2.5 ${
+          status.bridge_active && status.connected
+            ? "border-violet-500/50 shadow-lg shadow-violet-500/10"
+            : currentTheme.styles.cardBorder
+        }`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        <div className="flex items-center justify-between gap-1 text-[10px]">
+          {/* Node 0: Device */}
+          <div className="flex flex-col items-center gap-1 min-w-[44px]">
+            <div className="w-8 h-8 rounded-xl bg-slate-800/90 border border-slate-700 flex items-center justify-center text-slate-200">
+              {isMobilePlatform ? <Smartphone className="w-4 h-4" /> : <Monitor className="w-4 h-4" />}
+            </div>
+            <span className="text-[9.5px] font-semibold text-slate-400">
+              {isMobilePlatform ? "Телефон" : "ПК"}
+            </span>
+          </div>
+
+          <ArrowRight
+            className={`w-3.5 h-3.5 shrink-0 ${
+              status.bridge_active && status.connected ? "text-violet-400 animate-pulse" : "text-slate-600"
+            }`}
+          />
+
+          {/* Node 1: Entry Bridge */}
+          <div className="flex-1 min-w-0 p-2 rounded-xl bg-[#0b1120]/90 border border-violet-500/35 text-center">
+            <div className="text-[9px] uppercase tracking-wider font-bold text-violet-300">
+              1. Входной мост
+            </div>
+            <div className="text-[11px] font-bold text-white truncate mt-0.5">
+              {bridgeEntryProfile ? bridgeEntryProfile.name : "Не выбран"}
+            </div>
+            <div className="text-[9.5px] font-mono text-slate-400 truncate">
+              {bridgeEntryProfile
+                ? `${getProtocolMeta(bridgeEntryProfile.protocol, bridgeEntryProfile.awg_version).label}`
+                : "—"}
+            </div>
+          </div>
+
+          <ArrowRight
+            className={`w-3.5 h-3.5 shrink-0 ${
+              status.bridge_active && status.connected ? "text-cyan-400 animate-pulse" : "text-slate-600"
+            }`}
+          />
+
+          {/* Node 2: Exit Server */}
+          <div className="flex-1 min-w-0 p-2 rounded-xl bg-[#0b1120]/90 border border-cyan-500/35 text-center">
+            <div className="text-[9px] uppercase tracking-wider font-bold text-cyan-300">
+              2. Выход (IP)
+            </div>
+            <div className="text-[11px] font-bold text-white truncate mt-0.5">
+              {bridgeExitProfile ? bridgeExitProfile.name : "Не выбран"}
+            </div>
+            <div className="text-[9.5px] font-mono text-slate-400 truncate">
+              {bridgeExitProfile
+                ? `${getProtocolMeta(bridgeExitProfile.protocol, bridgeExitProfile.awg_version).label}`
+                : "—"}
+            </div>
+          </div>
+
+          <ArrowRight
+            className={`w-3.5 h-3.5 shrink-0 ${
+              status.bridge_active && status.connected ? "text-emerald-400 animate-pulse" : "text-slate-600"
+            }`}
+          />
+
+          {/* Node 3: Internet */}
+          <div className="flex flex-col items-center gap-1 min-w-[44px]">
+            <div
+              className={`w-8 h-8 rounded-xl border flex items-center justify-center ${
+                status.bridge_active && status.connected
+                  ? "bg-emerald-500/20 border-emerald-400/50 text-emerald-300"
+                  : "bg-slate-800/90 border-slate-700 text-slate-400"
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+            </div>
+            <span className="text-[9.5px] font-semibold text-slate-400">Сеть</span>
+          </div>
+        </div>
+
+        {/* Live Bridge Telemetry Bar when Bridge is Active */}
+        {status.bridge_active && (status.connected || status.is_connecting) && (
+          <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2 text-[10.5px] font-mono">
+            <div className="flex items-center gap-1.5 min-w-0 truncate">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  status.is_handshaking || status.is_connecting
+                    ? "bg-amber-400 animate-ping"
+                    : "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                }`}
+              />
+              <span className="text-slate-200 truncate">
+                {status.is_handshaking || status.is_connecting
+                  ? status.handshake_status || "Установка 2-Hop цепи..."
+                  : `Активно: ${status.bridge_entry_name} → ${status.bridge_exit_name}`}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0 text-[10px]">
+              <span className="text-cyan-300">↓ {formatBytes(status.down_speed)}/с</span>
+              <span className="text-violet-300">↑ {formatBytes(status.up_speed)}/с</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Entry & Exit Selection Card */}
+      <div
+        className={`p-3.5 rounded-2xl border soft-edge-block space-y-3 ${currentTheme.styles.cardBorder}`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        {/* Entry Selector */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <label className="text-[11px] font-bold text-violet-300 flex items-center gap-1.5">
+              <span className="w-4 h-4 rounded-md bg-violet-500/20 border border-violet-400/40 text-[10px] flex items-center justify-center">
+                1
+              </span>
+              Входной мост (куда подключается ваш ПК)
+            </label>
+            <button
+              type="button"
+              disabled={!bridgeEntryId || bridgePingingEntry}
+              onClick={handlePingBridgeEntry}
+              className="px-2 py-0.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-200 disabled:opacity-40 transition flex items-center gap-1 cursor-pointer"
+              title="Проверить доступность Входного моста от вашего провайдера"
+            >
+              <Activity className={`w-3 h-3 text-cyan-400 ${bridgePingingEntry ? "animate-spin" : ""}`} />
+              <span>
+                {bridgePingingEntry
+                  ? "Пинг..."
+                  : bridgeEntryPing === null
+                  ? "Проверить"
+                  : bridgeEntryPing >= 0
+                  ? `${bridgeEntryPing} мс`
+                  : "Недоступен"}
+              </span>
+            </button>
+          </div>
+
+          <select
+            value={bridgeEntryId}
+            onChange={(e) => handleSelectBridgeEntry(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs text-white outline-none transition"
+          >
+            <option value="">— Выберите Входной мост —</option>
+            {profiles.map((p) => {
+              const pm = getProtocolMeta(p.protocol, p.awg_version);
+              return (
+                <option key={p.id} value={p.id}>
+                  {p.name} ({pm.label} • {p.server}:{p.port})
+                </option>
+              );
+            })}
+          </select>
+          {bridgeEntryProfile && (
+            <div className="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
+              <span className="font-mono truncate">
+                {bridgeEntryProfile.server}:{bridgeEntryProfile.port}
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-violet-500/15 border border-violet-400/30 text-violet-200 font-semibold">
+                {getProtocolMeta(bridgeEntryProfile.protocol, bridgeEntryProfile.awg_version).label}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Swap Button Divider */}
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-px bg-slate-800/90" />
+          <button
+            type="button"
+            disabled={!bridgeEntryId || !bridgeExitId}
+            onClick={handleSwapBridgeNodes}
+            className="px-2.5 py-1 rounded-xl bg-[#0b1120] hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/40 text-[10.5px] font-semibold text-slate-300 hover:text-cyan-300 disabled:opacity-40 transition flex items-center gap-1.5 cursor-pointer"
+            title="Поменять Входной мост и Выходной сервер местами"
+          >
+            <ArrowLeftRight className="w-3.5 h-3.5" />
+            <span>Поменять местами</span>
+          </button>
+          <div className="flex-1 h-px bg-slate-800/90" />
+        </div>
+
+        {/* Exit Selector */}
+        <div className="space-y-1.5">
+          <label className="text-[11px] font-bold text-cyan-300 flex items-center gap-1.5">
+            <span className="w-4 h-4 rounded-md bg-cyan-500/20 border border-cyan-400/40 text-[10px] flex items-center justify-center">
+              2
+            </span>
+            Выходной сервер (конечный IP в интернете)
+          </label>
+          <select
+            value={bridgeExitId}
+            onChange={(e) => handleSelectBridgeExit(e.target.value)}
+            className="w-full px-3 py-2 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs text-white outline-none transition"
+          >
+            <option value="">— Выберите Выходной сервер —</option>
+            {profiles.map((p) => {
+              const pm = getProtocolMeta(p.protocol, p.awg_version);
+              const disabledOpt = p.id === bridgeEntryId || p.protocol === "enigma";
+              const suffix =
+                p.protocol === "enigma"
+                  ? " [только для Входа]"
+                  : p.id === bridgeEntryId
+                  ? " [выбран как Вход]"
+                  : "";
+              return (
+                <option key={p.id} value={p.id} disabled={disabledOpt}>
+                  {p.name} ({pm.label} • {p.server}:{p.port}){suffix}
+                </option>
+              );
+            })}
+          </select>
+          {bridgeExitProfile && (
+            <div className="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
+              <span className="font-mono truncate">
+                {bridgeExitProfile.server}:{bridgeExitProfile.port}
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-400/30 text-cyan-200 font-semibold">
+                {getProtocolMeta(bridgeExitProfile.protocol, bridgeExitProfile.awg_version).label}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Compatibility Notice */}
+        {bridgeCompatError && profiles.length >= 2 && (
+          <div className="p-2.5 rounded-xl bg-rose-500/12 border border-rose-500/35 flex items-start gap-2 text-[11px] text-rose-200 leading-snug">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <span>{bridgeCompatError}</span>
+          </div>
+        )}
+
+        {/* Primary Bridge Connect / Disconnect Button */}
+        {(() => {
+          const isThisBridgeRunning =
+            status.connected &&
+            status.bridge_active &&
+            status.bridge_entry_profile_id === bridgeEntryId &&
+            status.active_profile_id === bridgeExitId;
+          return (
+            <button
+              type="button"
+              disabled={
+                disconnecting ||
+                reconnectCooldown ||
+                bridgeConnecting ||
+                (!isThisBridgeRunning && Boolean(bridgeCompatError))
+              }
+              onClick={() => void handleConnectBridge()}
+              className={`w-full py-3 px-4 rounded-xl text-xs font-extrabold tracking-wide text-white transition flex items-center justify-center gap-2 shadow-lg cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed keep-white ${
+                isThisBridgeRunning
+                  ? "bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 shadow-rose-500/20"
+                  : "bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 hover:from-violet-500 hover:via-indigo-500 hover:to-cyan-500 shadow-violet-500/25"
+              }`}
+            >
+              {bridgeConnecting || disconnecting ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : isThisBridgeRunning ? (
+                <Power className="w-4 h-4" />
+              ) : (
+                <Waypoints className="w-4 h-4" />
+              )}
+              <span>
+                {disconnecting
+                  ? "Отключение..."
+                  : bridgeConnecting
+                  ? "Запуск 2-Hop моста..."
+                  : isThisBridgeRunning
+                  ? "ОТКЛЮЧИТЬ МОСТ (2-HOP)"
+                  : status.connected
+                  ? "ПЕРЕКЛЮЧИТЬ НА МОСТ (2-HOP)"
+                  : "ПОДКЛЮЧИТЬ МОСТ (2-HOP)"}
+              </span>
+            </button>
+          );
+        })()}
+      </div>
+
+      {/* Saved Bridge Pairs Card */}
+      <div
+        className={`p-3.5 rounded-2xl border soft-edge-block space-y-3 ${currentTheme.styles.cardBorder}`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-bold text-white flex items-center gap-1.5">
+            <Bookmark className="w-4 h-4 text-violet-400" />
+            <span>Сохранённые связки моста</span>
+          </h3>
+          <span className="text-[10px] font-mono text-slate-400">
+            {(bridgeConfig.saved_pairs || []).length} шт.
+          </span>
+        </div>
+
+        {/* Save Current Pair Row */}
+        <div className="flex items-center gap-1.5">
+          <input
+            type="text"
+            value={bridgePairName}
+            onChange={(e) => setBridgePairName(e.target.value)}
+            placeholder="Название связки (напр. РФ → Амстердам)"
+            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-[11px] text-white placeholder-slate-500 outline-none"
+          />
+          <button
+            type="button"
+            disabled={Boolean(bridgeCompatError) || bridgeSavingPair}
+            onClick={handleSaveBridgePair}
+            className="px-3 py-1.5 rounded-xl bg-violet-600/80 hover:bg-violet-500 disabled:opacity-40 text-white text-[11px] font-bold transition flex items-center gap-1 shrink-0 cursor-pointer keep-white"
+            title="Сохранить выбранную пару Вход → Выход в избранное"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>Сохранить</span>
+          </button>
+        </div>
+
+        {/* Saved Pairs List */}
+        {(bridgeConfig.saved_pairs || []).length === 0 ? (
+          <div className="p-3 rounded-xl bg-[#0a0f1d]/70 border border-slate-800/80 text-center text-[11px] text-slate-400">
+            Нет сохранённых связок. Выберите Вход и Выход выше и нажмите «Сохранить» для запуска в 1 клик.
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {(bridgeConfig.saved_pairs || []).map((pair) => {
+              const pEntry = profiles.find((p) => p.id === pair.entry_profile_id);
+              const pExit = profiles.find((p) => p.id === pair.exit_profile_id);
+              const isPairActive =
+                status.connected &&
+                status.bridge_active &&
+                status.bridge_entry_profile_id === pair.entry_profile_id &&
+                status.active_profile_id === pair.exit_profile_id;
+              return (
+                <div
+                  key={pair.id}
+                  className={`p-2.5 rounded-xl border flex items-center justify-between gap-2 transition ${
+                    isPairActive
+                      ? "bg-violet-950/35 border-violet-400/55"
+                      : "bg-[#0a0f1d]/80 border-slate-800/90 hover:border-slate-700"
+                  }`}
+                >
+                  <div
+                    className="min-w-0 flex-1 cursor-pointer"
+                    onClick={() => {
+                      setBridgeEntryId(pair.entry_profile_id);
+                      setBridgeExitId(pair.exit_profile_id);
+                      void persistBridgeSelection(pair.entry_profile_id, pair.exit_profile_id);
+                    }}
+                  >
+                    <div className="text-[11.5px] font-bold text-white truncate flex items-center gap-1.5">
+                      <span>{pair.name}</span>
+                      {isPairActive && (
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 border border-emerald-400/40 text-emerald-300 font-bold">
+                          LIVE
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-[10px] text-slate-400 font-mono truncate mt-0.5 flex items-center gap-1">
+                      <span className="text-violet-300 truncate">{pEntry?.name || "Удалён"}</span>
+                      <ArrowRight className="w-3 h-3 shrink-0 text-slate-500" />
+                      <span className="text-cyan-300 truncate">{pExit?.name || "Удалён"}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      disabled={!pEntry || !pExit || bridgeConnecting || disconnecting}
+                      onClick={() => {
+                        if (isPairActive) {
+                          void handleToggleConnect();
+                        } else {
+                          void handleConnectBridge(pair.entry_profile_id, pair.exit_profile_id);
+                        }
+                      }}
+                      className={`px-2.5 py-1.5 rounded-lg text-[10.5px] font-bold transition flex items-center gap-1 cursor-pointer disabled:opacity-40 keep-white ${
+                        isPairActive
+                          ? "bg-rose-600 hover:bg-rose-500 text-white"
+                          : "bg-cyan-600 hover:bg-cyan-500 text-white"
+                      }`}
+                      title={isPairActive ? "Отключить связку" : "Подключить эту связку моста"}
+                    >
+                      {isPairActive ? <Power className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                      <span>{isPairActive ? "Стоп" : "Старт"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteBridgePair(pair.id)}
+                      className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700/70 hover:border-rose-500/50 text-slate-400 hover:text-rose-300 transition cursor-pointer"
+                      title="Удалить связку"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Info / Tip Card */}
+      <div className="p-3 rounded-2xl bg-indigo-950/25 border border-indigo-500/30 space-y-2 text-[11px] text-slate-300 leading-relaxed">
+        <div className="font-bold text-indigo-200 flex items-center gap-1.5">
+          <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          <span>Как это спасает при блокировке IP и подсетей?</span>
+        </div>
+        <p className="text-[10.5px] text-slate-400">
+          Если провайдер (ТСПУ) заблокировал IP вашего зарубежного VPS, поставьте в качестве <b>Входного моста</b> любой рабочий профиль (например, недорогой RU-VPS или рабочий WG/VLESS-конфиг), а в <b>Выходной сервер</b> — ваш зарубежный VPS. Трафик пойдёт по двойному шифрованному каскаду, и все правила <b>Раздельного туннелирования</b> продолжат работать автоматически.
+        </p>
+        <div className="flex flex-wrap items-center gap-3 pt-0.5">
+          <button
+            type="button"
+            onClick={() => setBridgeManageSection("clients")}
+            className="text-[11px] font-bold text-violet-300 hover:text-violet-200 flex items-center gap-1 cursor-pointer transition"
+          >
+            <Wifi className="w-3.5 h-3.5" />
+            <span>Добавление конфигов через каскад</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void openPopupWindow("bridge_deploy")}
+            className="text-[11px] font-bold text-cyan-300 hover:text-cyan-200 flex items-center gap-1 cursor-pointer transition"
+          >
+            <span>Деплой моста (2 VPS по SSH)</span>
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderBridgeDeployContent = (isPopup: boolean) => (
+    <div className="space-y-3">
+      {/* Pair Name & Quick Actions Card */}
+      <div
+        className={`p-3 rounded-2xl border soft-edge-block space-y-2 ${currentTheme.styles.cardBorder}`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <label className="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
+            <Bookmark className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+            <span>Название связки (необязательно)</span>
+          </label>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={bridgeDeploying}
+              onClick={handleSwapBridgeDeployServers}
+              className="px-2.5 py-1 rounded-lg bg-[#0b1120] hover:bg-slate-800 border border-slate-700/80 hover:border-cyan-500/40 text-[10.5px] font-semibold text-slate-300 hover:text-cyan-300 disabled:opacity-40 transition flex items-center gap-1 cursor-pointer"
+              title="Поменять данные Сервера 1 и Сервера 2 местами"
+            >
+              <ArrowLeftRight className="w-3 h-3" />
+              <span>Поменять местами</span>
+            </button>
+            {isPopup && (
+              <button
+                type="button"
+                onClick={() => void openPopupWindow("bridge_manage")}
+                className="px-2.5 py-1 rounded-lg bg-violet-600/20 hover:bg-violet-600/30 border border-violet-400/40 text-[10.5px] font-bold text-violet-200 transition flex items-center gap-1 cursor-pointer"
+              >
+                <Waypoints className="w-3 h-3" />
+                <span>Управление каскадом</span>
+              </button>
+            )}
+          </div>
+        </div>
+        <input
+          type="text"
+          disabled={bridgeDeploying}
+          value={bridgePairForm.pair_name}
+          onChange={(e) =>
+            setBridgePairForm((prev) => ({ ...prev, pair_name: e.target.value }))
+          }
+          placeholder="Например: Москва → Нидерланды"
+          className="w-full px-3 py-2 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs text-white placeholder-slate-500 outline-none disabled:opacity-50"
+        />
+        <p className="text-[10px] text-slate-400 leading-snug">
+          Впишите SSH-данные сразу двух VPS: установщик развернёт протоколы на обоих серверах, создаст готовые профили, свяжет их в каскад и сохранит связку.
+        </p>
+      </div>
+
+      {/* Dual VPS Cards Grid (2 columns in desktop popup, stacked in narrow sidebar) */}
+      <div className={isPopup ? "grid grid-cols-1 md:grid-cols-2 gap-3" : "space-y-3"}>
+        {/* Server 1: Entry Bridge Card */}
+        <div
+          className="p-3.5 rounded-2xl border border-violet-500/35 soft-edge-block space-y-2.5"
+          style={{ backgroundColor: currentTheme.styles.cardBg }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-5 h-5 rounded-lg bg-violet-500/20 border border-violet-400/45 text-[11px] font-extrabold text-violet-200 flex items-center justify-center shrink-0">
+                1
+              </span>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-violet-200 truncate">
+                  Сервер 1 — Входной мост
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  Доступный VPS (РФ / СНГ — вход от ПК)
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={bridgeDeploying || bridgeTestingServer !== null}
+              onClick={() => void handleTestBridgeServerSsh("entry")}
+              className="px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10.5px] font-bold text-slate-200 disabled:opacity-40 transition flex items-center gap-1 shrink-0 cursor-pointer"
+              title="Проверить SSH-доступ к Серверу 1"
+            >
+              {bridgeTestingServer === "entry" ? (
+                <RefreshCw className="w-3 h-3 animate-spin text-violet-300" />
+              ) : (
+                <Activity className="w-3 h-3 text-violet-300" />
+              )}
+              <span>Тест SSH</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-8 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">IP или домен</label>
+              <input
+                type="text"
+                disabled={bridgeDeploying}
+                value={bridgePairForm.entry_host}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({ ...prev, entry_host: e.target.value }))
+                }
+                placeholder="185.10.20.30"
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+              />
+            </div>
+            <div className="col-span-4 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">SSH порт</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                disabled={bridgeDeploying}
+                value={bridgePairForm.entry_ssh_port}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({
+                    ...prev,
+                    entry_ssh_port: parseInt(e.target.value, 10) || 22,
+                  }))
+                }
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs font-mono text-white outline-none disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-5 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">Логин SSH</label>
+              <input
+                type="text"
+                disabled={bridgeDeploying}
+                value={bridgePairForm.entry_username}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({ ...prev, entry_username: e.target.value }))
+                }
+                placeholder="root"
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+              />
+            </div>
+            <div className="col-span-7 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">Пароль SSH</label>
+              <div className="relative">
+                <input
+                  type={showBridgeEntryPass ? "text" : "password"}
+                  disabled={bridgeDeploying}
+                  value={bridgePairForm.entry_password}
+                  onChange={(e) =>
+                    setBridgePairForm((prev) => ({
+                      ...prev,
+                      entry_password: e.target.value,
+                    }))
+                  }
+                  placeholder="Пароль root"
+                  className="w-full pl-2.5 pr-8 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => setShowBridgeEntryPass((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  {showBridgeEntryPass ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-semibold text-slate-400">
+              Протокол Входного моста (до Сервера 1)
+            </label>
+            <select
+              disabled={bridgeDeploying}
+              value={bridgePairForm.entry_protocol}
+              onChange={(e) =>
+                setBridgePairForm((prev) => ({ ...prev, entry_protocol: e.target.value }))
+              }
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-violet-400/70 text-xs text-white outline-none disabled:opacity-50"
+            >
+              <option value="vless">VLESS Reality (Рекомендуется — TCP+UDP, обход DPI)</option>
+              <option value="amneziawg">AmneziaWG 3.1 (Максимальная скорость UDP)</option>
+              <option value="hysteria2">Hysteria 2 (QUIC / UDP, стабилен при потерях)</option>
+              <option value="tuic">TUIC v5 (QUIC 0-RTT)</option>
+              <option value="awg_vless">Гибрид AWG + Reality</option>
+              <option value="awg_quic">Гибрид AWG + QUIC</option>
+              <option value="enigma">Enigma v1 (Мутация UDP + Port Hopping)</option>
+              <option value="shadowtls">ShadowTLS v3 (только TCP-выход)</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Server 2: Exit VPS Card */}
+        <div
+          className="p-3.5 rounded-2xl border border-cyan-500/35 soft-edge-block space-y-2.5"
+          style={{ backgroundColor: currentTheme.styles.cardBg }}
+        >
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="w-5 h-5 rounded-lg bg-cyan-500/20 border border-cyan-400/45 text-[11px] font-extrabold text-cyan-200 flex items-center justify-center shrink-0">
+                2
+              </span>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-cyan-200 truncate">
+                  Сервер 2 — Выходной сервер
+                </div>
+                <div className="text-[10px] text-slate-400 truncate">
+                  Зарубежный VPS (конечный IP в сети)
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={bridgeDeploying || bridgeTestingServer !== null}
+              onClick={() => void handleTestBridgeServerSsh("exit")}
+              className="px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 border border-slate-700 text-[10.5px] font-bold text-slate-200 disabled:opacity-40 transition flex items-center gap-1 shrink-0 cursor-pointer"
+              title="Проверить прямой SSH-доступ к Серверу 2"
+            >
+              {bridgeTestingServer === "exit" ? (
+                <RefreshCw className="w-3 h-3 animate-spin text-cyan-300" />
+              ) : (
+                <Activity className="w-3 h-3 text-cyan-300" />
+              )}
+              <span>Тест SSH</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-8 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">IP или домен</label>
+              <input
+                type="text"
+                disabled={bridgeDeploying}
+                value={bridgePairForm.exit_host}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({ ...prev, exit_host: e.target.value }))
+                }
+                placeholder="72.56.84.168"
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+              />
+            </div>
+            <div className="col-span-4 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">SSH порт</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                disabled={bridgeDeploying}
+                value={bridgePairForm.exit_ssh_port}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({
+                    ...prev,
+                    exit_ssh_port: parseInt(e.target.value, 10) || 22,
+                  }))
+                }
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs font-mono text-white outline-none disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-12 gap-2">
+            <div className="col-span-5 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">Логин SSH</label>
+              <input
+                type="text"
+                disabled={bridgeDeploying}
+                value={bridgePairForm.exit_username}
+                onChange={(e) =>
+                  setBridgePairForm((prev) => ({ ...prev, exit_username: e.target.value }))
+                }
+                placeholder="root"
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+              />
+            </div>
+            <div className="col-span-7 space-y-1">
+              <label className="text-[10px] font-semibold text-slate-400">Пароль SSH</label>
+              <div className="relative">
+                <input
+                  type={showBridgeExitPass ? "text" : "password"}
+                  disabled={bridgeDeploying}
+                  value={bridgePairForm.exit_password}
+                  onChange={(e) =>
+                    setBridgePairForm((prev) => ({
+                      ...prev,
+                      exit_password: e.target.value,
+                    }))
+                  }
+                  placeholder="Пароль root"
+                  className="w-full pl-2.5 pr-8 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs font-mono text-white placeholder-slate-500 outline-none disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  tabIndex={-1}
+                  onClick={() => setShowBridgeExitPass((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200 cursor-pointer"
+                >
+                  {showBridgeExitPass ? (
+                    <EyeOff className="w-3.5 h-3.5" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="text-[10px] font-semibold text-slate-400">
+              Протокол Выходного сервера (туннель до Сервера 2)
+            </label>
+            <select
+              disabled={bridgeDeploying}
+              value={bridgePairForm.exit_protocol}
+              onChange={(e) =>
+                setBridgePairForm((prev) => ({ ...prev, exit_protocol: e.target.value }))
+              }
+              className="w-full px-2.5 py-1.5 rounded-xl bg-[#0a0f1d] border border-slate-700/80 focus:border-cyan-400/70 text-xs text-white outline-none disabled:opacity-50"
+            >
+              <option value="amneziawg">AmneziaWG 3.1 (Рекомендуется — быстро поверх VLESS/AWG)</option>
+              <option value="vless">VLESS Reality (Универсальный TCP+UDP)</option>
+              <option value="hysteria2">Hysteria 2 (QUIC / UDP)</option>
+              <option value="tuic">TUIC v5 (QUIC)</option>
+              <option value="awg_vless">Гибрид AWG + Reality</option>
+              <option value="shadowsocks">Shadowsocks 2022 (Лёгкий TCP+UDP)</option>
+            </select>
+          </div>
+
+          <div className="p-2 rounded-xl bg-cyan-950/35 border border-cyan-500/25 flex items-start gap-2 text-[10px] text-cyan-100/90 leading-snug">
+            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400 shrink-0 mt-0.5" />
+            <span>
+              Если IP Сервера 2 заблокирован провайдером, установщик <b>автоматически подключится к нему по SSH через Сервер 1</b> сразу после его настройки!
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Compatibility Warning */}
+      {bridgeDeployCompatError && (
+        <div className="p-2.5 rounded-xl bg-rose-500/12 border border-rose-500/35 flex items-start gap-2 text-[11px] text-rose-200 leading-snug">
+          <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          <span>{bridgeDeployCompatError}</span>
+        </div>
+      )}
+
+      {/* Success Banner after Pair Deploy */}
+      {bridgeLastDeployResult && !bridgeDeploying && (
+        <div className="p-3 rounded-2xl bg-emerald-950/35 border border-emerald-500/40 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-start gap-2 min-w-0">
+            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            <div className="text-[11px] text-emerald-100 leading-snug">
+              <div className="font-bold">Связка моста успешно развёрнута!</div>
+              <div className="text-[10.5px] text-emerald-200/85 mt-0.5">
+                {bridgeLastDeployResult.entry_profile.name} → {bridgeLastDeployResult.exit_profile.name}
+                {bridgeLastDeployResult.auto_connected ? " • Мост 2-Hop уже запущен" : ""}
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (isPopup) {
+                void openPopupWindow("bridge_manage");
+              } else {
+                setActiveTab("bridge");
+              }
+            }}
+            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-[11px] font-bold text-white flex items-center gap-1.5 cursor-pointer shrink-0 keep-white"
+          >
+            <Waypoints className="w-3.5 h-3.5" />
+            <span>Открыть Управление каскадом</span>
+          </button>
+        </div>
+      )}
+
+      {/* Options & Launch Card */}
+      <div
+        className={`p-3 rounded-2xl border soft-edge-block space-y-2.5 ${currentTheme.styles.cardBorder}`}
+        style={{ backgroundColor: currentTheme.styles.cardBg }}
+      >
+        <div className={isPopup ? "flex flex-wrap items-center gap-x-5 gap-y-2" : "space-y-2"}>
+          <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              disabled={bridgeDeploying}
+              checked={bridgePairForm.save_pair_preset}
+              onChange={(e) =>
+                setBridgePairForm((prev) => ({
+                  ...prev,
+                  save_pair_preset: e.target.checked,
+                }))
+              }
+              className="rounded border-slate-600 bg-[#0a0f1d] text-violet-500 focus:ring-violet-500"
+            />
+            <span>Сохранить связку в «Сохранённые связки моста»</span>
+          </label>
+          <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              disabled={bridgeDeploying}
+              checked={bridgePairForm.auto_connect_after_deploy}
+              onChange={(e) =>
+                setBridgePairForm((prev) => ({
+                  ...prev,
+                  auto_connect_after_deploy: e.target.checked,
+                }))
+              }
+              className="rounded border-slate-600 bg-[#0a0f1d] text-cyan-500 focus:ring-cyan-500"
+            />
+            <span>Сразу подключить 2-Hop Мост после завершения настройки</span>
+          </label>
+        </div>
+
+        <button
+          type="button"
+          disabled={
+            bridgeDeploying ||
+            !bridgePairForm.entry_host.trim() ||
+            !bridgePairForm.entry_password ||
+            !bridgePairForm.exit_host.trim() ||
+            !bridgePairForm.exit_password ||
+            Boolean(bridgeDeployCompatError)
+          }
+          onClick={() => void handleDeployBridgePair()}
+          className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 hover:from-violet-500 hover:via-indigo-500 hover:to-cyan-500 disabled:opacity-45 disabled:cursor-not-allowed text-xs font-extrabold tracking-wide text-white shadow-lg shadow-violet-500/20 transition flex items-center justify-center gap-2 cursor-pointer keep-white"
+        >
+          {bridgeDeploying ? (
+            <RefreshCw className="w-4 h-4 animate-spin" />
+          ) : (
+            <Zap className="w-4 h-4" />
+          )}
+          <span>
+            {bridgeDeploying
+              ? "НАСТРОЙКА ПАРЫ СЕРВЕРОВ..."
+              : "НАСТРОИТЬ ПАРУ СЕРВЕРОВ В СВЯЗКЕ"}
+          </span>
+        </button>
+      </div>
+
+      {/* Live Deploy Console */}
+      {bridgeDeployLogs.length > 0 && (
+        <div className="rounded-2xl bg-[#070b14] border border-slate-800/90 overflow-hidden">
+          <div className="px-3 py-1.5 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-[10.5px] font-bold text-slate-300 flex items-center gap-1.5">
+              <Terminal className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Журнал настройки пары ({bridgeDeployLogs.length})</span>
+            </span>
+            {!bridgeDeploying && (
+              <button
+                type="button"
+                onClick={() => setBridgeDeployLogs([])}
+                className="text-[10px] text-slate-400 hover:text-slate-200 cursor-pointer"
+              >
+                Очистить
+              </button>
+            )}
+          </div>
+          <div className="p-2.5 max-h-56 overflow-y-auto font-mono text-[10px] leading-relaxed space-y-0.5 text-slate-300">
+            {bridgeDeployLogs.map((line, i) => (
+              <div
+                key={i}
+                className={`break-words whitespace-pre-wrap ${
+                  line.includes("[ОШИБКА]") || line.includes("❌")
+                    ? "text-rose-400"
+                    : line.includes("===") || line.includes("✅") || line.includes("🎉")
+                    ? "text-emerald-300 font-semibold"
+                    : line.includes("⚠️")
+                    ? "text-amber-300"
+                    : "text-slate-300"
+                }`}
+              >
+                {line}
+              </div>
+            ))}
+            <div ref={bridgeDeployLogsEndRef} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   const allPopupModes = [
     "file",
     "key",
     "vps",
     "vps_admin",
+    "bridge_deploy",
+    "bridge_manage",
     "logs",
     "qr",
     "edit",
@@ -3893,6 +6695,8 @@ export default function App() {
     const isPopupMaximizable =
       popupMode === "vps" ||
       popupMode === "vps_admin" ||
+      popupMode === "bridge_deploy" ||
+      popupMode === "bridge_manage" ||
       popupMode === "logs" ||
       popupMode === "edit" ||
       popupMode === "routing_rules" ||
@@ -3914,6 +6718,10 @@ export default function App() {
         ? "Добавить VPS — Автодеплой по SSH"
         : popupMode === "vps_admin"
         ? "Управление VPS — Контейнеры и ключи"
+        : popupMode === "bridge_deploy"
+        ? "Деплой моста (2 VPS) — Автонастройка пары по SSH"
+        : popupMode === "bridge_manage"
+        ? "Управление каскадом (2-Hop)"
         : popupMode === "logs"
         ? isMobilePlatform
           ? "Журнал ядра libbox"
@@ -4123,12 +6931,12 @@ export default function App() {
                 </button>
               </div>
 
-              {profiles.length > 0 && (
+              {totalVisibleTunnelCount > 0 && (
                 <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 min-w-0">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                     <span className="text-xs text-emerald-200 truncate">
-                      Добавлено туннелей в приложении: <b>{profiles.length}</b>
+                      Добавлено туннелей в приложении: <b>{totalVisibleTunnelCount}</b>
                     </span>
                   </div>
                 </div>
@@ -4158,7 +6966,7 @@ export default function App() {
                 <div>
                   <h2 className="text-sm font-bold text-white">Вставить ключ или текст конфига</h2>
                   <p className="text-[11px] text-slate-400">
-                    Поддерживаются ключи <code>vless://</code>, <code>awg://</code>, <code>hy2://</code>, <code>ss://</code>, <code>tuic://</code> или текст <code>[Interface]</code>
+                    Поддерживаются ключи <code>enigma://</code>, <code>vless://</code>, <code>awg://</code>, <code>hy2://</code>, <code>ss://</code>, <code>tuic://</code> или текст <code>[Interface]</code>
                   </p>
                 </div>
               </div>
@@ -4166,7 +6974,7 @@ export default function App() {
               <div className="space-y-2">
                 <textarea
                   rows={5}
-                  placeholder="Вставьте сюда ссылку-ключ (vless://..., awg://..., hy2://..., ss://..., tuic://...) или полный текст .conf / .json"
+                  placeholder="Вставьте сюда ссылку-ключ (enigma://..., vless://..., awg://..., hy2://..., ss://..., tuic://...) или полный текст .conf / .json"
                   value={uriInput}
                   onChange={(e) => setUriInput(e.target.value)}
                   className="w-full p-3 rounded-xl bg-[#0b101d] border border-slate-700/80 text-xs font-mono text-cyan-200 focus:border-cyan-500 focus:outline-none select-text resize-none"
@@ -4215,6 +7023,7 @@ export default function App() {
                           {(
                             [
                               "vless",
+                              "enigma",
                               "amneziawg",
                               "awg_quic",
                               "awg_vless",
@@ -4240,9 +7049,14 @@ export default function App() {
                                     protoKey === "awg_quic" ||
                                     protoKey === "awg_vless";
                                   const isAwg20 = protoKey === "awg2";
+                                  const isEnigma = protoKey === "enigma";
                                   setNewProfile({
                                     ...newProfile,
                                     protocol: protoKey as any,
+                                    enigma_mimic: isEnigma ? (newProfile.enigma_mimic || "auto") : newProfile.enigma_mimic,
+                                    awg_local_address: isEnigma
+                                      ? (newProfile.awg_local_address || "10.8.7.2/24")
+                                      : newProfile.awg_local_address,
                                     port:
                                       protoKey === "ssh"
                                         ? 22
@@ -4256,7 +7070,7 @@ export default function App() {
                                         ? 2096
                                         : protoKey === "webrtc"
                                         ? 3478
-                                        : isAwg31 || isAwg20
+                                        : isAwg31 || isAwg20 || isEnigma
                                         ? getRandomInt(21000, 55000)
                                         : 8443,
                                   });
@@ -4527,6 +7341,7 @@ export default function App() {
                   {(
                     [
                       { key: "vless", field: "deploy_vless", defaultChecked: true },
+                      { key: "enigma", field: "deploy_enigma", defaultChecked: true },
                       { key: "amneziawg", field: "deploy_awg", defaultChecked: true },
                       { key: "awg_quic", field: "deploy_awg_quic", defaultChecked: true },
                       { key: "awg_vless", field: "deploy_awg_vless", defaultChecked: true },
@@ -4593,6 +7408,47 @@ export default function App() {
                     );
                   })}
                 </div>
+                {(vpsCreds.deploy_enigma ?? true) && (
+                  <div className="p-2.5 rounded-xl bg-amber-950/20 border border-amber-500/30 grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
+                    <div>
+                      <div className="text-[11px] font-bold text-amber-300">
+                        Параметры Enigma v1 (Rotor .nvkey)
+                      </div>
+                      <div className="text-[10px] text-slate-400 leading-snug">
+                        На VPS автоматически скомпилируется шлюз <code>neuroveil-enigma-srv</code> и создастся общая книга <code>enigma.nvkey</code> (16 384 Б).
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1">
+                        <label className="block text-[10px] text-slate-400 mb-0.5">
+                          Порт Enigma (UDP)
+                        </label>
+                        <input
+                          type="number"
+                          value={vpsCreds.enigma_port ?? ""}
+                          placeholder="Случайный (21000..55000)"
+                          onChange={(e) =>
+                            setVpsCreds({
+                              ...vpsCreds,
+                              enigma_port: e.target.value ? Number(e.target.value) || undefined : undefined,
+                            })
+                          }
+                          className="w-full px-2.5 py-1 rounded-lg bg-[#0b101d] border border-slate-700/80 text-xs text-white font-mono focus:border-amber-500 focus:outline-none"
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setVpsCreds({ ...vpsCreds, enigma_port: getRandomInt(21000, 55000) })
+                        }
+                        className="mt-4 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs text-amber-300 cursor-pointer"
+                        title="Сгенерировать случайный UDP порт Enigma"
+                      >
+                        🎲
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -4697,484 +7553,1004 @@ export default function App() {
         {/* POPUP 4B: ТЕСТ СОЕДИНЕНИЯ, СКОРОСТЬ И ДИАГНОСТИКА */}
         {popupMode === "speedtest" && (
           <div className="flex-1 flex flex-col overflow-hidden bg-[#0b101d]">
-            {/* Top Controls & Route Bar */}
+            {/* Top Sub-Tab Switcher + Controls */}
             <div className="px-4 py-2.5 bg-[#111827] border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <span
-                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    status.connected
-                      ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
-                      : "bg-slate-500"
-                  }`}
-                />
-                <div className="min-w-0">
-                  <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
-                    <span>
-                      {status.connected
-                        ? status.active_profile_name || "VPN подключён"
-                        : "VPN отключён (Прямой канал)"}
-                    </span>
-                    {status.connected && status.active_protocol && (
-                      <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[9px] font-mono uppercase text-cyan-300">
-                        {status.active_protocol}
-                      </span>
-                    )}
-                  </div>
-                  {status.connected && (
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <button
-                        type="button"
-                        disabled={speedTestRunning}
-                        onClick={() => {
-                          setSpeedTestUseVpn(true);
-                          if (!speedTestRunning) void handleRunSpeedTest(true, true);
-                        }}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
-                          speedTestUseVpn
-                            ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
-                            : "text-slate-400 hover:text-slate-200 border border-transparent"
-                        }`}
-                      >
-                        Через VPN
-                      </button>
-                      <button
-                        type="button"
-                        disabled={speedTestRunning}
-                        onClick={() => {
-                          setSpeedTestUseVpn(false);
-                          if (!speedTestRunning) void handleRunSpeedTest(true, false);
-                        }}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
-                          !speedTestUseVpn
-                            ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
-                            : "text-slate-400 hover:text-slate-200 border border-transparent"
-                        }`}
-                      >
-                        Напрямую
-                      </button>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0">
-                {speedTestRunning ? (
+              <div className="flex items-center gap-2.5 min-w-0">
+                {/* Segmented Tab Switcher */}
+                <div className="inline-flex p-0.5 rounded-xl bg-[#070a12] border border-slate-800 shrink-0">
                   <button
                     type="button"
-                    onClick={handleStopSpeedTest}
-                    className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-bold text-rose-300 flex items-center gap-1.5 cursor-pointer transition"
+                    onClick={() => setSpeedTestSubTab("test")}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                      speedTestSubTab === "test"
+                        ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-sm"
+                        : "text-slate-400 hover:text-slate-200 border border-transparent"
+                    }`}
                   >
-                    <Square className="w-3.5 h-3.5 fill-current" />
-                    Остановить
+                    <Gauge className="w-3.5 h-3.5" />
+                    Замер скорости
                   </button>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void handleRunSpeedTest(false)}
-                      className="px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer transition shadow-sm"
-                    >
-                      <Play className="w-3.5 h-3.5 fill-current" />
-                      Полный тест
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void handleRunSpeedTest(true)}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
-                      title="Быстрый замер пинга, джиттера, IP и доступности сервисов (без нагрузки на трафик)"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      Пинг
-                    </button>
-                  </>
-                )}
-                <button
-                  type="button"
-                  disabled={!speedTestData}
-                  onClick={handleCopySpeedTestReport}
-                  className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
-                  title="Скопировать отчёт в буфер обмена"
-                >
-                  {speedTestCopied ? (
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  ) : (
-                    <Copy className="w-3.5 h-3.5" />
-                  )}
-                </button>
-              </div>
-            </div>
-
-            {/* Body */}
-            <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar">
-              {/* Progress Indicator */}
-              {(speedTestRunning || (speedTestData && speedTestData.progress_pct > 0 && speedTestData.phase !== "idle")) && (
-                <div className="p-2.5 rounded-xl bg-[#070a12] border border-slate-800/80 space-y-1.5">
-                  <div className="flex items-center justify-between text-[11px]">
-                    <span className="font-semibold text-slate-200 flex items-center gap-1.5">
-                      {speedTestRunning && <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />}
-                      {speedTestData?.phase === "ping"
-                        ? "Замер пинга, джиттера и потерь пакетов..."
-                        : speedTestData?.phase === "download"
-                        ? "Тест скорости скачивания (Download)..."
-                        : speedTestData?.phase === "upload"
-                        ? "Тест скорости отдачи (Upload)..."
-                        : speedTestData?.phase === "diagnostics"
-                        ? "Проверка IP, геолокации, IPv6 и сервисов..."
-                        : speedTestData?.phase === "cancelled"
-                        ? "Тест остановлен пользователем"
-                        : "Тест завершён"}
-                    </span>
-                    <span className="font-mono text-cyan-300 font-bold">
-                      {speedTestData?.progress_pct ?? 0}%
-                      {speedTestData?.elapsed_ms ? ` · ${(speedTestData.elapsed_ms / 1000).toFixed(1)}с` : ""}
-                    </span>
-                  </div>
-                  <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-cyan-500 transition-all duration-200"
-                      style={{ width: `${speedTestData?.progress_pct ?? 0}%` }}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {speedTestError && (
-                <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-300 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>{speedTestError}</span>
-                </div>
-              )}
-
-              {/* Primary 3 Cards: Download, Upload, Ping/Jitter */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                {/* DOWNLOAD CARD */}
-                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                      <Download className="w-3.5 h-3.5 text-emerald-400" />
-                      Скачивание
-                    </span>
-                    {speedTestData && speedTestData.download_bytes > 0 && (
-                      <span className="text-[10px] font-mono text-slate-400">
-                        {(speedTestData.download_bytes / (1024 * 1024)).toFixed(1)} МБ
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-2xl font-extrabold font-mono text-white">
-                      {speedTestData?.phase === "download"
-                        ? (speedTestData.download_current_mbps ?? 0).toFixed(1)
-                        : speedTestData?.download_avg_mbps != null
-                        ? speedTestData.download_avg_mbps.toFixed(1)
-                        : "—"}
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
-                  </div>
-                  {/* Sparkline */}
-                  <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
-                    {(() => {
-                      const samples = speedTestData?.download_samples_mbps || [];
-                      if (samples.length === 0) {
-                        return <span className="text-[9px] text-slate-500 m-auto">Нажмите «Полный тест»</span>;
-                      }
-                      const peak = Math.max(...samples, 1);
-                      return samples.slice(-20).map((v, i) => (
-                        <div
-                          key={i}
-                          className="flex-1 rounded-t bg-emerald-400/80 transition-all"
-                          style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
-                          title={`${v.toFixed(1)} Мбит/с`}
-                        />
-                      ));
-                    })()}
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
-                    <div>
-                      <span className="text-slate-400">Мин: </span>
-                      <span className="font-mono font-bold text-slate-200">
-                        {speedTestData?.download_min_mbps != null
-                          ? `${speedTestData.download_min_mbps.toFixed(1)}`
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-slate-400">Макс: </span>
-                      <span className="font-mono font-bold text-emerald-300">
-                        {speedTestData?.download_max_mbps != null
-                          ? `${speedTestData.download_max_mbps.toFixed(1)}`
-                          : "—"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* UPLOAD CARD */}
-                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                      <Upload className="w-3.5 h-3.5 text-cyan-400" />
-                      Отдача
-                    </span>
-                    {speedTestData && speedTestData.upload_bytes > 0 && (
-                      <span className="text-[10px] font-mono text-slate-400">
-                        {(speedTestData.upload_bytes / (1024 * 1024)).toFixed(1)} МБ
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-2xl font-extrabold font-mono text-white">
-                      {speedTestData?.phase === "upload"
-                        ? (speedTestData.upload_current_mbps ?? 0).toFixed(1)
-                        : speedTestData?.upload_avg_mbps != null
-                        ? speedTestData.upload_avg_mbps.toFixed(1)
-                        : "—"}
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
-                  </div>
-                  {/* Sparkline */}
-                  <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
-                    {(() => {
-                      const samples = speedTestData?.upload_samples_mbps || [];
-                      if (samples.length === 0) {
-                        return <span className="text-[9px] text-slate-500 m-auto">Ожидание теста</span>;
-                      }
-                      const peak = Math.max(...samples, 1);
-                      return samples.slice(-20).map((v, i) => (
-                        <div
-                          key={i}
-                          className="flex-1 rounded-t bg-cyan-400/80 transition-all"
-                          style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
-                          title={`${v.toFixed(1)} Мбит/с`}
-                        />
-                      ));
-                    })()}
-                  </div>
-                  <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
-                    <div>
-                      <span className="text-slate-400">Мин: </span>
-                      <span className="font-mono font-bold text-slate-200">
-                        {speedTestData?.upload_min_mbps != null
-                          ? `${speedTestData.upload_min_mbps.toFixed(1)}`
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-slate-400">Макс: </span>
-                      <span className="font-mono font-bold text-cyan-300">
-                        {speedTestData?.upload_max_mbps != null
-                          ? `${speedTestData.upload_max_mbps.toFixed(1)}`
-                          : "—"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* PING, JITTER & LOSS CARD */}
-                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                      <Activity className="w-3.5 h-3.5 text-amber-400" />
-                      Пинг
-                    </span>
-                    {speedTestData?.packet_loss_pct != null && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSpeedTestSubTab("analytics");
+                      void loadTelemetryReport(true);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition cursor-pointer ${
+                      speedTestSubTab === "analytics"
+                        ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm"
+                        : "text-slate-400 hover:text-slate-200 border border-transparent"
+                    }`}
+                  >
+                    <BarChart3 className="w-3.5 h-3.5" />
+                    Сравнение и история
+                    {telemetryReport?.active_session && (
                       <span
-                        className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
-                          speedTestData.packet_loss_pct === 0
-                            ? "bg-emerald-500/15 text-emerald-300"
-                            : "bg-rose-500/20 text-rose-300"
-                        }`}
-                      >
-                        Потери {speedTestData.packet_loss_pct}%
-                      </span>
+                        className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]"
+                        title="Идёт пассивный сбор данных"
+                      />
                     )}
-                  </div>
-                  <div className="flex items-baseline gap-1.5">
-                    <span className="text-2xl font-extrabold font-mono text-white">
-                      {speedTestData?.ping_avg_ms != null
-                        ? Math.round(speedTestData.ping_avg_ms)
-                        : "—"}
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-400">мс (сред)</span>
-                  </div>
-                  {/* Ping Probes Bar Chart */}
-                  <div className="h-7 flex items-end gap-1 rounded bg-[#070a12]/70 p-1">
-                    {(() => {
-                      const samples = speedTestData?.ping_samples_ms || [];
-                      if (samples.length === 0) {
-                        return <span className="text-[9px] text-slate-500 m-auto">10 замеров RTT</span>;
-                      }
-                      const peak = Math.max(...samples, 20);
-                      return samples.map((v, i) => (
-                        <div
-                          key={i}
-                          className={`flex-1 rounded-t transition-all ${
-                            v < 80
-                              ? "bg-emerald-400/80"
-                              : v < 180
-                              ? "bg-amber-400/80"
-                              : "bg-rose-400/80"
-                          }`}
-                          style={{ height: `${Math.max(16, Math.round((v / peak) * 100))}%` }}
-                          title={`#${i + 1}: ${v.toFixed(1)} мс`}
-                        />
-                      ));
-                    })()}
-                  </div>
-                  <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800/80 text-[10px]">
-                    <div>
-                      <span className="text-slate-400">Мин: </span>
-                      <span className="font-mono font-bold text-emerald-300">
-                        {speedTestData?.ping_min_ms != null ? `${Math.round(speedTestData.ping_min_ms)}` : "—"}
-                      </span>
-                    </div>
-                    <div className="text-center">
-                      <span className="text-slate-400">Макс: </span>
-                      <span className="font-mono font-bold text-amber-300">
-                        {speedTestData?.ping_max_ms != null ? `${Math.round(speedTestData.ping_max_ms)}` : "—"}
-                      </span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-slate-400">Джит: </span>
-                      <span className="font-mono font-bold text-slate-200">
-                        {speedTestData?.jitter_ms != null ? `${speedTestData.jitter_ms.toFixed(1)}` : "—"}
-                      </span>
-                    </div>
-                  </div>
+                  </button>
                 </div>
-              </div>
 
-              {/* Useful Diagnostics Grid */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {/* External IP, Geo, VPS RTT, IPv6 Leak Check */}
-                <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <MapPin className="w-3.5 h-3.5 text-cyan-400" />
-                      Внешний IP, Маршрут и Утечки
-                    </h4>
-                    {speedTestData?.colo && (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-mono font-bold">
-                        CF {speedTestData.colo}
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      status.connected
+                        ? "bg-emerald-400 shadow-[0_0_8px_#34d399]"
+                        : "bg-slate-500"
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white truncate flex items-center gap-1.5">
+                      <span className="truncate max-w-[160px]">
+                        {status.connected
+                          ? status.active_profile_name || "VPN подключён"
+                          : "VPN отключён"}
                       </span>
-                    )}
-                  </div>
-
-                  <div className="space-y-1.5 text-[11px]">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Внешний IP:</span>
-                      <span className="font-mono font-bold text-white select-text">
-                        {speedTestData?.external_ip || "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Локация:</span>
-                      <span className="font-semibold text-slate-200 text-right truncate">
-                        {speedTestData?.country
-                          ? `${speedTestData.country}${speedTestData.city ? `, ${speedTestData.city}` : ""}`
-                          : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Провайдер / ASN:</span>
-                      <span className="font-medium text-slate-300 text-right truncate max-w-[200px]" title={speedTestData?.isp || ""}>
-                        {speedTestData?.isp || "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Пинг до узла VPS:</span>
-                      <span className="font-mono font-bold text-cyan-300">
-                        {speedTestData?.vps_rtt_ms != null ? `${speedTestData.vps_rtt_ms} мс` : "—"}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Проверка утечки IPv6:</span>
-                      {speedTestData?.ipv6_reachable == null ? (
-                        <span className="text-slate-400 font-mono">—</span>
-                      ) : speedTestData.ipv6_reachable ? (
-                        <span className="text-amber-300 font-semibold">Обнаружен IPv6</span>
-                      ) : (
-                        <span className="text-emerald-300 font-semibold flex items-center gap-1">
-                          <ShieldCheck className="w-3.5 h-3.5" />
-                          Защищён (нет утечки)
+                      {status.connected && status.active_protocol && (
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[9px] font-mono uppercase text-cyan-300 shrink-0">
+                          {status.active_protocol}
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-slate-400">Маршрут теста:</span>
-                      <span className="font-semibold text-slate-200">
-                        {speedTestData?.route_used === "vpn_tunnel"
-                          ? "Через VPN-туннель (SOCKS)"
-                          : speedTestData?.route_used === "system_tun"
-                          ? "Через системный TUN"
-                          : "Прямой канал (без VPN)"}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Popular Services Latency Matrix */}
-                <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
-                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Globe className="w-3.5 h-3.5 text-cyan-400" />
-                      Доступность сервисов и задержка
-                    </h4>
-                    <span className="text-[10px] text-slate-400">HTTPS RTT</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    {(!speedTestData || speedTestData.services.length === 0) ? (
-                      ["Cloudflare", "YouTube", "Google", "GitHub", "Discord", "Telegram"].map((name) => (
-                        <div
-                          key={name}
-                          className="px-2.5 py-2 rounded-xl bg-[#070a12]/70 border border-slate-800/70 flex items-center justify-between text-[11px]"
+                    {speedTestSubTab === "test" && status.connected && (
+                      <div className="flex items-center gap-1 mt-0.5">
+                        <button
+                          type="button"
+                          disabled={speedTestRunning}
+                          onClick={() => {
+                            setSpeedTestUseVpn(true);
+                            if (!speedTestRunning) void handleRunSpeedTest(true, true);
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
+                            speedTestUseVpn
+                              ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40"
+                              : "text-slate-400 hover:text-slate-200 border border-transparent"
+                          }`}
                         >
-                          <span className="text-slate-300 font-medium">{name}</span>
-                          <span className="font-mono text-slate-500">—</span>
-                        </div>
-                      ))
-                    ) : (
-                      speedTestData.services.map((svc) => (
-                        <div
-                          key={svc.name}
-                          className="px-2.5 py-2 rounded-xl bg-[#070a12]/80 border border-slate-800/80 flex items-center justify-between text-[11px]"
-                          title={svc.error || `${svc.host}:${svc.port}`}
+                          Через VPN
+                        </button>
+                        <button
+                          type="button"
+                          disabled={speedTestRunning}
+                          onClick={() => {
+                            setSpeedTestUseVpn(false);
+                            if (!speedTestRunning) void handleRunSpeedTest(true, false);
+                          }}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold transition cursor-pointer ${
+                            !speedTestUseVpn
+                              ? "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                              : "text-slate-400 hover:text-slate-200 border border-transparent"
+                          }`}
                         >
-                          <span className="text-slate-200 font-semibold flex items-center gap-1.5 truncate">
-                            <span
-                              className={`w-2 h-2 rounded-full shrink-0 ${
-                                svc.reachable
-                                  ? "bg-emerald-400 shadow-[0_0_6px_#34d399]"
-                                  : "bg-rose-400 shadow-[0_0_6px_#f87171]"
-                              }`}
-                            />
-                            <span className="truncate">{svc.name}</span>
-                          </span>
-                          <span
-                            className={`font-mono font-bold shrink-0 ml-1 ${
-                              !svc.reachable
-                                ? "text-rose-400"
-                                : (svc.latency_ms ?? 0) < 100
-                                ? "text-emerald-300"
-                                : (svc.latency_ms ?? 0) < 220
-                                ? "text-amber-300"
-                                : "text-rose-300"
-                            }`}
-                          >
-                            {svc.reachable ? `${svc.latency_ms ?? 0} мс` : "Сбой"}
-                          </span>
-                        </div>
-                      ))
+                          Напрямую
+                        </button>
+                      </div>
                     )}
                   </div>
                 </div>
               </div>
+
+              {speedTestSubTab === "test" ? (
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {speedTestRunning ? (
+                    <button
+                      type="button"
+                      onClick={handleStopSpeedTest}
+                      className="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 text-xs font-bold text-rose-300 flex items-center gap-1.5 cursor-pointer transition"
+                    >
+                      <Square className="w-3.5 h-3.5 fill-current" />
+                      Остановить
+                    </button>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleRunSpeedTest(false)}
+                        className="px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-xs font-bold text-cyan-300 flex items-center gap-1.5 cursor-pointer transition shadow-sm"
+                      >
+                        <Play className="w-3.5 h-3.5 fill-current" />
+                        Полный тест
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleRunSpeedTest(true)}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                        title="Быстрый замер пинга, джиттера, IP и доступности сервисов (без нагрузки на трафик)"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Пинг
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    disabled={!speedTestData}
+                    onClick={handleCopySpeedTestReport}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                    title="Скопировать отчёт в буфер обмена"
+                  >
+                    {speedTestCopied ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => void handleTogglePassiveTelemetry()}
+                    className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold flex items-center gap-1.5 cursor-pointer transition ${
+                      (telemetryReport?.enabled ?? true)
+                        ? "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-300"
+                        : "bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400"
+                    }`}
+                    title="Включить или приостановить автоматический фоновый сбор статистики по сессиям"
+                  >
+                    <Radio className="w-3.5 h-3.5" />
+                    Пассивный сбор: {(telemetryReport?.enabled ?? true) ? "ВКЛ" : "ВЫКЛ"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadTelemetryReport(true)}
+                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                    title="Обновить данные"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${telemetryLoading ? "animate-spin text-cyan-400" : ""}`} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleExportTelemetry("csv")}
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-[11px] font-bold text-cyan-300 flex items-center gap-1 cursor-pointer transition"
+                    title="Сохранить сводку и историю в CSV-таблицу (открывается в Excel)"
+                  >
+                    <FileDown className="w-3.5 h-3.5" />
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleExportTelemetry("json")}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                    title="Сохранить сырые данные аналитики в JSON"
+                  >
+                    <FileCode className="w-3.5 h-3.5" />
+                    JSON
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!telemetryReport || telemetryReport.summaries.length === 0}
+                    onClick={() => void handleCopyTelemetryComparison()}
+                    className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 disabled:opacity-40 text-[11px] font-semibold text-slate-200 flex items-center gap-1 cursor-pointer transition"
+                    title="Скопировать сравнительную сводку протоколов"
+                  >
+                    {telemetryCopied ? (
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <Copy className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleClearTelemetry()}
+                    className={`px-2 py-1.5 rounded-lg border text-[11px] font-semibold flex items-center gap-1 cursor-pointer transition ${
+                      telemetryClearConfirm
+                        ? "bg-rose-500/25 border-rose-500/50 text-rose-200"
+                        : "bg-slate-800 hover:bg-slate-700 border-slate-700 text-rose-300"
+                    }`}
+                    title="Очистить накопленную историю телеметрии и тестов"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    {telemetryClearConfirm ? "Точно?" : ""}
+                  </button>
+                </div>
+              )}
             </div>
+
+            {/* Body */}
+            {speedTestSubTab === "test" ? (
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar">
+                {/* Progress Indicator */}
+                {(speedTestRunning || (speedTestData && speedTestData.progress_pct > 0 && speedTestData.phase !== "idle")) && (
+                  <div className="p-2.5 rounded-xl bg-[#070a12] border border-slate-800/80 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                        {speedTestRunning && <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />}
+                        {speedTestData?.phase === "ping"
+                          ? "Замер пинга, джиттера и потерь пакетов..."
+                          : speedTestData?.phase === "download"
+                          ? "Тест скорости скачивания (Download)..."
+                          : speedTestData?.phase === "upload"
+                          ? "Тест скорости отдачи (Upload)..."
+                          : speedTestData?.phase === "diagnostics"
+                          ? "Проверка IP, геолокации, IPv6 и сервисов..."
+                          : speedTestData?.phase === "cancelled"
+                          ? "Тест остановлен пользователем"
+                          : "Тест завершён"}
+                      </span>
+                      <span className="font-mono text-cyan-300 font-bold">
+                        {speedTestData?.progress_pct ?? 0}%
+                        {speedTestData?.elapsed_ms ? ` · ${(speedTestData.elapsed_ms / 1000).toFixed(1)}с` : ""}
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-cyan-500 transition-all duration-200"
+                        style={{ width: `${speedTestData?.progress_pct ?? 0}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {speedTestError && (
+                  <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-xs text-rose-300 flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{speedTestError}</span>
+                  </div>
+                )}
+
+                {/* Primary 3 Cards: Download, Upload, Ping/Jitter */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {/* DOWNLOAD CARD */}
+                  <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Download className="w-3.5 h-3.5 text-emerald-400" />
+                        Скачивание
+                      </span>
+                      {speedTestData && speedTestData.download_bytes > 0 && (
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {(speedTestData.download_bytes / (1024 * 1024)).toFixed(1)} МБ
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl font-extrabold font-mono text-white">
+                        {speedTestData?.phase === "download"
+                          ? (speedTestData.download_current_mbps ?? 0).toFixed(1)
+                          : speedTestData?.download_avg_mbps != null
+                          ? speedTestData.download_avg_mbps.toFixed(1)
+                          : "—"}
+                      </span>
+                      <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
+                    </div>
+                    {/* Sparkline */}
+                    <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
+                      {(() => {
+                        const samples = speedTestData?.download_samples_mbps || [];
+                        if (samples.length === 0) {
+                          return <span className="text-[9px] text-slate-500 m-auto">Нажмите «Полный тест»</span>;
+                        }
+                        const peak = Math.max(...samples, 1);
+                        return samples.slice(-20).map((v, i) => (
+                          <div
+                            key={i}
+                            className="flex-1 rounded-t bg-emerald-400/80 transition-all"
+                            style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
+                            title={`${v.toFixed(1)} Мбит/с`}
+                          />
+                        ));
+                      })()}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
+                      <div>
+                        <span className="text-slate-400">Мин: </span>
+                        <span className="font-mono font-bold text-slate-200">
+                          {speedTestData?.download_min_mbps != null
+                            ? `${speedTestData.download_min_mbps.toFixed(1)}`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-slate-400">Макс: </span>
+                        <span className="font-mono font-bold text-emerald-300">
+                          {speedTestData?.download_max_mbps != null
+                            ? `${speedTestData.download_max_mbps.toFixed(1)}`
+                            : "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* UPLOAD CARD */}
+                  <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Upload className="w-3.5 h-3.5 text-cyan-400" />
+                        Отдача
+                      </span>
+                      {speedTestData && speedTestData.upload_bytes > 0 && (
+                        <span className="text-[10px] font-mono text-slate-400">
+                          {(speedTestData.upload_bytes / (1024 * 1024)).toFixed(1)} МБ
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl font-extrabold font-mono text-white">
+                        {speedTestData?.phase === "upload"
+                          ? (speedTestData.upload_current_mbps ?? 0).toFixed(1)
+                          : speedTestData?.upload_avg_mbps != null
+                          ? speedTestData.upload_avg_mbps.toFixed(1)
+                          : "—"}
+                      </span>
+                      <span className="text-[10px] font-semibold text-slate-400">Мбит/с</span>
+                    </div>
+                    {/* Sparkline */}
+                    <div className="h-7 flex items-end gap-0.5 px-0.5 rounded bg-[#070a12]/70 p-1">
+                      {(() => {
+                        const samples = speedTestData?.upload_samples_mbps || [];
+                        if (samples.length === 0) {
+                          return <span className="text-[9px] text-slate-500 m-auto">Ожидание теста</span>;
+                        }
+                        const peak = Math.max(...samples, 1);
+                        return samples.slice(-20).map((v, i) => (
+                          <div
+                            key={i}
+                            className="flex-1 rounded-t bg-cyan-400/80 transition-all"
+                            style={{ height: `${Math.max(12, Math.round((v / peak) * 100))}%` }}
+                            title={`${v.toFixed(1)} Мбит/с`}
+                          />
+                        ));
+                      })()}
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-slate-800/80 text-[10px]">
+                      <div>
+                        <span className="text-slate-400">Мин: </span>
+                        <span className="font-mono font-bold text-slate-200">
+                          {speedTestData?.upload_min_mbps != null
+                            ? `${speedTestData.upload_min_mbps.toFixed(1)}`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-slate-400">Макс: </span>
+                        <span className="font-mono font-bold text-cyan-300">
+                          {speedTestData?.upload_max_mbps != null
+                            ? `${speedTestData.upload_max_mbps.toFixed(1)}`
+                            : "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* PING, JITTER & LOSS CARD */}
+                  <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 flex flex-col justify-between space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-amber-400" />
+                        Пинг
+                      </span>
+                      {speedTestData?.packet_loss_pct != null && (
+                        <span
+                          className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                            speedTestData.packet_loss_pct === 0
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : "bg-rose-500/20 text-rose-300"
+                          }`}
+                        >
+                          Потери {speedTestData.packet_loss_pct}%
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl font-extrabold font-mono text-white">
+                        {speedTestData?.ping_avg_ms != null
+                          ? Math.round(speedTestData.ping_avg_ms)
+                          : "—"}
+                      </span>
+                      <span className="text-[10px] font-semibold text-slate-400">мс (сред)</span>
+                    </div>
+                    {/* Ping Probes Bar Chart */}
+                    <div className="h-7 flex items-end gap-1 rounded bg-[#070a12]/70 p-1">
+                      {(() => {
+                        const samples = speedTestData?.ping_samples_ms || [];
+                        if (samples.length === 0) {
+                          return <span className="text-[9px] text-slate-500 m-auto">10 замеров RTT</span>;
+                        }
+                        const peak = Math.max(...samples, 20);
+                        return samples.map((v, i) => (
+                          <div
+                            key={i}
+                            className={`flex-1 rounded-t transition-all ${
+                              v < 80
+                                ? "bg-emerald-400/80"
+                                : v < 180
+                                ? "bg-amber-400/80"
+                                : "bg-rose-400/80"
+                            }`}
+                            style={{ height: `${Math.max(16, Math.round((v / peak) * 100))}%` }}
+                            title={`#${i + 1}: ${v.toFixed(1)} мс`}
+                          />
+                        ));
+                      })()}
+                    </div>
+                    <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800/80 text-[10px]">
+                      <div>
+                        <span className="text-slate-400">Мин: </span>
+                        <span className="font-mono font-bold text-emerald-300">
+                          {speedTestData?.ping_min_ms != null ? `${Math.round(speedTestData.ping_min_ms)}` : "—"}
+                        </span>
+                      </div>
+                      <div className="text-center">
+                        <span className="text-slate-400">Макс: </span>
+                        <span className="font-mono font-bold text-amber-300">
+                          {speedTestData?.ping_max_ms != null ? `${Math.round(speedTestData.ping_max_ms)}` : "—"}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="text-slate-400">Джит: </span>
+                        <span className="font-mono font-bold text-slate-200">
+                          {speedTestData?.jitter_ms != null ? `${speedTestData.jitter_ms.toFixed(1)}` : "—"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Useful Diagnostics Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* External IP, Geo, VPS RTT, IPv6 Leak Check */}
+                  <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                      <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-cyan-400" />
+                        Внешний IP, Маршрут и Утечки
+                      </h4>
+                      {speedTestData?.colo && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 font-mono font-bold">
+                          CF {speedTestData.colo}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Внешний IP:</span>
+                        <span className="font-mono font-bold text-white select-text">
+                          {speedTestData?.external_ip || "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Локация:</span>
+                        <span className="font-semibold text-slate-200 text-right truncate">
+                          {speedTestData?.country
+                            ? `${speedTestData.country}${speedTestData.city ? `, ${speedTestData.city}` : ""}`
+                            : "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Провайдер / ASN:</span>
+                        <span className="font-medium text-slate-300 text-right truncate max-w-[200px]" title={speedTestData?.isp || ""}>
+                          {speedTestData?.isp || "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Пинг до узла VPS:</span>
+                        <span className="font-mono font-bold text-cyan-300">
+                          {speedTestData?.vps_rtt_ms != null ? `${speedTestData.vps_rtt_ms} мс` : "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Проверка утечки IPv6:</span>
+                        {speedTestData?.ipv6_reachable == null ? (
+                          <span className="text-slate-400 font-mono">—</span>
+                        ) : speedTestData.ipv6_reachable ? (
+                          <span className="text-amber-300 font-semibold">Обнаружен IPv6</span>
+                        ) : (
+                          <span className="text-emerald-300 font-semibold flex items-center gap-1">
+                            <ShieldCheck className="w-3.5 h-3.5" />
+                            Защищён (нет утечки)
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-slate-400">Маршрут теста:</span>
+                        <span className="font-semibold text-slate-200">
+                          {speedTestData?.route_used === "vpn_tunnel"
+                            ? "Через VPN-туннель (SOCKS)"
+                            : speedTestData?.route_used === "system_tun"
+                            ? "Через системный TUN"
+                            : "Прямой канал (без VPN)"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Popular Services Latency Matrix */}
+                  <div className="p-3.5 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                    <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                      <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                        Доступность сервисов и задержка
+                      </h4>
+                      <span className="text-[10px] text-slate-400">HTTPS RTT</span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {(!speedTestData || speedTestData.services.length === 0) ? (
+                        ["Cloudflare", "YouTube", "Google", "GitHub", "Discord", "Telegram"].map((name) => (
+                          <div
+                            key={name}
+                            className="px-2.5 py-2 rounded-xl bg-[#070a12]/70 border border-slate-800/70 flex items-center justify-between text-[11px]"
+                          >
+                            <span className="text-slate-300 font-medium">{name}</span>
+                            <span className="font-mono text-slate-500">—</span>
+                          </div>
+                        ))
+                      ) : (
+                        speedTestData.services.map((svc) => (
+                          <div
+                            key={svc.name}
+                            className="px-2.5 py-2 rounded-xl bg-[#070a12]/80 border border-slate-800/80 flex items-center justify-between text-[11px]"
+                            title={svc.error || `${svc.host}:${svc.port}`}
+                          >
+                            <span className="text-slate-200 font-semibold flex items-center gap-1.5 truncate">
+                              <span
+                                className={`w-2 h-2 rounded-full shrink-0 ${
+                                  svc.reachable
+                                    ? "bg-emerald-400 shadow-[0_0_6px_#34d399]"
+                                    : "bg-rose-400 shadow-[0_0_6px_#f87171]"
+                                }`}
+                              />
+                              <span className="truncate">{svc.name}</span>
+                            </span>
+                            <span
+                              className={`font-mono font-bold shrink-0 ml-1 ${
+                                !svc.reachable
+                                  ? "text-rose-400"
+                                  : (svc.latency_ms ?? 0) < 100
+                                  ? "text-emerald-300"
+                                  : (svc.latency_ms ?? 0) < 220
+                                  ? "text-amber-300"
+                                  : "text-rose-300"
+                              }`}
+                            >
+                              {svc.reachable ? `${svc.latency_ms ?? 0} мс` : "Сбой"}
+                            </span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-3.5 space-y-3 custom-scrollbar">
+                {telemetryExportMsg && (
+                  <div className="px-3 py-2 rounded-xl bg-cyan-500/15 border border-cyan-500/40 text-[11px] text-cyan-200 flex items-center justify-between gap-2">
+                    <span className="truncate">{telemetryExportMsg}</span>
+                    <button
+                      type="button"
+                      onClick={() => setTelemetryExportMsg(null)}
+                      className="text-cyan-300 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Active Session Banner */}
+                {telemetryReport?.active_session ? (
+                  <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-500/10 via-cyan-500/10 to-slate-900 border border-emerald-500/35 flex flex-wrap items-center justify-between gap-3">
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_#34d399]" />
+                        <span className="text-xs font-bold text-white truncate">
+                          Активная сессия: {telemetryReport.active_session.profile_name}
+                        </span>
+                        <span className="px-1.5 py-0.5 rounded bg-cyan-500/15 border border-cyan-500/30 text-[9px] font-mono uppercase text-cyan-300">
+                          {telemetryReport.active_session.protocol}
+                          {telemetryReport.active_session.mimic_mode
+                            ? ` · ${telemetryReport.active_session.mimic_mode}`
+                            : ""}
+                        </span>
+                      </div>
+                      <div className="text-[10px] text-slate-300 flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono">
+                        <span>
+                          Онлайн: {formatTelemetryDuration(telemetryReport.active_session.duration_secs)}
+                        </span>
+                        <span>
+                          HS:{" "}
+                          {telemetryReport.active_session.handshake_ms != null
+                            ? `${telemetryReport.active_session.handshake_ms} мс`
+                            : "—"}
+                        </span>
+                        <span>
+                          Трафик: ↓{formatBytes(telemetryReport.active_session.down_bytes)} / ↑
+                          {formatBytes(telemetryReport.active_session.up_bytes)}
+                        </span>
+                        {telemetryReport.active_session.enigma_handshakes != null && (
+                          <span className="text-amber-300">
+                            Enigma HS: {telemetryReport.active_session.enigma_handshakes} · Decoys:{" "}
+                            {telemetryReport.active_session.enigma_decoys ?? 0}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 text-[11px] font-mono shrink-0">
+                      <div className="px-2.5 py-1.5 rounded-xl bg-[#070a12]/80 border border-slate-800 text-right">
+                        <div className="text-[9px] text-slate-400 uppercase">Пик ↓ / ↑</div>
+                        <div className="font-bold text-emerald-300">
+                          {formatBpsToMbps(telemetryReport.active_session.peak_down_bps)} /{" "}
+                          {formatBpsToMbps(telemetryReport.active_session.peak_up_bps)} Мбит/с
+                        </div>
+                      </div>
+                      <div className="px-2.5 py-1.5 rounded-xl bg-[#070a12]/80 border border-slate-800 text-right">
+                        <div className="text-[9px] text-slate-400 uppercase">Пассивный пинг</div>
+                        <div className="font-bold text-cyan-300">
+                          {telemetryReport.active_session.ping_avg_ms != null
+                            ? `${Math.round(telemetryReport.active_session.ping_avg_ms)} мс`
+                            : "…"}{" "}
+                          <span className="text-[9px] text-slate-400 font-normal">
+                            ({telemetryReport.active_session.probes_ok} ок /{" "}
+                            {telemetryReport.active_session.probes_fail} сбой)
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="px-3 py-2 rounded-xl bg-[#111827] border border-slate-800 text-[11px] text-slate-400 flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2">
+                      <Clock className="w-3.5 h-3.5 text-slate-500" />
+                      {(telemetryReport?.enabled ?? true)
+                        ? "Пассивный сбор включён — подключитесь к любому протоколу, статистика начнёт записываться автоматически (пинг ~100 байт каждые 20 с)."
+                        : "Пассивный сбор приостановлен — включите его кнопкой выше для фонового накопления статистики."}
+                    </span>
+                  </div>
+                )}
+
+                {/* 1. Protocol Comparison Summary Table */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <BarChart3 className="w-3.5 h-3.5 text-cyan-400" />
+                      Сводное сравнение протоколов
+                    </h4>
+                    <span className="text-[10px] text-slate-400">
+                      Протоколов: {telemetryReport?.summaries.length ?? 0}
+                    </span>
+                  </div>
+
+                  {!telemetryReport || telemetryReport.summaries.length === 0 ? (
+                    <div className="py-5 text-center text-xs text-slate-500">
+                      Пока нет накопленных данных. Поработайте через VPN несколько минут или запустите тест скорости.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto custom-scrollbar">
+                      <table className="w-full text-left border-collapse text-[11px]">
+                        <thead>
+                          <tr className="border-b border-slate-800 text-[10px] uppercase tracking-wider text-slate-400">
+                            <th className="py-1.5 pr-2 font-semibold">Протокол</th>
+                            <th className="py-1.5 px-2 font-semibold">Сессии / Время</th>
+                            <th className="py-1.5 px-2 font-semibold">Рукопожатие</th>
+                            <th className="py-1.5 px-2 font-semibold">В работе ↓ / ↑ (Пик)</th>
+                            <th className="py-1.5 px-2 font-semibold">Пинг / P95 / Джит</th>
+                            <th className="py-1.5 px-2 font-semibold">Потери / Завис.</th>
+                            <th className="py-1.5 pl-2 font-semibold text-right">Speedtest ↓ / ↑</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800/60 font-mono">
+                          {telemetryReport.summaries.map((s) => (
+                            <tr key={s.protocol} className="hover:bg-slate-800/30 transition">
+                              <td className="py-2 pr-2 font-sans font-bold text-white uppercase">
+                                <span
+                                  className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                                    s.protocol === "enigma"
+                                      ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
+                                      : s.protocol === "vless"
+                                      ? "bg-cyan-500/15 border-cyan-500/40 text-cyan-300"
+                                      : s.protocol === "amneziawg"
+                                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                                      : "bg-slate-800 border-slate-700 text-slate-200"
+                                  }`}
+                                >
+                                  {s.protocol}
+                                </span>
+                              </td>
+                              <td className="py-2 px-2 text-slate-200">
+                                <div>{s.sessions_count} шт</div>
+                                <div className="text-[10px] text-slate-400">
+                                  {formatTelemetryDuration(s.total_duration_secs)}
+                                </div>
+                              </td>
+                              <td className="py-2 px-2">
+                                <div className="text-emerald-300">
+                                  {s.handshake_success_pct != null
+                                    ? `${s.handshake_success_pct.toFixed(0)}%`
+                                    : "—"}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {s.avg_handshake_ms != null ? `${s.avg_handshake_ms} мс` : "—"}
+                                </div>
+                              </td>
+                              <td className="py-2 px-2">
+                                <div className="text-white font-semibold">
+                                  {s.avg_active_down_mbps != null
+                                    ? s.avg_active_down_mbps.toFixed(1)
+                                    : "—"}{" "}
+                                  /{" "}
+                                  {s.avg_active_up_mbps != null
+                                    ? s.avg_active_up_mbps.toFixed(1)
+                                    : "—"}{" "}
+                                  <span className="text-[9px] text-slate-400 font-normal">Мбит</span>
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  Пик{" "}
+                                  {s.peak_down_mbps != null ? s.peak_down_mbps.toFixed(1) : "—"} /{" "}
+                                  {s.peak_up_mbps != null ? s.peak_up_mbps.toFixed(1) : "—"}
+                                </div>
+                              </td>
+                              <td className="py-2 px-2">
+                                <div className="text-cyan-300">
+                                  {s.avg_ping_ms != null ? `${Math.round(s.avg_ping_ms)} мс` : "—"}
+                                  {s.p95_ping_ms != null && (
+                                    <span className="text-[10px] text-slate-400">
+                                      {" "}
+                                      (P95 {s.p95_ping_ms})
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  джит{" "}
+                                  {s.avg_jitter_ms != null
+                                    ? `${s.avg_jitter_ms.toFixed(1)} мс`
+                                    : "—"}
+                                </div>
+                              </td>
+                              <td className="py-2 px-2">
+                                <div
+                                  className={
+                                    (s.packet_loss_pct ?? 0) > 2
+                                      ? "text-rose-300"
+                                      : "text-emerald-300"
+                                  }
+                                >
+                                  {s.packet_loss_pct != null
+                                    ? `${s.packet_loss_pct.toFixed(1)}%`
+                                    : "—"}
+                                </div>
+                                <div
+                                  className={`text-[10px] ${
+                                    s.stalls_total > 0 ? "text-amber-300" : "text-slate-400"
+                                  }`}
+                                >
+                                  завис: {s.stalls_total}
+                                </div>
+                              </td>
+                              <td className="py-2 pl-2 text-right">
+                                <div className="text-emerald-300 font-semibold">
+                                  {s.speedtest_avg_down_mbps != null
+                                    ? `${s.speedtest_avg_down_mbps.toFixed(1)}`
+                                    : "—"}{" "}
+                                  /{" "}
+                                  {s.speedtest_avg_up_mbps != null
+                                    ? `${s.speedtest_avg_up_mbps.toFixed(1)}`
+                                    : "—"}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  замеров: {s.speedtest_count}
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* 2. Session History (Passive Tracking) */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                      История сессий (пассивный сбор)
+                    </h4>
+                    <span className="text-[10px] text-slate-400">
+                      Записей: {telemetryReport?.sessions.length ?? 0}
+                    </span>
+                  </div>
+
+                  {(() => {
+                    const active = telemetryReport?.active_session;
+                    const stored = (telemetryReport?.sessions || []).filter(
+                      (s) => !active || s.id !== active.id
+                    );
+                    const allSessions = active ? [active, ...stored] : stored;
+                    if (allSessions.length === 0) {
+                      return (
+                        <div className="py-4 text-center text-xs text-slate-500">
+                          Завершённых или активных сессий пока нет.
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="space-y-1.5 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+                        {allSessions.slice(0, 40).map((sess) => (
+                          <div
+                            key={sess.id}
+                            className="p-2.5 rounded-xl bg-[#070a12]/80 border border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                          >
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                {sess.disconnect_reason === "active" && (
+                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                )}
+                                <span className="font-bold text-white truncate max-w-[180px]">
+                                  {sess.profile_name}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[9px] font-mono uppercase text-cyan-300">
+                                  {sess.protocol}
+                                  {sess.mimic_mode ? ` · ${sess.mimic_mode}` : ""}
+                                </span>
+                                <span className="text-[10px] text-slate-400 font-mono">
+                                  {formatTelemetryTime(sess.started_at)}
+                                </span>
+                              </div>
+                              <div className="text-[10px] text-slate-400 font-mono flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
+                                <span>Длит: {formatTelemetryDuration(sess.duration_secs)}</span>
+                                <span>
+                                  HS: {sess.handshake_ok ? "ОК" : "Сбой"}
+                                  {sess.handshake_ms != null ? ` (${sess.handshake_ms} мс)` : ""}
+                                </span>
+                                <span>
+                                  Трафик: ↓{formatBytes(sess.down_bytes)} / ↑
+                                  {formatBytes(sess.up_bytes)}
+                                </span>
+                                {sess.enigma_handshakes != null && (
+                                  <span className="text-amber-300/90">
+                                    Enigma HS:{sess.enigma_handshakes} Dec:{sess.enigma_decoys ?? 0}
+                                  </span>
+                                )}
+                                <span className="text-slate-500">[{sess.disconnect_reason}]</span>
+                              </div>
+                            </div>
+                            <div className="text-right font-mono text-[10px] shrink-0 space-y-0.5">
+                              <div className="text-emerald-300 font-semibold">
+                                Актив ↓{formatBpsToMbps(sess.avg_active_down_bps)} / ↑
+                                {formatBpsToMbps(sess.avg_active_up_bps)} Мбит
+                                <span className="text-slate-400 font-normal">
+                                  {" "}
+                                  (пик {formatBpsToMbps(sess.peak_down_bps)})
+                                </span>
+                              </div>
+                              <div className="text-slate-300">
+                                Пинг{" "}
+                                {sess.ping_avg_ms != null
+                                  ? `${Math.round(sess.ping_avg_ms)} мс (${
+                                      sess.ping_min_ms ?? "—"
+                                    }–${sess.ping_max_ms ?? "—"})`
+                                  : "—"}{" "}
+                                · пробы {sess.probes_ok}/{sess.probes_ok + sess.probes_fail}
+                                {sess.stalls_count > 0 && (
+                                  <span className="text-amber-300">
+                                    {" "}
+                                    · завис:{sess.stalls_count}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* 3. Manual Speedtest History */}
+                <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800 space-y-2.5">
+                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      История замеров Speedtest
+                    </h4>
+                    <span className="text-[10px] text-slate-400">
+                      Замеров: {telemetryReport?.speedtests.length ?? 0}
+                    </span>
+                  </div>
+
+                  {!telemetryReport || telemetryReport.speedtests.length === 0 ? (
+                    <div className="py-4 text-center text-xs text-slate-500">
+                      Запустите «Полный тест» или «Пинг» во вкладке «Замер скорости», и результат сохранится сюда автоматически.
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-52 overflow-y-auto custom-scrollbar pr-1">
+                      {telemetryReport.speedtests.slice(0, 40).map((st) => (
+                        <div
+                          key={st.id}
+                          className="p-2.5 rounded-xl bg-[#070a12]/80 border border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                        >
+                          <div className="min-w-0 space-y-0.5">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-white truncate max-w-[180px]">
+                                {st.profile_name}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[9px] font-mono uppercase text-cyan-300">
+                                {st.protocol}
+                              </span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[9px] font-semibold ${
+                                  st.quick_only
+                                    ? "bg-slate-800 text-slate-300"
+                                    : "bg-cyan-500/15 text-cyan-300"
+                                }`}
+                              >
+                                {st.quick_only ? "Пинг" : "Полный тест"}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono">
+                                {formatTelemetryTime(st.timestamp)}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 font-mono flex flex-wrap items-center gap-x-2.5">
+                              <span>
+                                Маршрут:{" "}
+                                {st.route_used === "vpn_tunnel"
+                                  ? "VPN SOCKS"
+                                  : st.route_used === "system_tun"
+                                  ? "VPN TUN"
+                                  : "Напрямую"}
+                              </span>
+                              {st.colo && <span>CF {st.colo}</span>}
+                              {st.vps_rtt_ms != null && <span>VPS {st.vps_rtt_ms} мс</span>}
+                            </div>
+                          </div>
+                          <div className="text-right font-mono text-[10px] shrink-0 space-y-0.5">
+                            <div className="text-emerald-300 font-bold">
+                              {st.download_avg_mbps != null
+                                ? `↓ ${st.download_avg_mbps.toFixed(1)} (макс ${
+                                    st.download_max_mbps?.toFixed(1) ?? "—"
+                                  })`
+                                : "↓ —"}{" "}
+                              ·{" "}
+                              {st.upload_avg_mbps != null
+                                ? `↑ ${st.upload_avg_mbps.toFixed(1)} Мбит`
+                                : "↑ —"}
+                            </div>
+                            <div className="text-slate-300">
+                              Пинг{" "}
+                              {st.ping_avg_ms != null ? `${Math.round(st.ping_avg_ms)} мс` : "—"}{" "}
+                              | Джит{" "}
+                              {st.jitter_ms != null ? `${st.jitter_ms.toFixed(1)} мс` : "—"} |
+                              Потери {st.packet_loss_pct != null ? `${st.packet_loss_pct}%` : "—"}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Footer */}
             <div className="px-4 py-2.5 border-t border-slate-800 bg-[#0d1322] flex items-center justify-between shrink-0">
               <span className="text-[10px] text-slate-400">
-                Потоковый тест через Cloudflare CDN с замером мин/сред/макс в реальном времени
+                {speedTestSubTab === "test"
+                  ? "Потоковый тест через Cloudflare CDN с замером мин/сред/макс в реальном времени"
+                  : "Пассивная телеметрия хранится локально на ПК (до 200 сессий и 200 замеров)"}
               </span>
               <button
                 type="button"
@@ -5208,6 +8584,8 @@ export default function App() {
                         ? "SSH Tunnel"
                         : qrModalProfile.protocol === "vless"
                         ? "VLESS Reality"
+                        : qrModalProfile.protocol === "enigma"
+                        ? "Enigma v1 (Прототип)"
                         : qrModalProfile.protocol === "vless_ws"
                         ? "VLESS CDN Shield"
                         : qrModalProfile.protocol === "webrtc"
@@ -5263,6 +8641,8 @@ export default function App() {
                               ? "SSH Tunnel"
                               : alt.protocol === "vless"
                               ? "VLESS Reality"
+                              : alt.protocol === "enigma"
+                              ? "Enigma v1"
                               : alt.protocol === "vless_ws"
                               ? "VLESS CDN"
                               : alt.protocol === "webrtc"
@@ -5300,7 +8680,8 @@ export default function App() {
                   className={`grid ${
                     qrModalProfile.protocol === "amneziawg" ||
                     qrModalProfile.protocol === "awg2" ||
-                    qrModalProfile.protocol === "wireguard"
+                    qrModalProfile.protocol === "wireguard" ||
+                    qrModalProfile.protocol === "enigma"
                       ? "grid-cols-3"
                       : "grid-cols-2"
                   } gap-2`}
@@ -5315,6 +8696,8 @@ export default function App() {
                       Ссылка{" "}
                       {qrModalProfile.protocol === "ssh"
                         ? "ssh://"
+                        : qrModalProfile.protocol === "enigma"
+                        ? "enigma://"
                         : qrModalProfile.protocol === "vless" ||
                           qrModalProfile.protocol === "vless_ws" ||
                           qrModalProfile.protocol === "webrtc"
@@ -5343,6 +8726,16 @@ export default function App() {
                     >
                       <FileDown className="w-4 h-4 shrink-0" />
                       <span className="truncate">.conf (Amnezia)</span>
+                    </button>
+                  )}
+                  {qrModalProfile.protocol === "enigma" && (
+                    <button
+                      type="button"
+                      onClick={() => void handleExportEnigmaKeybook(qrModalProfile)}
+                      className="py-2 px-3 rounded-xl bg-amber-600 hover:bg-amber-500 text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer keep-white"
+                    >
+                      <FileDown className="w-4 h-4 shrink-0" />
+                      <span className="truncate">Файл .nvkey</span>
                     </button>
                   )}
                   <button
@@ -5403,7 +8796,9 @@ export default function App() {
                       </h3>
                       <p className="text-[11px] text-slate-400 truncate">
                         Протокол:{" "}
-                        {editingProfile.protocol === "awg2"
+                        {editingProfile.protocol === "enigma"
+                          ? "ENIGMA v1 (ПРОТОТИП)"
+                          : editingProfile.protocol === "awg2"
                           ? "AMNEZIAWG 2.0"
                           : editingProfile.protocol === "awg_quic"
                           ? "AWG + QUIC PRE-WARM"
@@ -5593,30 +8988,33 @@ export default function App() {
                             </label>
                           </div>
                         )}
-                        <div
-                          className={
-                            editingProfile.protocol !== "amneziawg" &&
-                            editingProfile.protocol !== "awg_quic" &&
-                            editingProfile.protocol !== "awg_vless" &&
-                            editingProfile.protocol !== "awg2" &&
-                            editingProfile.protocol !== "wireguard"
-                              ? "col-span-1"
-                              : "col-span-2"
-                          }
-                        >
-                          <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
-                          <input
-                            type="text"
-                            value={editForm.sni || ""}
-                            onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
-                            className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
-                          />
-                        </div>
+                        {editingProfile.protocol !== "enigma" && (
+                          <div
+                            className={
+                              editingProfile.protocol !== "amneziawg" &&
+                              editingProfile.protocol !== "awg_quic" &&
+                              editingProfile.protocol !== "awg_vless" &&
+                              editingProfile.protocol !== "awg2" &&
+                              editingProfile.protocol !== "wireguard"
+                                ? "col-span-1"
+                                : "col-span-2"
+                            }
+                          >
+                            <label className="block text-xs text-slate-400 mb-1">SNI / Хост маскировки</label>
+                            <input
+                              type="text"
+                              value={editForm.sni || ""}
+                              onChange={(e) => setEditForm({ ...editForm, sni: e.target.value })}
+                              className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                            />
+                          </div>
+                        )}
                         {editingProfile.protocol !== "amneziawg" &&
                           editingProfile.protocol !== "awg_quic" &&
                           editingProfile.protocol !== "awg_vless" &&
                           editingProfile.protocol !== "awg2" &&
-                          editingProfile.protocol !== "wireguard" && (
+                          editingProfile.protocol !== "wireguard" &&
+                          editingProfile.protocol !== "enigma" && (
                             <div className={editingProfile.protocol === "tuic" ? "col-span-1" : "col-span-2"}>
                               <label className="block text-xs text-slate-400 mb-1">
                                 {editingProfile.protocol === "vless" ||
@@ -5977,6 +9375,149 @@ export default function App() {
                                   />
                                 </div>
                               </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {editingProfile.protocol === "enigma" && (
+                        <div className="p-3.5 rounded-xl bg-amber-950/20 border border-amber-500/35 space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <div className="text-xs font-bold text-amber-300">
+                                Параметры NeuroVeil Enigma v1 (Rotor .nvkey)
+                              </div>
+                              <span className="text-[10px] text-slate-400">
+                                Полиморфное рукопожатие по общей 16КБ ключ-книге (.nvkey), ротация 3 роторов и 1-RTT WireGuard внутри.
+                              </span>
+                            </div>
+                            <span
+                              className={`text-[10px] px-2 py-0.5 rounded-full border font-mono font-bold shrink-0 ${
+                                (editForm.enigma_keybook || editForm.enigma_key_path || "").trim()
+                                  ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
+                                  : "bg-rose-500/15 text-rose-300 border-rose-500/40"
+                              }`}
+                            >
+                              {(editForm.enigma_keybook || editForm.enigma_key_path || "").trim()
+                                ? ".nvkey ✓ (16 384 Б)"
+                                : "Нет .nvkey файла"}
+                            </span>
+                          </div>
+
+                          <div className="p-2.5 rounded-xl bg-[#0b101d] border border-slate-800 flex flex-wrap items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[11px] font-semibold text-slate-200">
+                                Файл чтения / Keybook (.nvkey)
+                              </div>
+                              <div className="text-[10px] text-slate-400 font-mono truncate">
+                                {editForm.enigma_key_path
+                                  ? editForm.enigma_key_path
+                                  : editForm.enigma_keybook
+                                  ? "Встроена в профиль (Base64 • 16 384 Б)"
+                                  : "Файл .nvkey не привязан — импортируйте файл с VPS"}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void handleExportEnigmaKeybook({
+                                    ...editingProfile,
+                                    ...editForm,
+                                  } as VpnProfile)
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-600/25 hover:bg-amber-600/40 border border-amber-500/40 text-[11px] font-semibold text-amber-200 flex items-center gap-1 cursor-pointer transition"
+                              >
+                                <FileDown className="w-3.5 h-3.5" />
+                                <span>Экспорт .nvkey</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleImportEnigmaKeybook(editingProfile.id)}
+                                className="px-2.5 py-1.5 rounded-lg bg-cyan-600/25 hover:bg-cyan-600/40 border border-cyan-500/40 text-[11px] font-semibold text-cyan-200 flex items-center gap-1 cursor-pointer transition"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                <span>Импорт .nvkey</span>
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-2 text-xs">
+                            <div className="col-span-2">
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                Режим мимикрии внешнего заголовка (DPI Camouflage)
+                              </label>
+                              <select
+                                value={editForm.enigma_mimic || "auto"}
+                                onChange={(e) => setEditForm({ ...editForm, enigma_mimic: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white focus:border-amber-500 focus:outline-none"
+                              >
+                                <option value="auto">Auto (случайная ротация QUIC / STUN / DTLS / DNS)</option>
+                                <option value="quic">QUIC v1 Initial (UDP 443 профиль)</option>
+                                <option value="stun">STUN / WebRTC (UDP медиазвонок)</option>
+                                <option value="dtls">DTLS 1.2 Record (Datagram TLS)</option>
+                                <option value="dns">DNS Query Header (UDP 53 шаблон)</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                WireGuard Private Key {!editForm.awg_private_key && !editForm.password && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_private_key || editForm.password || ""}
+                                placeholder="Base64 PrivateKey"
+                                onChange={(e) => setEditForm({ ...editForm, awg_private_key: e.target.value, password: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-amber-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">
+                                WireGuard Server Public Key {!editForm.awg_public_key && <span className="text-amber-400 font-bold ml-1">(обязательно)</span>}
+                              </label>
+                              <input
+                                type="text"
+                                value={editForm.awg_public_key || ""}
+                                placeholder="Base64 PublicKey сервера"
+                                onChange={(e) => setEditForm({ ...editForm, awg_public_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono focus:border-amber-500"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Local Address (IP / CIDR)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_local_address || ""}
+                                placeholder="10.8.7.2/24"
+                                onChange={(e) => setEditForm({ ...editForm, awg_local_address: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Preshared Key (PSK, опционально)</label>
+                              <input
+                                type="text"
+                                value={editForm.awg_preshared_key || ""}
+                                placeholder="Опциональный PSK"
+                                onChange={(e) => setEditForm({ ...editForm, awg_preshared_key: e.target.value })}
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
+                            </div>
+                            <div className="col-span-2">
+                              <label className="block text-[11px] text-slate-400 mb-0.5">Диапазон Hop-портов (при переподключении)</label>
+                              <input
+                                type="text"
+                                value={editForm.hop_ports || editForm.awg_hop_ports || ""}
+                                placeholder="20000:65000"
+                                onChange={(e) =>
+                                  setEditForm({
+                                    ...editForm,
+                                    hop_ports: e.target.value,
+                                    awg_hop_ports: e.target.value,
+                                  })
+                                }
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-[#0b101d] border border-slate-700 text-xs text-white font-mono"
+                              />
                             </div>
                           </div>
                         </div>
@@ -7552,6 +11093,18 @@ export default function App() {
                                                 </button>
                                               )}
 
+                                              {sub.protocol === "enigma" && (
+                                                <button
+                                                  type="button"
+                                                  onClick={() => void handleExportEnigmaKeybook(sub)}
+                                                  className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[10.5px] font-semibold text-amber-300 flex items-center gap-1 transition cursor-pointer"
+                                                  title="Скачать .nvkey ключ-книгу Enigma (ZIP)"
+                                                >
+                                                  <Key className="w-3 h-3" />
+                                                  <span>.nvkey</span>
+                                                </button>
+                                              )}
+
                                               <button
                                                 type="button"
                                                 onClick={() => void handleExportJson(sub)}
@@ -7672,6 +11225,18 @@ export default function App() {
                                     >
                                       <FileDown className="w-3.5 h-3.5" />
                                       <span>.conf</span>
+                                    </button>
+                                  )}
+
+                                  {p.protocol === "enigma" && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleExportEnigmaKeybook(p)}
+                                      className="px-2 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[11px] font-semibold text-amber-300 flex items-center gap-1 transition cursor-pointer"
+                                      title="Скачать .nvkey ключ-книгу Enigma (ZIP)"
+                                    >
+                                      <Key className="w-3.5 h-3.5" />
+                                      <span>.nvkey</span>
                                     </button>
                                   )}
 
@@ -8066,6 +11631,17 @@ export default function App() {
                                               <span>.conf</span>
                                             </button>
                                           )}
+                                          {p.protocol === "enigma" && (
+                                            <button
+                                              type="button"
+                                              onClick={() => void handleExportEnigmaKeybook(p)}
+                                              className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-[11px] font-semibold text-amber-300 flex items-center gap-1 cursor-pointer transition"
+                                              title="Скачать .nvkey ключ-книгу Enigma (ZIP)"
+                                            >
+                                              <Key className="w-3 h-3" />
+                                              <span>.nvkey</span>
+                                            </button>
+                                          )}
                                           <button
                                             type="button"
                                             onClick={() => void handleExportJson(p)}
@@ -8097,6 +11673,33 @@ export default function App() {
                 </div>
               </>
             )}
+          </div>
+        )}
+
+        {/* POPUP 12: ДЕПЛОЙ МОСТА (АВТОНАСТРОЙКА 2 VPS В СВЯЗКЕ) */}
+        {popupMode === "bridge_deploy" && (
+          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar min-h-0">
+            {renderBridgeDeployContent(true)}
+          </div>
+        )}
+
+        {/* POPUP 13: УПРАВЛЕНИЕ МОСТОМ (2-HOP КАСКАД И СВЯЗКИ) */}
+        {popupMode === "bridge_manage" && (
+          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar min-h-0 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] text-slate-400 leading-snug">
+                Каскадный туннель для обхода блокировки IP и подсетей: выберите Входной мост и Выходной сервер или запустите сохранённую связку.
+              </p>
+              <button
+                type="button"
+                onClick={() => void openPopupWindow("bridge_deploy")}
+                className="px-3 py-1.5 rounded-xl bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-400/40 text-[11px] font-bold text-cyan-200 flex items-center gap-1.5 shrink-0 cursor-pointer transition"
+              >
+                <Server className="w-3.5 h-3.5" />
+                <span>Деплой 2 VPS</span>
+              </button>
+            </div>
+            {renderBridgeManageContent(true)}
           </div>
         )}
       </div>
@@ -8145,7 +11748,7 @@ export default function App() {
 
             <div className="w-7 h-px bg-slate-800/90 my-0.5" />
 
-            {/* Compact Vertical Icon Buttons Column (6 sections) */}
+            {/* Compact Vertical Icon Buttons Column (7 sections) */}
             <nav className="relative flex flex-col items-center gap-1.5 w-full">
               {/* Seamless Sliding Active Tab Connector (merges into Main Window) */}
               <div
@@ -8153,7 +11756,7 @@ export default function App() {
                   transform: `translateY(${
                     Math.max(
                       0,
-                      ["dashboard", "profiles", "routing", "vps", "settings", "about"].indexOf(
+                      ["dashboard", "profiles", "routing", "bridge", "vps", "settings", "about"].indexOf(
                         activeTab
                       )
                     ) * 46
@@ -8219,7 +11822,7 @@ export default function App() {
                 }}
                 title={
                   hasTunnelsOrVps
-                    ? `Настройка конфигураций (${profiles.length})`
+                    ? `Настройка конфигураций (${totalVisibleTunnelCount})`
                     : "Настройка конфигураций (Сначала добавьте туннель или VPS)"
                 }
                 className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 ${
@@ -8231,9 +11834,9 @@ export default function App() {
                 }`}
               >
                 <Layers className="w-4 h-4 shrink-0" />
-                {profiles.length > 0 && (
+                {totalVisibleTunnelCount > 0 && (
                   <span className="absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full bg-cyan-600 text-[9px] font-bold text-white flex items-center justify-center border border-[#0d1322]">
-                    {profiles.length}
+                    {totalVisibleTunnelCount}
                   </span>
                 )}
               </button>
@@ -8267,7 +11870,31 @@ export default function App() {
                   )}
               </button>
 
-              {/* 4. Добавление и Автодеплой (Добавление конфиг-файлов, ключей и Автодеплой VPS) */}
+              {/* 4. Каскад (2-Hop) */}
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab("bridge");
+                }}
+                title="Каскад (2-Hop)"
+                className={`relative z-10 w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-150 cursor-pointer ${
+                  activeTab === "bridge"
+                    ? "text-cyan-300"
+                    : "text-slate-400 hover:text-slate-100 hover:bg-slate-800/50"
+                }`}
+              >
+                <Waypoints className="w-4 h-4 shrink-0" />
+                {bridgeDeploying ? (
+                  <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-ping" />
+                ) : (
+                  status.bridge_active &&
+                  (status.connected || status.is_connecting) && (
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-violet-400 shadow-[0_0_8px_#a78bfa] animate-pulse" />
+                  )
+                )}
+              </button>
+
+              {/* 5. Добавление и Автодеплой (Добавление конфиг-файлов, ключей и Автодеплой VPS) */}
               <button
                 type="button"
                 onClick={() => {
@@ -8355,7 +11982,7 @@ export default function App() {
                     : "bg-amber-400 shadow-[0_0_8px_#fbbf24] animate-pulse"
                 }`}
               />
-              <span className="text-[8px] font-mono text-slate-400 mt-1">v2.0</span>
+              <span className="text-[8px] font-mono text-slate-400 mt-1">v2.2</span>
             </button>
           </div>
         </aside>
@@ -8632,24 +12259,46 @@ export default function App() {
           {/* 1. POWER / CONNECT BUTTON CARD */}
           <div className="p-3 rounded-2xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2 shrink-0 shadow-md">
             {(() => {
+              const isBridgePowerMode =
+                status.connected || Boolean(status.is_connecting)
+                  ? Boolean(status.bridge_active)
+                  : Boolean(selectedBridgePair);
               const powerProfile =
                 ((status.connected || status.is_connecting) && status.active_profile_id
                   ? profiles.find((p) => p.id === status.active_profile_id)
                   : null) || selectedProfile;
-              const powerProtoMeta = powerProfile
-                ? getProtocolMeta(powerProfile.protocol, powerProfile.awg_version)
-                : null;
+              const powerProtoMeta =
+                !isBridgePowerMode && powerProfile
+                  ? getProtocolMeta(powerProfile.protocol, powerProfile.awg_version)
+                  : null;
               const powerTheme = powerProtoMeta ? getProtocolPowerTheme(powerProtoMeta) : null;
               const isConnectingBg = !status.connected && Boolean(status.is_connecting);
-              const effectiveConnecting = connecting || reconnectingBusy || isConnectingBg;
+              const effectiveConnecting =
+                connecting || reconnectingBusy || bridgeConnecting || isConnectingBg;
               const isHandshaking = status.connected && Boolean(status.is_handshaking);
               const isWarmStage =
                 isHandshaking ||
                 isConnectingBg ||
-                ((connecting || reconnectingBusy) && !status.connected && !reconnectCooldown);
+                ((connecting || reconnectingBusy || bridgeConnecting) &&
+                  !status.connected &&
+                  !reconnectCooldown);
 
               const buttonStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
+                : isBridgePowerMode
+                ? status.connected
+                  ? {
+                      background:
+                        "linear-gradient(135deg, #6d28d9 0%, #4f46e5 52%, #0891b2 100%)",
+                      borderColor: "rgba(167, 139, 250, 0.75)",
+                      boxShadow: "0 8px 24px rgba(109, 40, 217, 0.35)",
+                    }
+                  : {
+                      background:
+                        "linear-gradient(135deg, #2e1065 0%, #1e1b4b 55%, #083344 100%)",
+                      borderColor: "rgba(139, 92, 246, 0.55)",
+                      boxShadow: "0 6px 18px rgba(79, 70, 229, 0.22)",
+                    }
                 : powerTheme
                 ? status.connected
                   ? {
@@ -8666,6 +12315,13 @@ export default function App() {
 
               const iconBoxStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
+                : isBridgePowerMode
+                ? status.connected
+                  ? { background: "rgba(255, 255, 255, 0.18)" }
+                  : {
+                      background: "rgba(139, 92, 246, 0.22)",
+                      border: "1px solid rgba(167, 139, 250, 0.45)",
+                    }
                 : powerTheme
                 ? status.connected
                   ? { background: powerTheme.connectedIconBg }
@@ -8677,6 +12333,13 @@ export default function App() {
 
               const dotStyle: React.CSSProperties | undefined = isWarmStage
                 ? undefined
+                : isBridgePowerMode
+                ? {
+                    backgroundColor: status.connected ? "#34d399" : "#a78bfa",
+                    boxShadow: status.connected
+                      ? "0 0 8px #34d399"
+                      : "0 0 6px #a78bfa",
+                  }
                 : powerTheme
                 ? status.connected
                   ? {
@@ -8689,6 +12352,12 @@ export default function App() {
                     }
                 : undefined;
 
+              const bridgePowerLabel =
+                selectedBridgePair?.name ||
+                (status.bridge_entry_name && status.bridge_exit_name
+                  ? `${status.bridge_entry_name} → ${status.bridge_exit_name}`
+                  : "Мост (2-Hop)");
+
               return (
                 <button
                   onClick={handleToggleConnect}
@@ -8697,7 +12366,7 @@ export default function App() {
                   className={`w-full py-3.5 px-4 rounded-xl flex items-center justify-between gap-3 transition-all duration-300 cursor-pointer border relative overflow-hidden group shadow-md keep-white hover:brightness-110 ${
                     isWarmStage
                       ? "bg-gradient-to-r from-amber-600 via-orange-600 to-amber-700 text-white border-amber-400/60 shadow-amber-500/25"
-                      : !powerTheme
+                      : !powerTheme && !isBridgePowerMode
                       ? status.connected
                         ? "bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 text-white border-emerald-400/60 shadow-emerald-500/25"
                         : "bg-gradient-to-r from-slate-800 via-[#161f33] to-slate-800 text-white border-slate-700"
@@ -8712,7 +12381,13 @@ export default function App() {
                           : undefined
                       }
                       className={`absolute inset-0 ${
-                        isWarmStage ? "bg-amber-400/15" : !powerTheme ? "bg-emerald-400/10" : ""
+                        isWarmStage
+                          ? "bg-amber-400/15"
+                          : isBridgePowerMode
+                          ? "bg-violet-400/10"
+                          : !powerTheme
+                          ? "bg-emerald-400/10"
+                          : ""
                       } animate-pulse pointer-events-none`}
                     />
                   )}
@@ -8723,7 +12398,7 @@ export default function App() {
                       className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 transition-transform group-hover:scale-105 shadow-inner text-white ${
                         isWarmStage
                           ? "bg-amber-500 shadow-amber-700/50"
-                          : !powerTheme
+                          : !powerTheme && !isBridgePowerMode
                           ? status.connected
                             ? "bg-emerald-500 shadow-emerald-700/50"
                             : "bg-slate-700/80"
@@ -8738,6 +12413,8 @@ export default function App() {
                         ) : (
                           <ShieldCheck className="w-6 h-6" />
                         )
+                      ) : isBridgePowerMode ? (
+                        <Waypoints className="w-6 h-6 text-violet-200" />
                       ) : (
                         <Power className="w-6 h-6" />
                       )}
@@ -8750,13 +12427,19 @@ export default function App() {
                           : autoPortHunting
                           ? `Автоподбор порта (#${autoPortAttempt})`
                           : effectiveConnecting
-                          ? "Запуск туннеля... Нажмите для отмены"
+                          ? isBridgePowerMode
+                            ? "Запуск 2-Hop моста... Нажмите для отмены"
+                            : "Запуск туннеля... Нажмите для отмены"
                           : reconnectCooldown
                           ? "Защитная пауза WireGuard"
                           : status.connected
                           ? status.is_handshaking
                             ? "Рукопожатие туннеля..."
+                            : isBridgePowerMode
+                            ? `МОСТ: ${bridgePowerLabel}`
                             : status.active_profile_name || "Туннель активен"
+                          : isBridgePowerMode
+                          ? `МОСТ 2-HOP: ${bridgePowerLabel}`
                           : selectedProfile
                           ? selectedProfile.name
                           : "Туннель не выбран"}
@@ -8781,22 +12464,68 @@ export default function App() {
                       className={`w-3 h-3 rounded-full ${
                         isWarmStage
                           ? "bg-amber-300 animate-ping"
-                          : !powerTheme
+                          : !powerTheme && !isBridgePowerMode
                           ? status.connected
                             ? "bg-emerald-300 shadow-[0_0_8px_#34d399]"
                             : "bg-slate-500"
                           : ""
                       }`}
                     />
-                    {powerProfile && (
-                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
-                        {isMobilePlatform || routing.mode === "tun" ? "TUN" : "Proxy"}
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1">
+                      {isBridgePowerMode && (
+                        <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-violet-500/35 text-violet-100 border border-violet-300/40">
+                          2-HOP
+                        </span>
+                      )}
+                      {(powerProfile || isBridgePowerMode) && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-black/30 text-white/90 border border-white/15">
+                          {isMobilePlatform || routing.mode === "tun" ? "TUN" : "Proxy"}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </button>
               );
             })()}
+
+            {/* Live Bridge Mode (2-Hop Cascade) Telemetry Pill */}
+            {(status.connected || Boolean(status.is_connecting) || connecting || reconnectingBusy || bridgeConnecting) &&
+              status.bridge_active && (
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("bridge")}
+                  className="w-full px-2.5 py-1.5 rounded-xl bg-violet-950/35 hover:bg-violet-900/40 border border-violet-500/40 flex items-center justify-between gap-2 text-[10.5px] font-mono text-violet-200 transition cursor-pointer"
+                  title="Активен режим 2-Hop Моста. Нажмите для управления цепочкой."
+                >
+                  <span className="flex items-center gap-1.5 min-w-0 truncate">
+                    <Waypoints className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                    <span className="truncate font-semibold text-white">
+                      {status.bridge_entry_name || "Вход"}
+                    </span>
+                    <ArrowRight className="w-3 h-3 text-violet-400 shrink-0" />
+                    <span className="truncate font-semibold text-cyan-200">
+                      {status.bridge_exit_name || "Выход"}
+                    </span>
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-violet-500/25 border border-violet-400/40 text-violet-200 font-bold shrink-0">
+                    2-HOP МОСТ
+                  </span>
+                </button>
+              )}
+
+            {/* Live Enigma v1 Rotor Telemetry Pill */}
+            {(status.connected || Boolean(status.is_connecting) || connecting || reconnectingBusy) &&
+              status.enigma_rotor_info && (
+                <div className="px-2.5 py-1.5 rounded-xl bg-amber-950/30 border border-amber-500/35 flex items-center justify-between gap-2 text-[10.5px] font-mono text-amber-200">
+                  <span className="flex items-center gap-1.5 min-w-0 truncate">
+                    <span className="w-2 h-2 rounded-full bg-amber-400 shadow-[0_0_8px_#f59e0b] shrink-0" />
+                    <span className="truncate">{status.enigma_rotor_info}</span>
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-500/20 border border-amber-400/35 text-amber-300 font-bold shrink-0">
+                    ROTOR
+                  </span>
+                </div>
+              )}
 
             {/* Quick Reconnect & Auto Port Hunt bar when connected or connecting */}
             {(status.connected || connecting || reconnectingBusy || Boolean(status.is_connecting) || autoPortHunting) && (
@@ -8984,7 +12713,7 @@ export default function App() {
             <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-slate-800/80 shrink-0">
               <span className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5 text-cyan-400" />
-                Добавленные туннели ({effectiveDashboardProfiles.length})
+                Добавленные туннели ({totalVisibleTunnelCount})
               </span>
               <div className="flex items-center gap-1.5">
                 <button
@@ -9008,7 +12737,7 @@ export default function App() {
               </div>
             </div>
 
-            {!selectedProfile ? (
+            {totalVisibleTunnelCount === 0 ? (
               <div className="flex-1 flex flex-col items-center justify-center p-4 rounded-xl bg-[#0b101d] border border-dashed border-slate-700 text-center space-y-2.5">
                 <p className="text-xs text-slate-400">
                   {isMobilePlatform
@@ -9024,11 +12753,130 @@ export default function App() {
               </div>
             ) : (
               <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 custom-scrollbar min-h-0">
-                {effectiveDashboardProfiles.map((p) => {
-                  const isCurrentSelected = p.id === (status.active_profile_id || selectedProfileId);
-                  const isLiveConnected = status.connected && status.active_profile_id === p.id;
+                {/* Unified 2-Hop Bridge Pair Cards */}
+                {validSavedBridgePairs.map((pair) => {
+                  const entryP = profiles.find((p) => p.id === pair.entry_profile_id)!;
+                  const exitP = profiles.find((p) => p.id === pair.exit_profile_id)!;
+                  const isLiveConnected =
+                    status.connected &&
+                    status.bridge_active &&
+                    status.bridge_entry_profile_id === pair.entry_profile_id &&
+                    status.active_profile_id === pair.exit_profile_id;
+                  const isCurrentSelected =
+                    selectedBridgePair?.id === pair.id || isLiveConnected;
+
+                  return (
+                    <div
+                      key={`bridge-pair-${pair.id}`}
+                      onClick={() => void handleQuickSelectBridgePair(pair)}
+                      className={`p-2 rounded-xl border cursor-pointer transition flex items-center justify-between gap-2 group ${
+                        isCurrentSelected
+                          ? "bg-violet-500/14 border-violet-400/65 shadow-sm ring-1 ring-violet-500/30"
+                          : "bg-[#0b101d] border-violet-500/25 hover:border-violet-400/50 hover:bg-violet-950/20"
+                      }`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="px-1.5 py-0.5 rounded-md bg-gradient-to-r from-violet-600/35 to-cyan-600/35 border border-violet-400/50 text-[9.5px] font-extrabold text-violet-100 uppercase tracking-wide inline-flex items-center gap-1 shrink-0">
+                          <Waypoints className="w-3 h-3 text-violet-300" />
+                          МОСТ
+                        </span>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs font-bold text-white flex items-center gap-1.5 truncate">
+                            <span className="truncate">{pair.name}</span>
+                            {isLiveConnected && (
+                              <span
+                                className={`text-[9px] px-1.5 py-0.2 rounded-full border animate-pulse font-mono font-medium shrink-0 ${
+                                  isLightTheme
+                                    ? "bg-emerald-600/15 text-emerald-700 border-emerald-600/35"
+                                    : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+                                }`}
+                              >
+                                ON
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono truncate flex items-center gap-1">
+                            <span className="text-violet-300 truncate">{entryP.server}</span>
+                            <ArrowRight className="w-2.5 h-2.5 text-slate-500 shrink-0" />
+                            <span className="text-cyan-300 truncate">{exitP.server}</span>
+                            <span className="text-[9px] text-slate-500 shrink-0">
+                              ({getProtocolMeta(entryP.protocol, entryP.awg_version).label}→
+                              {getProtocolMeta(exitP.protocol, exitP.awg_version).label})
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {entryP.ping_ms != null ? (
+                          <span
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePingProfile(entryP.id);
+                            }}
+                            className={`text-[10px] font-mono font-semibold hover:underline ${
+                              isLightTheme ? "text-emerald-700" : "text-emerald-400"
+                            }`}
+                            title="Пинг Входного моста (нажмите для повторного пинга)"
+                          >
+                            {entryP.ping_ms} мс
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePingProfile(entryP.id);
+                            }}
+                            disabled={pingingId === entryP.id}
+                            className="tunnel-ping-btn text-[9px] px-1.5 py-0.5 rounded transition cursor-pointer"
+                            title="Проверить пинг Входного моста"
+                          >
+                            {pingingId === entryP.id ? "..." : "Пинг"}
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void openPopupWindow("bridge_manage");
+                          }}
+                          className="p-1 rounded-lg text-slate-400 hover:text-violet-300 hover:bg-slate-800 transition cursor-pointer"
+                          title="Управление каскадом"
+                        >
+                          <Sliders className="w-3.5 h-3.5" />
+                        </button>
+
+                        <div
+                          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center transition-colors ${
+                            isCurrentSelected
+                              ? isLiveConnected
+                                ? "border-emerald-400 bg-emerald-500"
+                                : "border-violet-400 bg-violet-500"
+                              : "border-slate-600 bg-transparent group-hover:border-slate-500"
+                          }`}
+                        >
+                          {isCurrentSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+
+                {visibleDashboardProfiles.map((p) => {
+                  const isCurrentSelected =
+                    !selectedBridgePair &&
+                    !(status.bridge_active && (status.connected || status.is_connecting)) &&
+                    p.id === (status.active_profile_id || selectedProfileId);
+                  const isLiveConnected =
+                    status.connected &&
+                    !status.bridge_active &&
+                    status.active_profile_id === p.id;
                   const isLiveActive =
                     (status.connected || Boolean(status.is_connecting)) &&
+                    !status.bridge_active &&
                     status.active_profile_id === p.id;
                   const shownListenPort =
                     isLiveActive && status.active_listen_port
@@ -9072,6 +12920,7 @@ export default function App() {
                             {(p.protocol === "amneziawg" ||
                               p.protocol === "awg_quic" ||
                               p.protocol === "awg2" ||
+                              p.protocol === "enigma" ||
                               p.protocol === "wireguard") &&
                               shownListenPort && (
                                 <span
@@ -9084,6 +12933,20 @@ export default function App() {
                                 >
                                   :{shownListenPort}
                                 </span>
+                              )}
+                            {p.protocol === "enigma" &&
+                              !(p.enigma_keybook || p.enigma_key_path)?.trim() && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleImportEnigmaKeybook(p.id);
+                                  }}
+                                  className="text-[9px] px-1.5 py-0.2 rounded border bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/40 text-amber-300 font-semibold shrink-0 cursor-pointer"
+                                  title="Нет .nvkey ключ-книги — нажмите, чтобы импортировать"
+                                >
+                                  Нет .nvkey
+                                </button>
                               )}
                           </div>
                         </div>
@@ -9185,8 +13048,8 @@ export default function App() {
                       </div>
                       <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
                         {isMobilePlatform
-                          ? "Выбрать файл конфигурации (.conf, .json, .txt) на устройстве"
-                          : "Выбрать файл конфигурации (.conf, .json, .txt) в Проводнике Windows"}
+                          ? "Выбрать файл конфигурации (.conf, .json, .txt, .nvkey, .zip) на устройстве"
+                          : "Выбрать файл конфигурации (.conf, .json, .txt, .nvkey, .zip) в Проводнике Windows"}
                       </div>
                     </div>
                   </div>
@@ -9290,6 +13153,71 @@ export default function App() {
                     Открыть
                   </div>
                 </button>
+
+                {/* 5. Деплой моста (2 VPS в связке) -> Цветной (Cyan) */}
+                <button
+                  type="button"
+                  onClick={() => void openPopupWindow("bridge_deploy")}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-cyan-950/30 border border-cyan-500/40 hover:border-cyan-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-cyan-500/10"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-cyan-500/20 border border-cyan-400/50 flex items-center justify-center text-cyan-400 group-hover:scale-105 transition shrink-0">
+                      <Waypoints className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-cyan-300 transition">
+                        Деплой моста (2 VPS)
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Вписать сразу два VPS (Вход + Выход) и провести автонастройку моста в связке по SSH
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-cyan-600/15 border-cyan-600/40 text-cyan-700"
+                        : "bg-cyan-500/20 border-cyan-400/40 text-cyan-300"
+                    }`}
+                  >
+                    Настроить
+                  </div>
+                </button>
+
+                {/* 6. Управление каскадом -> Цветной (Fuchsia / Indigo) */}
+                <button
+                  type="button"
+                  onClick={() => void openPopupWindow("bridge_manage")}
+                  className="w-full p-3.5 rounded-2xl bg-[#111827] hover:bg-fuchsia-950/30 border border-fuchsia-500/40 hover:border-fuchsia-400/75 soft-edge-block transition-all duration-150 flex items-center justify-between gap-3 text-left group cursor-pointer shadow-lg shadow-fuchsia-500/10"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-fuchsia-500/20 border border-fuchsia-400/50 flex items-center justify-center text-fuchsia-400 group-hover:scale-105 transition shrink-0">
+                      <ArrowLeftRight className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-bold text-white group-hover:text-fuchsia-300 transition flex items-center gap-2">
+                        <span>Управление каскадом</span>
+                        {status.bridge_active && (status.connected || status.is_connecting) && (
+                          <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/20 border border-emerald-400/40 text-[9.5px] font-extrabold text-emerald-300">
+                            АКТИВЕН
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                        Выбор Входного и Выходного серверов, сохранённые связки, пинг и запуск 2-Hop каскада
+                      </div>
+                    </div>
+                  </div>
+                  <div
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-bold shrink-0 ${
+                      isLightTheme
+                        ? "bg-fuchsia-600/15 border-fuchsia-600/40 text-fuchsia-700"
+                        : "bg-fuchsia-500/20 border-fuchsia-400/40 text-fuchsia-300"
+                    }`}
+                  >
+                    Открыть
+                  </div>
+                </button>
               </div>
             </div>
 
@@ -9298,10 +13226,10 @@ export default function App() {
               <div className="flex items-center gap-2 min-w-0">
                 <Layers className="w-4 h-4 text-cyan-400 shrink-0" />
                 <span className="text-xs text-slate-300 truncate">
-                  Добавлено туннелей: <b className="text-white">{profiles.length}</b>
+                  Добавлено туннелей: <b className="text-white">{totalVisibleTunnelCount}</b>
                 </span>
               </div>
-              {profiles.length > 0 && (
+              {totalVisibleTunnelCount > 0 && (
                 <button
                   type="button"
                   onClick={() => setActiveTab("dashboard")}
@@ -9343,7 +13271,7 @@ export default function App() {
                     <h3 className="text-xs font-bold text-white flex items-center gap-2">
                       <span>Установленные туннели</span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-semibold font-mono">
-                        {effectiveClientProfiles.length}
+                        {validSavedBridgePairs.length + visibleClientProfiles.length}
                       </span>
                     </h3>
                     <p className="text-[10px] text-slate-400 truncate">
@@ -9364,16 +13292,17 @@ export default function App() {
                     <select
                       value={newProfile.protocol}
                       onChange={(e) => {
-                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
+                        const proto = e.target.value as "vless" | "hysteria2" | "tuic" | "shadowsocks" | "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "enigma" | "ssh" | "shadowtls" | "vless_ws" | "webrtc";
                         const isAwg31 = proto === "amneziawg" || proto === "awg_quic" || proto === "awg_vless";
                         const isAwg20 = proto === "awg2";
+                        const isEnigma = proto === "enigma";
                         const existingAwg = profiles.find((p) => p.protocol === "amneziawg");
                         const existingVless = profiles.find((p) => p.protocol === "vless" && p.reality_public_key);
                         setNewProfile({
                           ...newProfile,
                           protocol: proto,
                           server: newProfile.server || existingAwg?.server || existingVless?.server || "",
-                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : proto === "vless_ws" ? 8080 : proto === "webrtc" ? 2053 : proto === "shadowtls" ? 8443 : isAwg31 ? (existingAwg?.port || getRandomInt(21000, 55000)) : isAwg20 ? getRandomInt(21000, 55000) : 8443,
+                          port: proto === "ssh" ? 22 : proto === "shadowsocks" ? 8388 : proto === "vless" ? 443 : proto === "tuic" ? 9443 : proto === "vless_ws" ? 8080 : proto === "webrtc" ? 2053 : proto === "shadowtls" ? 8443 : isAwg31 ? (existingAwg?.port || getRandomInt(21000, 55000)) : isAwg20 || isEnigma ? getRandomInt(21000, 55000) : 8443,
                           vless_port: proto === "awg_vless" ? (newProfile.vless_port || existingVless?.port || 443) : newProfile.vless_port,
                           uuid: proto === "awg_vless" ? (newProfile.uuid || existingVless?.uuid || existingVless?.password || "") : newProfile.uuid,
                           reality_public_key: proto === "awg_vless" ? (newProfile.reality_public_key || existingVless?.reality_public_key || "") : newProfile.reality_public_key,
@@ -9392,13 +13321,15 @@ export default function App() {
                           awg_h3: isAwg31 ? (newProfile.awg_h3 || existingAwg?.awg_h3 || String(getRandomInt(1000000000, 1499999999))) : newProfile.awg_h3,
                           awg_h4: isAwg31 ? (newProfile.awg_h4 || existingAwg?.awg_h4 || String(getRandomInt(1500000000, 2140000000))) : newProfile.awg_h4,
                           awg_version: isAwg20 ? "2.0" : isAwg31 ? "3.1" : newProfile.awg_version,
-                          awg_local_address: isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : isAwg31 ? (newProfile.awg_local_address || existingAwg?.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
-                          awg_hop_ports: isAwg31 ? (newProfile.awg_hop_ports || existingAwg?.awg_hop_ports || "20000:65000") : isAwg20 ? undefined : newProfile.awg_hop_ports,
-                          awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 ? false : newProfile.awg_port_probing,
+                          awg_local_address: isEnigma ? (newProfile.awg_local_address || "10.8.7.2/24") : isAwg20 ? (newProfile.awg_local_address || "10.8.1.2/24") : isAwg31 ? (newProfile.awg_local_address || existingAwg?.awg_local_address || "10.8.0.2/32") : newProfile.awg_local_address,
+                          awg_hop_ports: isAwg31 || isEnigma ? (newProfile.awg_hop_ports || existingAwg?.awg_hop_ports || "20000:65000") : isAwg20 ? undefined : newProfile.awg_hop_ports,
+                          awg_port_probing: isAwg31 ? (newProfile.awg_port_probing ?? true) : isAwg20 || isEnigma ? false : newProfile.awg_port_probing,
+                          enigma_mimic: isEnigma ? (newProfile.enigma_mimic || "auto") : newProfile.enigma_mimic,
                         });
                       }}
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
                     >
+                      <option value="enigma">Enigma v1 (Прототип • Ротор .nvkey + 1-RTT)</option>
                       <option value="ssh">SSH Tunnel (порт 22 • Direct TCP/IP)</option>
                       <option value="vless">VLESS Reality (порт 443 + TLS Fragment)</option>
                       <option value="shadowtls">ShadowTLS v3 (L7 TLS 1.3 верификация)</option>
@@ -9445,7 +13376,7 @@ export default function App() {
                       onChange={(e) =>
                         setNewProfile({
                           ...newProfile,
-                          port: Number(e.target.value) || (newProfile.protocol === "ssh" ? 22 : newProfile.protocol === "shadowsocks" ? 8388 : (newProfile.protocol === "awg2" || newProfile.protocol === "amneziawg" || newProfile.protocol === "awg_quic" || newProfile.protocol === "awg_vless") ? getRandomInt(21000, 55000) : 8443),
+                          port: Number(e.target.value) || (newProfile.protocol === "ssh" ? 22 : newProfile.protocol === "shadowsocks" ? 8388 : (newProfile.protocol === "awg2" || newProfile.protocol === "enigma" || newProfile.protocol === "amneziawg" || newProfile.protocol === "awg_quic" || newProfile.protocol === "awg_vless") ? getRandomInt(21000, 55000) : 8443),
                         })
                       }
                       className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
@@ -9797,6 +13728,106 @@ export default function App() {
                           value={newProfile.awg_persistent_keepalive || "25-35"}
                           onChange={(e) => setNewProfile({ ...newProfile, awg_persistent_keepalive: e.target.value })}
                           className="w-full px-2 py-1 rounded bg-[#0b101d] border border-slate-700 text-white text-[11px]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : newProfile.protocol === "enigma" ? (
+                  <div className="space-y-3 pt-1">
+                    <div className="p-3 rounded-xl bg-amber-950/25 border border-amber-500/35">
+                      <div className="text-xs font-bold text-amber-300">
+                        Параметры протокола NeuroVeil Enigma v1 (Rotor .nvkey)
+                      </div>
+                      <div className="text-[11px] text-slate-400">
+                        Полиморфное рукопожатие WireGuard 1-RTT с общей ключ-книгой <code>.nvkey</code> (16 384 Б), мимикрией заголовков и ложными пакетами. Импортируйте <code>.nvkey</code> через кнопку ✏️ сразу после сохранения.
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Режим мимикрии</label>
+                        <select
+                          value={newProfile.enigma_mimic || "auto"}
+                          onChange={(e) =>
+                            setNewProfile({
+                              ...newProfile,
+                              enigma_mimic: e.target.value as "auto" | "quic" | "stun" | "dtls" | "dns",
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white"
+                        >
+                          <option value="auto">Auto (Ротация заголовков)</option>
+                          <option value="quic">QUIC v1 Short Header</option>
+                          <option value="stun">WebRTC STUN / RTP</option>
+                          <option value="dtls">DTLS 1.2 Record</option>
+                          <option value="dns">DNS Response</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">IP клиента (Address)</label>
+                        <input
+                          type="text"
+                          placeholder="10.8.7.2/24"
+                          value={newProfile.awg_local_address || "10.8.7.2/24"}
+                          onChange={(e) =>
+                            setNewProfile({ ...newProfile, awg_local_address: e.target.value })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Пул портов (Hop Ports)</label>
+                        <input
+                          type="text"
+                          placeholder="20000:65000"
+                          value={newProfile.hop_ports || newProfile.awg_hop_ports || "20000:65000"}
+                          onChange={(e) =>
+                            setNewProfile({
+                              ...newProfile,
+                              hop_ports: e.target.value,
+                              awg_hop_ports: e.target.value,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Приватный ключ клиента (Base64)</label>
+                        <input
+                          type="text"
+                          placeholder="Приватный ключ"
+                          value={newProfile.password}
+                          onChange={(e) =>
+                            setNewProfile({ ...newProfile, password: e.target.value, awg_private_key: e.target.value })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">Публичный ключ сервера (Base64)</label>
+                        <input
+                          type="text"
+                          placeholder="Публичный ключ сервера"
+                          value={newProfile.awg_public_key || ""}
+                          onChange={(e) =>
+                            setNewProfile({ ...newProfile, awg_public_key: e.target.value })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-slate-400 mb-1">PresharedKey (опционально)</label>
+                        <input
+                          type="text"
+                          placeholder="Base64 32 байта"
+                          value={newProfile.awg_preshared_key || ""}
+                          onChange={(e) =>
+                            setNewProfile({ ...newProfile, awg_preshared_key: e.target.value })
+                          }
+                          className="w-full px-3 py-2 rounded-xl bg-[#0b101d] border border-slate-700 text-sm text-white font-mono"
                         />
                       </div>
                     </div>
@@ -10165,7 +14196,7 @@ export default function App() {
 
               {/* Client Tunnels List */}
               <div className="space-y-2.5">
-                {effectiveClientProfiles.length === 0 ? (
+                {validSavedBridgePairs.length + visibleClientProfiles.length === 0 ? (
                   <div className="p-5 rounded-xl bg-[#070b14] border border-slate-800/80 text-center space-y-2">
                     <Monitor className="w-7 h-7 text-slate-500 mx-auto" />
                     <div className="text-xs font-semibold text-slate-300">
@@ -10176,7 +14207,116 @@ export default function App() {
                     </p>
                   </div>
                 ) : (
-                  effectiveClientProfiles.map((prof) => (
+                  <>
+                    {/* Unified Bridge Pair Cards */}
+                    {validSavedBridgePairs.map((pair) => {
+                      const entryP = profiles.find((p) => p.id === pair.entry_profile_id)!;
+                      const exitP = profiles.find((p) => p.id === pair.exit_profile_id)!;
+                      const isPairSelected = selectedBridgePair?.id === pair.id;
+                      const isPairLive =
+                        status.connected &&
+                        status.bridge_active &&
+                        status.bridge_entry_profile_id === pair.entry_profile_id &&
+                        status.active_profile_id === pair.exit_profile_id;
+                      return (
+                        <div
+                          key={`client-bridge-${pair.id}`}
+                          style={
+                            isPairSelected
+                              ? {
+                                  borderColor: "rgba(167, 139, 250, 0.7)",
+                                  boxShadow: "0 0 18px rgba(139, 92, 246, 0.25)",
+                                }
+                              : undefined
+                          }
+                          className={`p-3 rounded-xl border transition flex flex-col gap-2 ${
+                            isPairSelected
+                              ? "bg-[#171530]"
+                              : "bg-[#070b14] border-violet-500/30 hover:border-violet-400/55"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 min-w-0">
+                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                              <span className="px-1.5 py-0.5 rounded-md bg-gradient-to-r from-violet-600/35 to-cyan-600/35 border border-violet-400/50 text-[9.5px] font-extrabold text-violet-100 uppercase tracking-wide inline-flex items-center gap-1 shrink-0">
+                                <Waypoints className="w-3 h-3 text-violet-300" />
+                                МОСТ 2-HOP
+                              </span>
+                              <span className="text-xs font-bold text-white truncate" title={pair.name}>
+                                {pair.name}
+                              </span>
+                              {isPairLive && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 font-mono font-bold shrink-0">
+                                  LIVE
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handlePingProfile(entryP.id)}
+                              disabled={pingingId === entryP.id}
+                              className="tunnel-ping-btn px-2 py-0.5 rounded-md text-[10px] font-mono font-medium flex items-center gap-1 shrink-0 cursor-pointer transition"
+                              title="Проверить пинг Входного моста"
+                            >
+                              <Activity
+                                className={`w-3 h-3 ${
+                                  isLightTheme ? "text-emerald-600" : "text-emerald-400"
+                                }`}
+                              />
+                              {pingingId === entryP.id
+                                ? "..."
+                                : entryP.ping_ms != null
+                                ? `${entryP.ping_ms} мс`
+                                : "Пинг"}
+                            </button>
+                          </div>
+
+                          <div className="text-[10.5px] font-mono text-slate-400 flex items-center gap-1.5 flex-wrap">
+                            <span className="text-violet-300">
+                              1. {entryP.server}:{entryP.port} (
+                              {getProtocolMeta(entryP.protocol, entryP.awg_version).label})
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-slate-500 shrink-0" />
+                            <span className="text-cyan-300">
+                              2. {exitP.server}:{exitP.port} (
+                              {getProtocolMeta(exitP.protocol, exitP.awg_version).label})
+                            </span>
+                          </div>
+
+                          <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800/70">
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void handleQuickSelectBridgePair(pair);
+                                  setActiveTab("dashboard");
+                                }}
+                                className="px-2.5 py-1 rounded-lg bg-violet-600/25 hover:bg-violet-600/40 border border-violet-400/40 text-[10.5px] font-bold text-violet-100 transition cursor-pointer"
+                              >
+                                Выбрать
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void openPopupWindow("bridge_manage")}
+                                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10.5px] font-semibold text-slate-200 transition flex items-center gap-1 cursor-pointer"
+                              >
+                                <Sliders className="w-3 h-3 text-cyan-400" />
+                                <span>Управление каскадом</span>
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteBridgePairAndServiceProfiles(pair)}
+                              className="p-1.5 rounded-lg bg-slate-800/80 hover:bg-rose-600/30 border border-slate-700/70 hover:border-rose-500/50 text-slate-400 hover:text-rose-300 transition cursor-pointer"
+                              title="Удалить связку моста и её служебные профили"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {visibleClientProfiles.map((prof) => (
                     <div
                       key={prof.id}
                       style={
@@ -10242,6 +14382,7 @@ export default function App() {
                         prof.protocol === "awg_quic" ||
                         prof.protocol === "awg_vless" ||
                         prof.protocol === "awg2" ||
+                        prof.protocol === "enigma" ||
                         prof.protocol === "wireguard") &&
                         !(prof.awg_private_key || prof.password)?.trim() && (
                           <div className="flex items-center">
@@ -10263,6 +14404,32 @@ export default function App() {
                                 }`}
                               />
                               Нет Private Key — нажмите, чтобы указать
+                            </span>
+                          </div>
+                        )}
+
+                      {/* Missing .nvkey Keybook Warning for Enigma v1 */}
+                      {prof.protocol === "enigma" &&
+                        !(prof.enigma_keybook || prof.enigma_key_path)?.trim() && (
+                          <div className="flex items-center">
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleImportEnigmaKeybook(prof.id);
+                              }}
+                              className={`text-[10px] px-2 py-0.5 rounded-md border font-medium inline-flex items-center gap-1 cursor-pointer hover:bg-amber-500/25 ${
+                                isLightTheme
+                                  ? "bg-amber-500/15 text-amber-800 border-amber-600/35"
+                                  : "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                              }`}
+                              title="Нажмите, чтобы импортировать .nvkey или .zip ключ-книгу"
+                            >
+                              <AlertTriangle
+                                className={`w-3 h-3 shrink-0 ${
+                                  isLightTheme ? "text-amber-600" : "text-amber-400"
+                                }`}
+                              />
+                              Нет .nvkey — нажмите, чтобы импортировать
                             </span>
                           </div>
                         )}
@@ -10298,12 +14465,21 @@ export default function App() {
                                 prof.protocol === "awg_quic" ||
                                 prof.protocol === "awg_vless" ||
                                 prof.protocol === "awg2" ||
+                                prof.protocol === "enigma" ||
                                 prof.protocol === "wireguard") &&
                               !(prof.awg_private_key || prof.password)?.trim()
                             ) {
                               showNotice(
                                 "info",
-                                "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf файл."
+                                "Внимание: в профиле не указан приватный ключ (Private Key). Введите ключ в настройках (✏️) или выберите .conf / .nvkey файл."
+                              );
+                            } else if (
+                              prof.protocol === "enigma" &&
+                              !(prof.enigma_keybook || prof.enigma_key_path)?.trim()
+                            ) {
+                              showNotice(
+                                "info",
+                                "Внимание: в профиле Enigma отсутствует файл-книга .nvkey. Импортируйте .nvkey в настройках (✏️)."
                               );
                             }
                             setActiveTab("dashboard");
@@ -10334,7 +14510,9 @@ export default function App() {
 
                           <button
                             onClick={() => {
-                              if (
+                              if (prof.protocol === "enigma") {
+                                void handleExportEnigmaKeybook(prof);
+                              } else if (
                                 prof.protocol === "amneziawg" ||
                                 prof.protocol === "awg_quic" ||
                                 prof.protocol === "awg_vless" ||
@@ -10346,13 +14524,19 @@ export default function App() {
                                 handleExportJson(prof);
                               }
                             }}
-                            className="p-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 flex items-center justify-center transition shrink-0 cursor-pointer"
+                            className={`p-1 rounded-lg flex items-center justify-center transition shrink-0 cursor-pointer border ${
+                              prof.protocol === "enigma"
+                                ? "bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/35 text-amber-300"
+                                : "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/30 text-emerald-300"
+                            }`}
                             title={
-                              prof.protocol === "amneziawg" ||
-                              prof.protocol === "awg_quic" ||
-                              prof.protocol === "awg_vless" ||
-                              prof.protocol === "awg2" ||
-                              prof.protocol === "wireguard"
+                              prof.protocol === "enigma"
+                                ? "Скачать архив с .nvkey ключ-книгой Enigma (ZIP)"
+                                : prof.protocol === "amneziawg" ||
+                                  prof.protocol === "awg_quic" ||
+                                  prof.protocol === "awg_vless" ||
+                                  prof.protocol === "awg2" ||
+                                  prof.protocol === "wireguard"
                                 ? "Скачать .conf для WireGuard / AmneziaVPN"
                                 : "Скачать .json конфиг sing-box"
                             }
@@ -10413,7 +14597,8 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-                  ))
+                    ))}
+                  </>
                 )}
               </div>
             </div>
@@ -10445,16 +14630,56 @@ export default function App() {
             </div>
 
             {/* Profile Selector for Routing (Compact) */}
-            {effectiveDashboardProfiles.length > 0 && (
+            {totalVisibleTunnelCount > 0 && (
               <div className="p-2.5 rounded-xl bg-[#111827] border border-slate-800/90 soft-edge-block space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
                     <Smartphone className="w-3.5 h-3.5 text-cyan-400" />
-                    Профиль маршрутизации ({effectiveDashboardProfiles.length})
+                    Профиль маршрутизации ({totalVisibleTunnelCount})
                   </span>
                 </div>
                 <div className="grid grid-cols-2 gap-1.5 max-h-[104px] overflow-y-auto pr-1 custom-scrollbar">
-                  {effectiveDashboardProfiles.map((p) => {
+                  {validSavedBridgePairs.map((pair) => {
+                    const exitP = profiles.find((p) => p.id === pair.exit_profile_id);
+                    if (!exitP) return null;
+                    const isTarget = exitP.id === (routingProfileId || selectedProfileId);
+                    const isSplitActive = exitP.routing
+                      ? exitP.routing.split_tunneling
+                      : routing.split_tunneling;
+                    return (
+                      <button
+                        key={`routing-bridge-${pair.id}`}
+                        type="button"
+                        onClick={() => switchRoutingProfile(exitP.id)}
+                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold flex items-center justify-between gap-1.5 transition border cursor-pointer min-w-0 text-left ${
+                          isTarget
+                            ? "bg-violet-500/20 border-violet-400 text-white shadow-sm shadow-violet-500/20"
+                            : "bg-[#0b101d] border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                          <span
+                            style={
+                              isSplitActive
+                                ? {
+                                    backgroundColor: "var(--color-accent)",
+                                    boxShadow: "0 0 5px var(--color-accent-glow)",
+                                  }
+                                : undefined
+                            }
+                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              isSplitActive ? "" : isLightTheme ? "bg-slate-400" : "bg-slate-600"
+                            }`}
+                          />
+                          <span className="truncate font-bold">{pair.name}</span>
+                        </div>
+                        <span className="text-[8px] px-1 py-0.5 rounded uppercase font-mono shrink-0 bg-violet-500/25 border border-violet-400/40 text-violet-200 font-bold">
+                          МОСТ
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {visibleDashboardProfiles.map((p) => {
                     const isTarget = p.id === (routingProfileId || selectedProfileId);
                     const isSplitActive = p.routing ? p.routing.split_tunneling : routing.split_tunneling;
                     return (
@@ -10502,48 +14727,43 @@ export default function App() {
 
             {/* Master Split Tunneling Toggle Card (Compact) */}
             <div
-              className={`p-3 rounded-xl border soft-edge-block transition-all ${
+              className={`px-2.5 py-2 rounded-xl border soft-edge-block transition-all ${
                 routing.split_tunneling
                   ? "bg-[#111827] border-cyan-500/50"
                   : "bg-[#111827] border-slate-800/90"
               }`}
             >
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2.5 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
                   <div
-                    className={`p-2 rounded-lg border shrink-0 ${
+                    className={`p-1.5 rounded-lg border shrink-0 ${
                       routing.split_tunneling
                         ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-400"
                         : "bg-slate-800/60 border-slate-700/60 text-slate-400"
                     }`}
                   >
-                    <Zap className="w-4 h-4" />
+                    <Zap className="w-3.5 h-3.5" />
                   </div>
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-xs font-bold text-white truncate">
-                        Раздельное туннелирование: «{activeRoutingProfile?.name || "По умолчанию"}»
-                      </h3>
-                      <span
-                        className={`text-[9px] px-2 py-0.5 rounded-full font-bold uppercase border shrink-0 ${
-                          routing.split_tunneling
-                            ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"
-                            : "bg-slate-800 border-slate-700 text-slate-400"
-                        }`}
-                      >
-                        {routing.split_tunneling ? "ВКЛ" : "ВЫКЛ"}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">
-                      {t.splitTunnelingMasterDesc}
-                    </p>
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <h3 className="text-[11.5px] font-bold text-white truncate">
+                      Раздельное туннелирование: «{activeRoutingProfile?.name || "По умолчанию"}»
+                    </h3>
+                    <span
+                      className={`text-[8.5px] px-1.5 py-0.5 rounded-full font-bold uppercase border shrink-0 ${
+                        routing.split_tunneling
+                          ? "bg-cyan-500/20 border-cyan-500/40 text-cyan-300"
+                          : "bg-slate-800 border-slate-700 text-slate-400"
+                      }`}
+                    >
+                      {routing.split_tunneling ? "ВКЛ" : "ВЫКЛ"}
+                    </span>
                   </div>
                 </div>
 
                 <button
                   type="button"
                   onClick={handleToggleSplitForProfile}
-                  className={`w-11 h-6 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer border ${
+                  className={`w-9 h-5 rounded-full transition-colors p-0.5 shrink-0 cursor-pointer border flex items-center ${
                     routing.split_tunneling
                       ? "theme-toggle-on"
                       : isLightTheme
@@ -10557,8 +14777,8 @@ export default function App() {
                   }
                 >
                   <div
-                    className={`w-5 h-5 rounded-full bg-white shadow-sm transform transition-transform ${
-                      routing.split_tunneling ? "translate-x-5" : "translate-x-0"
+                    className={`w-3.5 h-3.5 rounded-full bg-white shadow-sm transform transition-transform ${
+                      routing.split_tunneling ? "translate-x-4" : "translate-x-0"
                     }`}
                   />
                 </button>
@@ -10617,52 +14837,20 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {status.connected && (
-                      <button
-                        type="button"
-                        onClick={handleApplyOnTheFly}
-                        disabled={isApplyingPreset}
-                        className={`px-2 py-1 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer ${
-                          isLightTheme
-                            ? "bg-emerald-600/15 hover:bg-emerald-600/25 border-emerald-600/40 text-emerald-700"
-                            : "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-300"
-                        }`}
-                        title="Применить текущие списки программ к работающему VPN"
-                      >
-                        <Zap className={`w-3 h-3 ${isApplyingPreset ? "animate-spin" : ""}`} />
-                        <span>Применить</span>
-                      </button>
-                    )}
-                    {activePresetId && !routingPresets.find((p) => p.id === activePresetId)?.is_builtin && (
-                      <button
-                        type="button"
-                        onClick={handleUpdateCurrentPreset}
-                        className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-200 flex items-center gap-1 transition cursor-pointer"
-                        title="Обновить текущий пресет"
-                      >
-                        <Save className="w-3 h-3 text-cyan-400" />
-                        <span>Обновить</span>
-                      </button>
-                    )}
+                  {activePresetId && !routingPresets.find((p) => p.id === activePresetId)?.is_builtin && (
                     <button
                       type="button"
-                      onClick={() => {
-                        void openPopupWindow(
-                          "save_preset",
-                          routingProfileId || selectedProfileId || null,
-                          routing.default_outbound || "direct"
-                        );
-                      }}
-                      className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-[10px] font-semibold text-cyan-200 flex items-center gap-1 transition cursor-pointer"
+                      onClick={handleUpdateCurrentPreset}
+                      className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-[10px] font-semibold text-slate-200 flex items-center gap-1 transition cursor-pointer shrink-0"
+                      title="Обновить текущий пресет"
                     >
-                      <Plus className="w-3 h-3" />
-                      <span>Пресет</span>
+                      <Save className="w-3 h-3 text-cyan-400" />
+                      <span>Обновить</span>
                     </button>
-                  </div>
+                  )}
                 </div>
 
-                {/* Preset Chips (Compact) */}
+                {/* Preset Chips (Compact) + Add (+) button immediately to the right */}
                 <div className="flex flex-wrap items-center gap-1.5">
                   {routingPresets.map((pr) => {
                     const isActive = activePresetId === pr.id;
@@ -10714,23 +14902,80 @@ export default function App() {
                       </div>
                     );
                   })}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void openPopupWindow(
+                        "save_preset",
+                        routingProfileId || selectedProfileId || null,
+                        routing.default_outbound || "direct"
+                      );
+                    }}
+                    className="w-7 h-7 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 flex items-center justify-center transition cursor-pointer shrink-0"
+                    title="Создать предустановку"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
                 </div>
 
-                {/* Active Preset Description Banner */}
-                <div className="pt-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-800/80">
-                  <div className="flex items-center gap-1 truncate">
+                {/* Active Preset Description Banner + Apply & Confirmed Reset */}
+                <div className="pt-1.5 text-[10px] text-slate-400 flex items-center justify-between gap-2 flex-wrap border-t border-slate-800/80">
+                  <div className="flex items-center gap-1 truncate min-w-0">
                     <span className="text-cyan-400 font-medium">Активен:</span>
                     <span className="text-slate-300 truncate">
                       {routingPresets.find((p) => p.id === activePresetId)?.name || "Пользовательский"}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleResetPresets}
-                    className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 ml-2 cursor-pointer"
-                  >
-                    Сбросить пресеты
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleApplyOnTheFly}
+                      disabled={isApplyingPreset}
+                      className={`px-2 py-0.5 rounded-lg border text-[10px] font-semibold flex items-center gap-1 transition cursor-pointer disabled:opacity-50 ${
+                        isLightTheme
+                          ? "bg-emerald-600/15 hover:bg-emerald-600/25 border-emerald-600/40 text-emerald-700"
+                          : "bg-emerald-500/15 hover:bg-emerald-500/25 border-emerald-500/40 text-emerald-300"
+                      }`}
+                      title={
+                        status.connected
+                          ? "Применить текущие списки программ к работающему VPN"
+                          : "Сохранить текущие списки программ"
+                      }
+                    >
+                      <Zap className={`w-3 h-3 ${isApplyingPreset ? "animate-spin" : ""}`} />
+                      <span>Применить</span>
+                    </button>
+                    {confirmResetPresets ? (
+                      <div className="flex items-center gap-1 bg-rose-500/10 border border-rose-500/35 rounded-lg px-1.5 py-0.5">
+                        <span className="text-[10px] text-rose-300 font-semibold">Сбросить?</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmResetPresets(false);
+                            void handleResetPresets();
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[9.5px] font-bold transition cursor-pointer keep-white"
+                        >
+                          Да
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setConfirmResetPresets(false)}
+                          className="px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[9.5px] font-medium transition cursor-pointer"
+                        >
+                          Отмена
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setConfirmResetPresets(true)}
+                        className="text-[10px] text-slate-400 hover:text-cyan-300 transition shrink-0 cursor-pointer"
+                      >
+                        Сбросить пресеты
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -10966,6 +15211,31 @@ export default function App() {
             </div>
 
 
+          </div>
+        )}
+
+        {/* TAB 4: CASCADE (2-HOP) */}
+        {activeTab === "bridge" && (
+          <div className="flex-1 overflow-y-auto p-3.5 space-y-3.5 animate-tab-enter">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Waypoints className="w-5 h-5 text-violet-400 shrink-0" />
+                  <span>Каскад</span>
+                </h2>
+                <p className="text-[11px] text-slate-400 mt-0.5 leading-snug">
+                  Каскадный туннель для обхода блокировки IP и подсетей: провайдер видит только Входной мост, а весь трафик выходит через Выходной сервер.
+                </p>
+              </div>
+              {status.bridge_active && (status.connected || status.is_connecting) && (
+                <span className="px-2 py-0.5 rounded-full bg-violet-500/20 border border-violet-400/40 text-[10px] font-bold text-violet-200 shrink-0">
+                  АКТИВЕН
+                </span>
+              )}
+            </div>
+
+            {renderBridgeManageContent(false)}
           </div>
         )}
 
@@ -11908,8 +16178,8 @@ export default function App() {
                   Архитектура безопасности, специальные протоколы защиты соединения, функционал клиента и центр обновлений
                 </p>
               </div>
-              <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono font-bold">
-                Версия: {APP_VERSION} build {APP_BUILD}
+              <span className="text-xs px-3 py-1 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/35 font-mono font-bold">
+                v{APP_VERSION} • Build {APP_BUILD}
               </span>
             </div>
 
@@ -11929,18 +16199,18 @@ export default function App() {
                 <div className="text-center md:text-left flex-1">
                   <div className="flex items-center justify-center md:justify-start gap-2.5 flex-wrap">
                     <h3 className="text-xl font-bold text-white tracking-tight">NeuroVeil VPN Client</h3>
-                    <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
-                      Официальная сборка
+                    <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 font-semibold">
+                      Stable v{APP_VERSION}
                     </span>
                     <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-mono">
                       sing-box-lx 1.14+ Core
                     </span>
                     <span className="text-[10px] px-2.5 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/30 font-mono">
-                      Adaptive Handshake Shield
+                      Enigma v1 Rotor Engine
                     </span>
                   </div>
                   <p className="text-xs text-slate-300 mt-2 leading-relaxed">
-                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения для стабильного и безопасного доступа к сети. Объединяет 12 современных криптографических протоколов, специальные гибридные схемы защиты заголовков и рукопожатия WireGuard / Amnezia, интеллектуальный автоподбор портов, развертывание собственного VPS-сервера в 1 клик и раздельное туннелирование на лету.
+                    NeuroVeil VPN — высокоскоростной защищенный клиент нового поколения для стабильного и безопасного доступа к сети. Объединяет 13 современных криптографических протоколов (включая экспериментальный роторный протокол <b>Enigma v1</b>), специальные гибридные схемы защиты заголовков и рукопожатия WireGuard / Amnezia, интеллектуальный автоподбор портов, развертывание собственного VPS-сервера в 1 клик и раздельное туннелирование на лету.
                   </p>
                 </div>
               </div>
@@ -11993,7 +16263,7 @@ export default function App() {
                     Менеджер устройств, QR и экспорт
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Выпуск персональных ключей для смартфонов, ноутбуков и друзей прямо с VPS, генерация QR-кодов и выгрузка готовых файлов <code>.conf</code> (Amnezia / WireGuard) и <code>.json</code>.
+                    Выпуск персональных ключей для смартфонов, ноутбуков и друзей прямо с VPS, генерация QR-кодов и выгрузка готовых файлов <code>.conf</code> (Amnezia / WireGuard), <code>.nvkey</code> и <code>.json</code>.
                   </p>
                 </div>
 
@@ -12026,10 +16296,20 @@ export default function App() {
             >
               <div className="flex items-center gap-2">
                 <Cpu className={`w-5 h-5 ${currentTheme.styles.accentText}`} />
-                <h3 className="text-sm font-bold text-white">Технологический стек и поддерживаемые протоколы (12 режимов)</h3>
+                <h3 className="text-sm font-bold text-white">Технологический стек и поддерживаемые протоколы (13 режимов)</h3>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5 pt-1">
+                <div className="p-3.5 rounded-xl bg-amber-950/25 border border-amber-500/35 space-y-1.5">
+                  <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                    <span className="w-2 h-2 rounded-full bg-amber-400" />
+                    Enigma v1 (Rotor Engine • .nvkey)
+                  </div>
+                  <p className="text-[11px] text-slate-300 leading-relaxed">
+                    Полиморфный 1-RTT протокол поверх WireGuard: 16 КБ ключ-книга <code>.nvkey</code>, роторная смена структуры рукопожатия, разделение и перестановка половин пакетов, мимикрия заголовков (QUIC / STUN / DTLS / DNS) и 1–3 ложных пакета.
+                  </p>
+                </div>
+
                 <div className="p-3.5 rounded-xl bg-slate-900/60 border border-slate-800/80 space-y-1.5">
                   <div className="flex items-center gap-2 text-sky-400 font-bold text-xs">
                     <span className="w-2 h-2 rounded-full bg-sky-400" />
@@ -12046,7 +16326,7 @@ export default function App() {
                     Гибрид AWG + Reality (Спецпротокол)
                   </div>
                   <p className="text-[11px] text-slate-300 leading-relaxed">
-                    Двухслойная инкапсуляция (<code>detour</code>): рукопожатие и датаграммы AmneziaWG / WireGuard упаковываются внутрь TLS 1.3 соединения VLESS Reality (TCP 443, <code>xtls-rprx-vision</code> + <code>xudp</code>).
+                    Двухслойная инкапсуляция (<code>detour</code>): рукопожатие и датаграммы AmneziaWG / WireGuard упаковываются внутрь TLS 1.3 соединения VLESS Reality (TCP порт 443, <code>xtls-rprx-vision</code> + <code>xudp</code>).
                   </p>
                 </div>
 
@@ -12216,7 +16496,7 @@ export default function App() {
                   <div>
                     <h3 className="text-sm font-bold text-white">Центр обновлений приложения</h3>
                     <p className="text-[11px] text-slate-400">
-                      Автоматическая проверка и установка новых официальных релизов клиента
+                      Основной клиент NeuroVeil VPN v{APP_VERSION} — проверка и установка новых версий
                     </p>
                   </div>
                 </div>
@@ -12226,9 +16506,9 @@ export default function App() {
                     Доступно обновление v{updateInfo.latest_version}
                   </span>
                 ) : (
-                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium flex items-center gap-1.5">
+                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/35 font-medium flex items-center gap-1.5">
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    Установлена актуальная версия
+                    Актуальная версия v{APP_VERSION}
                   </span>
                 )}
               </div>
@@ -12241,7 +16521,7 @@ export default function App() {
                     </span>
                   </div>
                   <div className="text-[11px] text-slate-400">
-                    Канал обновлений: Официальный релизный канал (Stable)
+                    Канал: Основной релиз (Stable)
                     {lastUpdateCheck ? ` • Проверено в ${lastUpdateCheck}` : ""}
                   </div>
                 </div>
@@ -12326,7 +16606,7 @@ export default function App() {
               backgroundColor: "var(--bg-sidebar)",
               borderTopColor: "var(--color-accent-border)",
             }}
-            className="mobile-safe-bottom border-t px-1.5 pt-1.5 grid grid-cols-6 gap-0.5 shrink-0 z-30 select-none"
+            className="mobile-safe-bottom border-t px-1.5 pt-1.5 grid grid-cols-7 gap-0.5 shrink-0 z-30 select-none"
           >
             <button
               type="button"
@@ -12379,9 +16659,9 @@ export default function App() {
             >
               <div className="relative">
                 <Layers className="w-4 h-4 shrink-0" />
-                {profiles.length > 0 && (
+                {totalVisibleTunnelCount > 0 && (
                   <span className="absolute -top-1.5 -right-2 min-w-[14px] h-[14px] px-0.5 rounded-full bg-cyan-600 text-[8px] font-bold text-white flex items-center justify-center">
-                    {profiles.length}
+                    {totalVisibleTunnelCount}
                   </span>
                 )}
               </div>
@@ -12417,6 +16697,34 @@ export default function App() {
                   )}
               </div>
               <span className="text-[9.5px] leading-none truncate">Обход</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab("bridge");
+              }}
+              style={
+                activeTab === "bridge"
+                  ? { color: "var(--color-accent)", backgroundColor: "var(--color-accent-bg)" }
+                  : undefined
+              }
+              className={`relative py-1.5 px-1 rounded-xl flex flex-col items-center justify-center gap-0.5 transition cursor-pointer ${
+                activeTab === "bridge" ? "font-bold" : "text-slate-400"
+              }`}
+            >
+              <div className="relative">
+                <Waypoints className="w-4 h-4 shrink-0" />
+                {bridgeDeploying ? (
+                  <span className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_5px_#fbbf24] animate-ping" />
+                ) : (
+                  status.bridge_active &&
+                  (status.connected || status.is_connecting) && (
+                    <span className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full bg-violet-400 shadow-[0_0_5px_#a78bfa] animate-pulse" />
+                  )
+                )}
+              </div>
+              <span className="text-[9.5px] leading-none truncate">Каскад</span>
             </button>
 
             <button

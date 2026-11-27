@@ -128,6 +128,12 @@ pub struct VpnProfile {
     pub multi_group_id: Option<String>,
     #[serde(default)]
     pub multi_group_name: Option<String>,
+    #[serde(default)]
+    pub enigma_keybook: Option<String>,
+    #[serde(default)]
+    pub enigma_key_path: Option<String>,
+    #[serde(default)]
+    pub enigma_mimic: Option<String>,
 }
 
 impl Default for VpnProfile {
@@ -203,6 +209,9 @@ impl Default for VpnProfile {
             container_id: None,
             multi_group_id: None,
             multi_group_name: None,
+            enigma_keybook: None,
+            enigma_key_path: None,
+            enigma_mimic: None,
         }
     }
 }
@@ -407,6 +416,138 @@ fn default_lang() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgePairPreset {
+    pub id: String,
+    pub name: String,
+    pub entry_profile_id: String,
+    pub exit_profile_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeClientConfig {
+    pub id: String,
+    pub name: String,
+    pub protocol: String,
+    pub entry_host: String,
+    #[serde(default = "default_ssh_port_u16")]
+    pub entry_ssh_port: u16,
+    #[serde(default = "default_root_user")]
+    pub entry_username: String,
+    pub listen_port: u16,
+    pub exit_profile_id: String,
+    pub exit_profile_name: String,
+    pub exit_server: String,
+    pub exit_protocol: String,
+    pub config_format: String,
+    pub config_text: String,
+    pub uri: String,
+    pub service_name: String,
+    pub runtime: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBridgeClientRequest {
+    #[serde(default)]
+    pub name: String,
+    pub protocol: String,
+    pub entry_host: String,
+    #[serde(default = "default_ssh_port_u16")]
+    pub entry_ssh_port: u16,
+    #[serde(default = "default_root_user")]
+    pub entry_username: String,
+    pub entry_password: String,
+    pub exit_profile_id: String,
+    #[serde(default)]
+    pub custom_port: u16,
+    #[serde(default)]
+    pub reality_sni: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteBridgeClientRequest {
+    pub config_id: String,
+    #[serde(default)]
+    pub remove_from_server: bool,
+    #[serde(default)]
+    pub entry_password: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BridgeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub entry_profile_id: Option<String>,
+    #[serde(default)]
+    pub exit_profile_id: Option<String>,
+    #[serde(default)]
+    pub saved_pairs: Vec<BridgePairPreset>,
+    #[serde(default)]
+    pub client_configs: Vec<BridgeClientConfig>,
+    #[serde(default)]
+    pub last_entry_host: Option<String>,
+    #[serde(default)]
+    pub last_entry_ssh_port: Option<u16>,
+    #[serde(default)]
+    pub last_entry_username: Option<String>,
+    #[serde(default)]
+    pub last_entry_protocol: Option<String>,
+    #[serde(default)]
+    pub last_exit_host: Option<String>,
+    #[serde(default)]
+    pub last_exit_ssh_port: Option<u16>,
+    #[serde(default)]
+    pub last_exit_username: Option<String>,
+    #[serde(default)]
+    pub last_exit_protocol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgePairDeployRequest {
+    #[serde(default)]
+    pub pair_name: String,
+    pub entry_host: String,
+    #[serde(default = "default_ssh_port_u16")]
+    pub entry_ssh_port: u16,
+    #[serde(default = "default_root_user")]
+    pub entry_username: String,
+    pub entry_password: String,
+    pub entry_protocol: String,
+    pub exit_host: String,
+    #[serde(default = "default_ssh_port_u16")]
+    pub exit_ssh_port: u16,
+    #[serde(default = "default_root_user")]
+    pub exit_username: String,
+    pub exit_password: String,
+    pub exit_protocol: String,
+    #[serde(default = "default_true")]
+    pub save_pair_preset: bool,
+    #[serde(default = "default_true")]
+    pub auto_connect_after_deploy: bool,
+}
+
+fn default_ssh_port_u16() -> u16 {
+    22
+}
+
+fn default_root_user() -> String {
+    "root".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgePairDeployResult {
+    pub success: bool,
+    pub message: String,
+    pub entry_profile: VpnProfile,
+    pub exit_profile: VpnProfile,
+    pub saved_pair: Option<BridgePairPreset>,
+    pub entry_new_ssh_port: Option<u16>,
+    pub exit_new_ssh_port: Option<u16>,
+    pub auto_connected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPersistentState {
     pub profiles: Vec<VpnProfile>,
     pub selected_profile_id: Option<String>,
@@ -432,6 +573,10 @@ pub struct AppPersistentState {
     pub window_height: Option<f64>,
     #[serde(default)]
     pub window_maximized: Option<bool>,
+    #[serde(default = "default_true")]
+    pub passive_telemetry_enabled: bool,
+    #[serde(default)]
+    pub bridge: BridgeConfig,
 }
 
 impl Default for AppPersistentState {
@@ -451,6 +596,8 @@ impl Default for AppPersistentState {
             window_width: None,
             window_height: None,
             window_maximized: None,
+            passive_telemetry_enabled: true,
+            bridge: BridgeConfig::default(),
         }
     }
 }
@@ -507,6 +654,7 @@ pub fn is_awg_protocol(proto: &str) -> bool {
         || p == "awg3"
         || p == "wireguard"
         || p == "wg"
+        || p == "enigma"
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,11 +784,21 @@ pub struct VpsCredentials {
     pub deploy_awg_quic: bool,
     #[serde(default = "default_true")]
     pub deploy_awg_vless: bool,
+    #[serde(default)]
+    pub deploy_enigma: bool,
+    #[serde(default = "default_enigma_port")]
+    pub enigma_port: u16,
+    #[serde(default = "default_awg_hop_ports")]
+    pub enigma_hop_ports: String,
     pub enable_salamander: bool,
     #[serde(default)]
     pub enable_port_hopping: bool,
     #[serde(default)]
     pub ssh_proxy: String, // Optional local SOCKS5/HTTP proxy e.g. "127.0.0.1:10808"
+}
+
+fn default_enigma_port() -> u16 {
+    0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -671,6 +829,20 @@ pub struct VpnStatus {
     pub handshake_status: Option<String>,
     #[serde(default)]
     pub is_connecting: bool,
+    #[serde(default)]
+    pub enigma_rotor_info: Option<String>,
+    #[serde(default)]
+    pub bridge_active: bool,
+    #[serde(default)]
+    pub bridge_entry_profile_id: Option<String>,
+    #[serde(default)]
+    pub bridge_entry_name: Option<String>,
+    #[serde(default)]
+    pub bridge_exit_name: Option<String>,
+    #[serde(default)]
+    pub bridge_entry_protocol: Option<String>,
+    #[serde(default)]
+    pub bridge_exit_protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -787,3 +959,145 @@ pub struct SpeedTestProgressEvent {
     pub elapsed_ms: u64,
     pub error: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetrySessionRecord {
+    pub id: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub protocol: String,
+    pub server: String,
+    pub port: u16,
+    #[serde(default)]
+    pub mimic_mode: Option<String>,
+    pub network_mode: String,
+    pub started_at: String,
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    pub duration_secs: u64,
+    #[serde(default)]
+    pub handshake_ms: Option<u64>,
+    pub handshake_ok: bool,
+    pub disconnect_reason: String,
+    pub up_bytes: u64,
+    pub down_bytes: u64,
+    pub peak_up_bps: u64,
+    pub peak_down_bps: u64,
+    #[serde(default)]
+    pub avg_active_up_bps: Option<u64>,
+    #[serde(default)]
+    pub avg_active_down_bps: Option<u64>,
+    #[serde(default)]
+    pub ping_samples_ms: Vec<u32>,
+    #[serde(default)]
+    pub ping_min_ms: Option<u32>,
+    #[serde(default)]
+    pub ping_avg_ms: Option<f64>,
+    #[serde(default)]
+    pub ping_p95_ms: Option<u32>,
+    #[serde(default)]
+    pub ping_max_ms: Option<u32>,
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    pub probes_ok: u32,
+    pub probes_fail: u32,
+    pub stalls_count: u32,
+    #[serde(default)]
+    pub enigma_handshakes: Option<u64>,
+    #[serde(default)]
+    pub enigma_decoys: Option<u64>,
+    #[serde(default)]
+    pub enigma_packets_tx: Option<u64>,
+    #[serde(default)]
+    pub enigma_packets_rx: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpeedTestHistoryRecord {
+    pub id: String,
+    pub timestamp: String,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub profile_name: String,
+    pub protocol: String,
+    pub route_used: String,
+    pub quick_only: bool,
+    #[serde(default)]
+    pub ping_min_ms: Option<f64>,
+    #[serde(default)]
+    pub ping_avg_ms: Option<f64>,
+    #[serde(default)]
+    pub ping_max_ms: Option<f64>,
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub packet_loss_pct: Option<f64>,
+    #[serde(default)]
+    pub vps_rtt_ms: Option<u32>,
+    #[serde(default)]
+    pub download_avg_mbps: Option<f64>,
+    #[serde(default)]
+    pub download_max_mbps: Option<f64>,
+    #[serde(default)]
+    pub upload_avg_mbps: Option<f64>,
+    #[serde(default)]
+    pub upload_max_mbps: Option<f64>,
+    #[serde(default)]
+    pub colo: Option<String>,
+    #[serde(default)]
+    pub external_ip: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryProtocolSummary {
+    pub protocol: String,
+    pub sessions_count: u32,
+    pub total_duration_secs: u64,
+    #[serde(default)]
+    pub handshake_success_pct: Option<f64>,
+    #[serde(default)]
+    pub avg_handshake_ms: Option<u64>,
+    pub total_up_bytes: u64,
+    pub total_down_bytes: u64,
+    #[serde(default)]
+    pub peak_down_mbps: Option<f64>,
+    #[serde(default)]
+    pub avg_active_down_mbps: Option<f64>,
+    #[serde(default)]
+    pub peak_up_mbps: Option<f64>,
+    #[serde(default)]
+    pub avg_active_up_mbps: Option<f64>,
+    #[serde(default)]
+    pub avg_ping_ms: Option<f64>,
+    #[serde(default)]
+    pub p95_ping_ms: Option<u32>,
+    #[serde(default)]
+    pub avg_jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub packet_loss_pct: Option<f64>,
+    pub stalls_total: u32,
+    pub speedtest_count: u32,
+    #[serde(default)]
+    pub speedtest_avg_down_mbps: Option<f64>,
+    #[serde(default)]
+    pub speedtest_avg_up_mbps: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TelemetryStore {
+    #[serde(default)]
+    pub sessions: Vec<TelemetrySessionRecord>,
+    #[serde(default)]
+    pub speedtests: Vec<SpeedTestHistoryRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryReportResponse {
+    pub enabled: bool,
+    #[serde(default)]
+    pub active_session: Option<TelemetrySessionRecord>,
+    pub summaries: Vec<TelemetryProtocolSummary>,
+    pub sessions: Vec<TelemetrySessionRecord>,
+    pub speedtests: Vec<SpeedTestHistoryRecord>,
+}
+

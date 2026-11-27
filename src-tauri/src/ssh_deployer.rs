@@ -1,7 +1,8 @@
 use crate::models::{
-    DeployResult, VpnProfile, VpsAdminState, VpsContainerInfo, VpsCredentials, VpsMultiProtocolGroup,
+    BridgeClientConfig, CreateBridgeClientRequest, DeployResult, VpnProfile, VpsAdminState,
+    VpsContainerInfo, VpsCredentials, VpsMultiProtocolGroup,
 };
-use crate::singbox::build_profile_uri;
+use crate::singbox::{build_awg_conf, build_bridge_exit_nodes, build_profile_uri, urlencoding};
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::{ChannelMsg, Preferred};
 use serde_json::json;
@@ -13,6 +14,94 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use uuid::Uuid;
+
+const ENIGMA_SRV_C_SRC: &str = include_str!("enigma_srv.c");
+
+fn build_enigma_binary_install_cmd() -> String {
+    format!(
+        r#"
+set -e
+if ! command -v gcc >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -y >/dev/null 2>&1 || true
+        apt-get install -y gcc libc6-dev >/dev/null 2>&1 || true
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y gcc glibc-devel >/dev/null 2>&1 || true
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y gcc glibc-devel >/dev/null 2>&1 || true
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache gcc musl-dev >/dev/null 2>&1 || true
+    fi
+fi
+if ! command -v gcc >/dev/null 2>&1; then
+    echo "ERR_NO_GCC"
+    exit 1
+fi
+mkdir -p /usr/local/src /usr/local/bin
+cat << 'EOF_ENIGMA_C_SRC' > /usr/local/src/neuroveil-enigma-srv.c
+{src}
+EOF_ENIGMA_C_SRC
+gcc -O3 -std=c99 -Wall -Wextra -o /usr/local/bin/neuroveil-enigma-srv.tmp /usr/local/src/neuroveil-enigma-srv.c
+chmod +x /usr/local/bin/neuroveil-enigma-srv.tmp
+mv -f /usr/local/bin/neuroveil-enigma-srv.tmp /usr/local/bin/neuroveil-enigma-srv
+echo "ENIGMA_BIN_OK"
+"#,
+        src = ENIGMA_SRV_C_SRC
+    )
+}
+
+fn build_enigma_service_start_cmd(cid: &str, cdir: &str, ext_port: u16, wg_port: u16) -> String {
+    format!(
+        r#"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    cat << 'EOF_ENIGMA_SVC' > "/etc/systemd/system/neuroveil-enigma-{cid}.service"
+[Unit]
+Description=NeuroVeil Enigma v1 Polymorphic Gateway ({cid})
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/neuroveil-enigma-srv {ext_p} {wg_p} {cdir}/enigma.nvkey
+Restart=always
+RestartSec=2
+OOMScoreAdjust=-900
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF_ENIGMA_SVC
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable "neuroveil-enigma-{cid}" >/dev/null 2>&1 || true
+    systemctl restart "neuroveil-enigma-{cid}"
+    sleep 1
+    if systemctl is-active --quiet "neuroveil-enigma-{cid}"; then
+        echo "ENIGMA_ACTIVE"
+    else
+        journalctl -u "neuroveil-enigma-{cid}" -n 15 --no-pager || true
+        exit 1
+    fi
+else
+    if [ -f "{cdir}/enigma.pid" ]; then
+        kill "$(cat "{cdir}/enigma.pid")" >/dev/null 2>&1 || true
+    fi
+    nohup /usr/local/bin/neuroveil-enigma-srv {ext_p} {wg_p} "{cdir}/enigma.nvkey" >/var/log/neuroveil-enigma-{cid}.log 2>&1 &
+    echo $! > "{cdir}/enigma.pid"
+    sleep 1
+    if kill -0 "$(cat "{cdir}/enigma.pid")" 2>/dev/null; then
+        echo "ENIGMA_ACTIVE"
+    else
+        cat /var/log/neuroveil-enigma-{cid}.log 2>/dev/null || true
+        exit 1
+    fi
+fi
+"#,
+        cid = cid,
+        cdir = cdir,
+        ext_p = ext_port,
+        wg_p = wg_port
+    )
+}
 
 fn allocate_free_port(preferred: u16, used: &mut HashSet<u16>, is_high_udp: bool) -> u16 {
     if !is_high_udp && preferred > 0 && !used.contains(&preferred) {
@@ -588,13 +677,14 @@ pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<Deplo
         || creds.deploy_awg_quic
         || creds.deploy_awg_vless
         || creds.deploy_awg2
+        || creds.deploy_enigma
         || creds.deploy_ssh
         || creds.deploy_shadowtls
         || creds.deploy_vless_ws
         || creds.deploy_webrtc;
 
     if !any_proto {
-        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH Tunnel)".to_string());
+        return Err("Выберите хотя бы один протокол для развертывания (VLESS Reality, Hysteria 2, TUIC v5, Shadowsocks, Enigma v1, Amnezia 3.1, AWG + QUIC Pre-Warm, Гибрид AWG + Reality, AmneziaWG 2.0, ShadowTLS, Cloudflare WS, WebRTC или SSH Tunnel)".to_string());
     }
 
     let need_vless_server = creds.deploy_vless || creds.deploy_awg_vless;
@@ -605,6 +695,7 @@ pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<Deplo
         || creds.deploy_tuic
         || creds.deploy_ss
         || creds.deploy_awg2
+        || creds.deploy_enigma
         || creds.deploy_shadowtls
         || creds.deploy_vless_ws
         || creds.deploy_webrtc;
@@ -617,6 +708,10 @@ pub async fn deploy_vps(app: &AppHandle, creds: &VpsCredentials) -> Result<Deplo
     if creds.deploy_awg2 && (creds.awg2_port == 0 || creds.awg2_port == 51821 || creds.awg2_port == 51820) {
         creds.awg2_port = random_u32_in_range(20000, 55000) as u16;
         emit_log(app, &format!("Авто-рандомизация: выбран порт AmneziaWG 2.0 UDP {}", creds.awg2_port));
+    }
+    if creds.deploy_enigma && (creds.enigma_port == 0 || creds.enigma_port == 51820 || creds.enigma_port == 51821) {
+        creds.enigma_port = random_u32_in_range(20000, 55000) as u16;
+        emit_log(app, &format!("Авто-рандомизация: выбран внешний порт Enigma v1 UDP {}", creds.enigma_port));
     }
     if need_vless_server && creds.vless_port == 0 {
         creds.vless_port = 443;
@@ -820,7 +915,7 @@ echo "DOCKER_OK=$DOCKER_OK"
         r#"
 echo "===PORTS==="
 ss -tulnH 2>/dev/null | awk '{print $5}' | rev | cut -d: -f1 | rev | sort -un || true
-grep -hoE '"listen_port"\s*:\s*[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | grep -oE '[0-9]+' || true
+grep -hoE '"(listen_port|external_port|wg_port)"\s*:\s*[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json /opt/neuroveil/containers/*/enigma.json 2>/dev/null | grep -oE '[0-9]+' || true
 echo "===SUBNETS==="
 grep -hoE '10\.8\.[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | sort -u || true
 echo "===CONTAINERS==="
@@ -932,6 +1027,20 @@ ls -1d /opt/neuroveil/containers/*/meta.json /etc/sing-box/config.json 2>/dev/nu
         creds.awg2_port = allocate_free_port(creds.awg2_port, &mut used_ports, true);
         awg2_octet = allocate_free_subnet_octet(&mut used_octets);
         emit_log(app, &format!("AmneziaWG 2.0 в контейнере {}: UDP {} | подсеть 10.8.{}.0/24", container_id, creds.awg2_port, awg2_octet));
+    }
+    let mut enigma_octet = 7u8;
+    let mut enigma_wg_port = 0u16;
+    if creds.deploy_enigma {
+        creds.enigma_port = allocate_free_port(creds.enigma_port, &mut used_ports, true);
+        enigma_wg_port = allocate_free_port(random_u32_in_range(40000, 58000) as u16, &mut used_ports, true);
+        enigma_octet = allocate_free_subnet_octet(&mut used_octets);
+        emit_log(
+            app,
+            &format!(
+                "Enigma v1 в контейнере {}: внешний UDP {} -> локальный WG UDP {} | подсеть 10.8.{}.0/24",
+                container_id, creds.enigma_port, enigma_wg_port, enigma_octet
+            ),
+        );
     }
 
     // 3. Generate TLS Certificate & Keys inside container_dir
@@ -1249,6 +1358,95 @@ chmod 600 "{cdir}/awg2.json"
         (s_priv, s_pub, c_priv, c_pub, psk)
     } else {
         (String::new(), String::new(), String::new(), String::new(), String::new())
+    };
+
+    let enigma_client_ip_32 = format!("10.8.{}.2/32", enigma_octet);
+    let enigma_client_ip_24 = format!("10.8.{}.2/24", enigma_octet);
+    let enigma_server_ip = format!("10.8.{}.1/24", enigma_octet);
+    let enigma_cidr = format!("10.8.{}.0/24", enigma_octet);
+
+    let (
+        enigma_server_priv,
+        enigma_server_pub,
+        enigma_client_priv,
+        enigma_client_pub,
+        enigma_psk,
+        enigma_keybook_b64,
+    ) = if creds.deploy_enigma {
+        emit_log(app, "Шаг 3/6: Генерация ключей и книги роторов (.nvkey 16 KB) для Enigma v1...");
+        let (s_priv, s_pub) = generate_wg_keypair_remote(&sess).await?;
+        let (c_priv, c_pub) = generate_wg_keypair_remote(&sess).await?;
+        let psk = generate_random_base64_32();
+        let kb_b64 = crate::enigma::EnigmaKeybook::generate()?.to_base64();
+        let enigma_hop = if creds.enable_port_hopping && !is_additional_container && !creds.deploy_hy2 {
+            "20000:65000"
+        } else {
+            ""
+        };
+
+        let enigma_save_cmd = format!(
+            r#"set -e
+printf '%s' '{kb_b64}' | base64 -d > "{cdir}/enigma.nvkey"
+chmod 600 "{cdir}/enigma.nvkey"
+NV_SZ=$(wc -c < "{cdir}/enigma.nvkey" | tr -d ' ')
+if [ "$NV_SZ" != "16384" ]; then
+    echo "ERR_NVKEY_SIZE=$NV_SZ"
+    exit 1
+fi
+cat << 'EOF_ENIGMA_JSON' > "{cdir}/enigma.json"
+{{
+  "server_private_key": "{s_priv}",
+  "server_public_key": "{s_pub}",
+  "client_private_key": "{c_priv}",
+  "client_public_key": "{c_pub}",
+  "preshared_key": "{psk}",
+  "external_port": {ext_p},
+  "wg_port": {wg_p},
+  "keybook_b64": "{kb_b64}",
+  "mimic": "auto",
+  "hop_ports": "{enigma_hop}",
+  "devices": [
+    {{
+      "name": "default",
+      "protocol": "enigma",
+      "client_private_key": "{c_priv}",
+      "client_public_key": "{c_pub}",
+      "preshared_key": "{psk}",
+      "ip": "{client_ip}",
+      "mimic": "auto"
+    }}
+  ]
+}}
+EOF_ENIGMA_JSON
+chmod 600 "{cdir}/enigma.json"
+echo "ENIGMA_KEYS_OK"
+"#,
+            cdir = container_dir,
+            kb_b64 = kb_b64,
+            s_priv = s_priv,
+            s_pub = s_pub,
+            c_priv = c_priv,
+            c_pub = c_pub,
+            psk = psk,
+            ext_p = creds.enigma_port,
+            wg_p = enigma_wg_port,
+            enigma_hop = enigma_hop,
+            client_ip = enigma_client_ip_32
+        );
+        let (ek_code, ek_out) = run_remote_cmd(&sess, &enigma_save_cmd).await?;
+        if ek_code != 0 || !ek_out.contains("ENIGMA_KEYS_OK") {
+            return Err(format!("Ошибка записи книги ключей Enigma на VPS: {}", ek_out));
+        }
+
+        emit_log(app, "Компиляция и установка шлюза Enigma v1 на VPS (C99)... ");
+        let (eb_code, eb_out) = run_remote_cmd(&sess, &build_enigma_binary_install_cmd()).await?;
+        if eb_code != 0 || !eb_out.contains("ENIGMA_BIN_OK") {
+            return Err(format!("Ошибка сборки шлюза Enigma v1 на VPS: {}", eb_out));
+        }
+
+        (s_priv, s_pub, c_priv, c_pub, psk, kb_b64)
+    } else {
+        (String::new(), String::new(), String::new(), String::new(), String::new(), String::new())
     };
 
     if creds.deploy_hy2 || creds.deploy_tuic || creds.deploy_webrtc || creds.deploy_vless_ws {
@@ -1722,6 +1920,60 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         ));
     }
 
+    if creds.deploy_enigma {
+        proto_labels.push("Enigma v1".to_string());
+        proto_ports.push(creds.enigma_port);
+        let enigma_ep = json!({
+            "type": "wireguard",
+            "tag": "enigma-in",
+            "listen_port": enigma_wg_port,
+            "address": [enigma_server_ip],
+            "private_key": enigma_server_priv,
+            "mtu": 1280,
+            "peers": [
+                {
+                    "public_key": enigma_client_pub,
+                    "pre_shared_key": enigma_psk,
+                    "allowed_ips": [enigma_client_ip_32]
+                }
+            ]
+        });
+        endpoints.push(enigma_ep);
+
+        route_rules.push(json!({
+            "inbound": ["enigma-in"],
+            "outbound": "direct"
+        }));
+        route_rules.push(json!({
+            "source_ip_cidr": [enigma_cidr],
+            "outbound": "direct"
+        }));
+
+        fw_rules.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {ext_p}/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={ext_p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
+             iptables -C INPUT -p udp --dport {ext_p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {ext_p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C OUTPUT -p udp --sport {ext_p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {ext_p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C INPUT -p udp ! -i lo --dport {wg_p} -j DROP 2>/dev/null || iptables -I INPUT 1 -p udp ! -i lo --dport {wg_p} -j DROP >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -s {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -s {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -d {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -d {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -C POSTROUTING -s {cidr} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {cidr} -j MASQUERADE >/dev/null 2>&1 || true\n",
+            ext_p = creds.enigma_port,
+            wg_p = enigma_wg_port,
+            cidr = enigma_cidr
+        ));
+
+        if creds.enable_port_hopping && !is_additional_container && !creds.deploy_hy2 {
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow 20000:65000/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port=20000-65000/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport 20000:65000 -j REDIRECT --to-ports {ext_p} 2>/dev/null || iptables -t nat -A PREROUTING -p udp --dport 20000:65000 -j REDIRECT --to-ports {ext_p} >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport 20000:65000 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 20000:65000 -j ACCEPT >/dev/null 2>&1 || true\n",
+                ext_p = creds.enigma_port
+            ));
+        }
+    }
+
     // Exempt this container's dedicated UDP ports from any port-hopping PREROUTING REDIRECT rules
     let mut active_udp_ports: Vec<u16> = Vec::new();
     if creds.deploy_hy2 && creds.hy2_port > 0 { active_udp_ports.push(creds.hy2_port); }
@@ -1729,6 +1981,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
     if creds.deploy_ss && creds.ss_port > 0 { active_udp_ports.push(creds.ss_port); }
     if need_awg_server && creds.awg_port > 0 { active_udp_ports.push(creds.awg_port); }
     if creds.deploy_awg2 && creds.awg2_port > 0 { active_udp_ports.push(creds.awg2_port); }
+    if creds.deploy_enigma && creds.enigma_port > 0 { active_udp_ports.push(creds.enigma_port); }
     for udp_p in active_udp_ports {
         fw_rules.push_str(&format!(
             "iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n",
@@ -1776,7 +2029,10 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
         "created_at": created_at,
         "protocols": proto_labels,
         "ports": proto_ports,
-        "enable_port_hopping": creds.enable_port_hopping && !is_additional_container
+        "enable_port_hopping": creds.enable_port_hopping && !is_additional_container,
+        "has_enigma": creds.deploy_enigma,
+        "enigma_port": creds.enigma_port,
+        "enigma_wg_port": enigma_wg_port
     });
     let meta_str = serde_json::to_string_pretty(&meta_json).unwrap();
 
@@ -1900,6 +2156,33 @@ iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             container_id, svc_out, journal
         ));
     }
+
+    if creds.deploy_enigma {
+        emit_log(
+            app,
+            &format!(
+                "Запуск шлюза Enigma v1 (UDP {} <-> 127.0.0.1:{})...",
+                creds.enigma_port, enigma_wg_port
+            ),
+        );
+        let enigma_svc_cmd = build_enigma_service_start_cmd(
+            &container_id,
+            &container_dir,
+            creds.enigma_port,
+            enigma_wg_port,
+        );
+        let (e_code, e_out) = run_remote_cmd(&sess, &enigma_svc_cmd).await?;
+        if e_code != 0 || !e_out.contains("ENIGMA_ACTIVE") {
+            let _ = sess
+                .disconnect(russh::Disconnect::ByApplication, "error", "en")
+                .await;
+            return Err(format!(
+                "Шлюз Enigma v1 (neuroveil-enigma-{}) не запустился: {}",
+                container_id, e_out
+            ));
+        }
+    }
+
     let _ = sess
         .disconnect(russh::Disconnect::ByApplication, "deploy completed", "en")
         .await;
@@ -2216,6 +2499,37 @@ iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
         created_profiles.push(webrtc_profile);
     }
 
+    if creds.deploy_enigma {
+        let enigma_hop = if creds.enable_port_hopping && !is_additional_container && !creds.deploy_hy2 {
+            Some("20000:65000".to_string())
+        } else {
+            None
+        };
+        let mut enigma_profile = VpnProfile {
+            id: Uuid::new_v4().to_string(),
+            name: format_prof_name("Enigma v1", creds.enigma_port),
+            protocol: "enigma".to_string(),
+            server: connect_host.clone(),
+            port: creds.enigma_port,
+            password: enigma_client_priv.clone(),
+            awg_private_key: Some(enigma_client_priv),
+            awg_public_key: Some(enigma_server_pub),
+            awg_preshared_key: Some(enigma_psk),
+            awg_local_address: Some(enigma_client_ip_24),
+            awg_hop_ports: enigma_hop.clone(),
+            hop_ports: enigma_hop,
+            enigma_keybook: Some(enigma_keybook_b64),
+            enigma_mimic: Some("auto".to_string()),
+            up_mbps: 100,
+            down_mbps: 100,
+            pinned_on_pc: Some(true),
+            container_id: Some(container_id.clone()),
+            ..Default::default()
+        };
+        enigma_profile.uri = build_profile_uri(&enigma_profile);
+        created_profiles.push(enigma_profile);
+    }
+
     emit_log(
         app,
         &format!(
@@ -2428,6 +2742,11 @@ for unit in /etc/systemd/system/neuroveil-*.service; do
         rm -f "$unit"
     fi
 done
+for pf in /opt/neuroveil/containers/*/enigma.pid /etc/sing-box/enigma.pid; do
+    if [ -f "$pf" ]; then
+        kill "$(cat "$pf" 2>/dev/null)" >/dev/null 2>&1 || true
+    fi
+done
 rm -rf /opt/neuroveil/containers
 
 systemctl stop sing-box >/dev/null 2>&1 || true
@@ -2442,6 +2761,9 @@ systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl restart ssh.socket >/dev/null 2>&1 || systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || true
 rm -rf /etc/sing-box
 rm -f /usr/local/bin/sing-box
+rm -f /usr/local/bin/neuroveil-enigma-srv
+rm -f /usr/local/src/neuroveil-enigma-srv.c
+rm -f /var/log/neuroveil-enigma-*.log
 rm -f /usr/local/bin/neuroveil-antisleep.sh
 rm -f /var/run/neuroveil-antisleep.pid
 rm -f /etc/sysctl.d/99-neuroveil-vpn.conf
@@ -2525,7 +2847,7 @@ fn profile_credential(p: &VpnProfile) -> String {
             .unwrap_or(&p.password)
             .trim()
             .to_string(),
-        "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "wireguard" => p
+        "amneziawg" | "awg_quic" | "awg_vless" | "awg2" | "enigma" | "wireguard" => p
             .awg_private_key
             .as_deref()
             .filter(|s| !s.trim().is_empty())
@@ -2691,7 +3013,7 @@ async fn probe_vps_used_ports_and_octets(
         r#"
 echo "===PORTS==="
 ss -tulnH 2>/dev/null | awk '{print $5}' | rev | cut -d: -f1 | rev | sort -un || true
-grep -hoE '"listen_port"\s*:\s*[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | grep -oE '[0-9]+' || true
+grep -hoE '"(listen_port|external_port|wg_port)"\s*:\s*[0-9]+' /etc/sing-box/config.json /etc/sing-box/enigma.json /opt/neuroveil/containers/*/config.json /opt/neuroveil/containers/*/enigma.json 2>/dev/null | grep -oE '[0-9]+' || true
 echo "===SUBNETS==="
 grep -hoE '10\.8\.[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json 2>/dev/null | sort -u || true
 "#,
@@ -2893,14 +3215,22 @@ fn find_wg_endpoint_idx(cfg: &serde_json::Value, is_awg2: bool, target_tag: &str
             return Some(idx);
         }
     }
+    if target_tag == "enigma-in" {
+        return None;
+    }
     for (idx, ep) in endpoints.iter().enumerate() {
-        if ep["type"].as_str() == Some("wireguard") && ep["listen_port"].as_u64() == Some(default_port as u64) {
+        let tag = ep["tag"].as_str().unwrap_or("");
+        if ep["type"].as_str() == Some("wireguard")
+            && tag != "enigma-in"
+            && ep["listen_port"].as_u64() == Some(default_port as u64)
+        {
             return Some(idx);
         }
     }
     if !is_awg2 {
         for (idx, ep) in endpoints.iter().enumerate() {
-            if ep["type"].as_str() == Some("wireguard") && ep["tag"].as_str() != Some("awg2-in") {
+            let tag = ep["tag"].as_str().unwrap_or("");
+            if ep["type"].as_str() == Some("wireguard") && tag != "awg2-in" && tag != "enigma-in" {
                 return Some(idx);
             }
         }
@@ -3549,6 +3879,186 @@ async fn ensure_standard_inbound_ready(
     Ok(())
 }
 
+async fn ensure_enigma_ready(
+    app: &AppHandle,
+    sess: &Handle<SshClientHandler>,
+    target: &ResolvedContainer,
+    creds: &VpsCredentials,
+    cfg: &mut serde_json::Value,
+    enigma_json_opt: &mut Option<serde_json::Value>,
+    enigma_loaded: &mut bool,
+    enigma_dirty: &mut bool,
+    enigma_need_daemon: &mut bool,
+    cfg_dirty: &mut bool,
+    host_probe: &mut Option<(HashSet<u16>, HashSet<u8>)>,
+    fw_rules: &mut String,
+) -> Result<(), String> {
+    let file_path = format!("{}/enigma.json", target.cdir);
+    if !*enigma_loaded {
+        let (_, raw) = run_remote_cmd(sess, &format!("cat \"{}\" 2>/dev/null || true", file_path)).await?;
+        *enigma_json_opt = serde_json::from_str(&raw).ok();
+        *enigma_loaded = true;
+    }
+
+    let ep_idx = find_wg_endpoint_idx(cfg, false, "enigma-in", 0);
+    let json_valid = enigma_json_opt
+        .as_ref()
+        .map(|j| {
+            !j["server_public_key"].as_str().unwrap_or("").trim().is_empty()
+                && !j["keybook_b64"].as_str().unwrap_or("").trim().is_empty()
+                && j["external_port"].as_u64().unwrap_or(0) > 0
+                && j["wg_port"].as_u64().unwrap_or(0) > 0
+        })
+        .unwrap_or(false);
+
+    if json_valid && ep_idx.is_some() {
+        return Ok(());
+    }
+
+    if host_probe.is_none() {
+        *host_probe = Some(probe_vps_used_ports_and_octets(sess, cfg).await);
+    }
+    let (used_ports, used_octets) = host_probe.as_mut().unwrap();
+
+    let (ep_existing_wg_port, ep_existing_octet) = if let Some(idx) = ep_idx {
+        let ep = &cfg["endpoints"][idx];
+        let p = ep["listen_port"].as_u64().unwrap_or(0) as u16;
+        let oct = ep["address"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.strip_prefix("10.8."))
+            .and_then(|rest| rest.split('.').next())
+            .and_then(|o| o.parse::<u8>().ok());
+        (if p > 0 { Some(p) } else { None }, oct)
+    } else {
+        (None, None)
+    };
+
+    let subnet_octet = ep_existing_octet.unwrap_or_else(|| allocate_free_subnet_octet(used_octets));
+    let wg_port = if let Some(p) = ep_existing_wg_port {
+        used_ports.insert(p);
+        p
+    } else if let Some(jp) = enigma_json_opt
+        .as_ref()
+        .and_then(|j| j["wg_port"].as_u64())
+        .map(|v| v as u16)
+        .filter(|&p| p >= 1024 && !used_ports.contains(&p))
+    {
+        used_ports.insert(jp);
+        jp
+    } else {
+        allocate_free_port(random_u32_in_range(40000, 58000) as u16, used_ports, true)
+    };
+
+    let ext_port = if let Some(jp) = enigma_json_opt
+        .as_ref()
+        .and_then(|j| j["external_port"].as_u64())
+        .map(|v| v as u16)
+        .filter(|&p| p >= 1024 && !used_ports.contains(&p))
+    {
+        used_ports.insert(jp);
+        jp
+    } else {
+        let pref = if creds.enigma_port == 0 || creds.enigma_port == 51820 || creds.enigma_port == 51821 {
+            random_u32_in_range(20000, 55000) as u16
+        } else {
+            creds.enigma_port
+        };
+        allocate_free_port(pref, used_ports, true)
+    };
+
+    if !json_valid {
+        let (s_priv, s_pub) = generate_wg_keypair_remote(sess).await?;
+        let psk = generate_random_base64_32();
+        let kb_b64 = crate::enigma::EnigmaKeybook::generate()?.to_base64();
+        let has_hy2 = cfg["inbounds"]
+            .as_array()
+            .map(|a| a.iter().any(|ib| ib["type"].as_str() == Some("hysteria2")))
+            .unwrap_or(false);
+        let hop_ports = if target.enable_port_hopping && !has_hy2 {
+            "20000:65000"
+        } else {
+            ""
+        };
+        *enigma_json_opt = Some(json!({
+            "server_private_key": s_priv,
+            "server_public_key": s_pub,
+            "client_private_key": "",
+            "client_public_key": "",
+            "preshared_key": psk,
+            "external_port": ext_port,
+            "wg_port": wg_port,
+            "keybook_b64": kb_b64,
+            "mimic": "auto",
+            "hop_ports": hop_ports,
+            "devices": []
+        }));
+        *enigma_dirty = true;
+        *enigma_need_daemon = true;
+    }
+
+    let ej = enigma_json_opt.as_ref().unwrap();
+    let server_priv = ej["server_private_key"].as_str().unwrap_or("").to_string();
+    let server_ip = format!("10.8.{}.1/24", subnet_octet);
+    let cidr = format!("10.8.{}.0/24", subnet_octet);
+
+    if ep_idx.is_none() {
+        let ep_json = json!({
+            "type": "wireguard",
+            "tag": "enigma-in",
+            "listen_port": wg_port,
+            "address": [server_ip],
+            "private_key": server_priv,
+            "mtu": 1280,
+            "peers": []
+        });
+        if !cfg["endpoints"].is_array() {
+            cfg["endpoints"] = json!([]);
+        }
+        if let Some(endpoints) = cfg["endpoints"].as_array_mut() {
+            endpoints.push(ep_json);
+        }
+        ensure_route_direct_for_wg(cfg, "enigma-in", &cidr);
+        fw_rules.push_str(&format!(
+            "if command -v ufw >/dev/null 2>&1; then ufw allow {ext_p}/udp >/dev/null 2>&1 || true; ufw default allow routed >/dev/null 2>&1 || true; fi\n\
+             if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={ext_p}/udp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-masquerade >/dev/null 2>&1 || true; fi\n\
+             iptables -C INPUT -p udp --dport {ext_p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {ext_p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C OUTPUT -p udp --sport {ext_p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {ext_p} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C INPUT -p udp ! -i lo --dport {wg_p} -j DROP 2>/dev/null || iptables -I INPUT 1 -p udp ! -i lo --dport {wg_p} -j DROP >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -s {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -s {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -C FORWARD -d {cidr} -j ACCEPT 2>/dev/null || iptables -I FORWARD -d {cidr} -j ACCEPT >/dev/null 2>&1 || true\n\
+             iptables -t nat -C POSTROUTING -s {cidr} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -s {cidr} -j MASQUERADE >/dev/null 2>&1 || true\n\
+             iptables -t nat -C PREROUTING -p udp --dport {ext_p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {ext_p} -j RETURN >/dev/null 2>&1 || true\n",
+            ext_p = ext_port,
+            wg_p = wg_port,
+            cidr = cidr
+        ));
+        *cfg_dirty = true;
+        *enigma_need_daemon = true;
+    }
+
+    if *enigma_need_daemon {
+        let (has_bin, _) = run_remote_cmd(sess, "test -x /usr/local/bin/neuroveil-enigma-srv").await?;
+        if has_bin != 0 {
+            emit_log(app, "Компиляция шлюза Enigma v1 на VPS (C99)...");
+            let (eb_code, eb_out) = run_remote_cmd(sess, &build_enigma_binary_install_cmd()).await?;
+            if eb_code != 0 || !eb_out.contains("ENIGMA_BIN_OK") {
+                return Err(format!("Ошибка сборки шлюза Enigma v1 на VPS: {}", eb_out));
+            }
+        }
+        emit_log(
+            app,
+            &format!(
+                "В контейнере {} инициализирована Enigma v1 (UDP {} -> loopback {}).",
+                target.id, ext_port, wg_port
+            ),
+        );
+    }
+
+    Ok(())
+}
+
 pub async fn create_vps_device_keys(
     app: &AppHandle,
     creds: &VpsCredentials,
@@ -3601,18 +4111,23 @@ pub async fn create_vps_device_keys(
     let connect_host = creds.host.trim().to_string();
     let awg_file = format!("{}/awg.json", target.cdir);
     let awg2_file = format!("{}/awg2.json", target.cdir);
+    let enigma_file = format!("{}/enigma.json", target.cdir);
     let reality_file = format!("{}/reality.json", target.cdir);
 
     let mut awg_json_opt: Option<serde_json::Value> = None;
     let mut awg_loaded = false;
     let mut awg2_json_opt: Option<serde_json::Value> = None;
     let mut awg2_loaded = false;
+    let mut enigma_json_opt: Option<serde_json::Value> = None;
+    let mut enigma_loaded = false;
     let mut reality_json_opt: Option<serde_json::Value> = None;
     let mut reality_loaded = false;
 
     let mut cfg_dirty = false;
     let mut awg_dirty = false;
     let mut awg2_dirty = false;
+    let mut enigma_dirty = false;
+    let mut enigma_need_daemon = false;
     let mut reality_dirty = false;
     let mut host_probe: Option<(HashSet<u16>, HashSet<u8>)> = None;
     let mut certs_ready = false;
@@ -3622,6 +4137,170 @@ pub async fn create_vps_device_keys(
     let mut skipped_reasons: Vec<String> = Vec::new();
 
     for proto in &unique_protos {
+        if proto == "enigma" {
+            if let Err(err) = ensure_enigma_ready(
+                app,
+                &sess,
+                &target,
+                creds,
+                &mut cfg,
+                &mut enigma_json_opt,
+                &mut enigma_loaded,
+                &mut enigma_dirty,
+                &mut enigma_need_daemon,
+                &mut cfg_dirty,
+                &mut host_probe,
+                &mut extra_fw_rules,
+            )
+            .await
+            {
+                skipped_reasons.push(err);
+                continue;
+            }
+
+            let Some(enigma_json) = enigma_json_opt.as_mut() else {
+                skipped_reasons.push(format!("Не удалось инициализировать enigma.json в {}.", target.id));
+                continue;
+            };
+            let Some(wg_idx) = find_wg_endpoint_idx(&cfg, false, "enigma-in", 0) else {
+                skipped_reasons.push(format!("В контейнере {} не найден endpoint enigma-in.", target.id));
+                continue;
+            };
+            let Some(endpoints) = cfg["endpoints"].as_array_mut() else {
+                skipped_reasons.push("В конфиге отсутствует секция endpoints.".to_string());
+                continue;
+            };
+
+            let (dev_priv, dev_pub) = match generate_wg_keypair_remote(&sess).await {
+                Ok(pair) => pair,
+                Err(e) => {
+                    skipped_reasons.push(e);
+                    continue;
+                }
+            };
+
+            let wg_ep = &mut endpoints[wg_idx];
+            let subnet_prefix = wg_ep["address"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .and_then(|cidr| {
+                    let ip_part = cidr.split('/').next()?;
+                    let mut parts: Vec<&str> = ip_part.split('.').collect();
+                    if parts.len() == 4 {
+                        parts.pop();
+                        Some(format!("{}.", parts.join(".")))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "10.8.7.".to_string());
+
+            let ext_port = enigma_json["external_port"].as_u64().unwrap_or(creds.enigma_port as u64) as u16;
+            let psk = enigma_json["preshared_key"].as_str().map(|s| s.to_string());
+            let kb_b64 = enigma_json["keybook_b64"].as_str().unwrap_or("").to_string();
+            let mimic = enigma_json["mimic"].as_str().unwrap_or("auto").to_string();
+            let hop_opt = enigma_json["hop_ports"]
+                .as_str()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+
+            let Some(peers) = wg_ep["peers"].as_array_mut() else {
+                skipped_reasons.push(format!("В endpoint enigma-in контейнера {} отсутствует массив peers.", target.id));
+                continue;
+            };
+            let mut used_ips = HashSet::new();
+            for p in peers.iter() {
+                if let Some(arr) = p["allowed_ips"].as_array() {
+                    for a in arr {
+                        if let Some(s) = a.as_str() {
+                            used_ips.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+            let mut chosen_octet = 2;
+            for octet in 2..=254 {
+                let candidate = format!("{}{}/32", subnet_prefix, octet);
+                if !used_ips.contains(&candidate) {
+                    chosen_octet = octet;
+                    break;
+                }
+            }
+            let peer_ip_32 = format!("{}{}/32", subnet_prefix, chosen_octet);
+            let peer_ip_24 = format!("{}{}/24", subnet_prefix, chosen_octet);
+
+            let mut new_peer = json!({
+                "public_key": dev_pub,
+                "allowed_ips": [peer_ip_32]
+            });
+            if let Some(ref p) = psk {
+                if !p.trim().is_empty() {
+                    new_peer["pre_shared_key"] = json!(p.trim());
+                }
+            }
+            peers.push(new_peer);
+            cfg_dirty = true;
+
+            if !enigma_json["devices"].is_array() {
+                enigma_json["devices"] = json!([]);
+            }
+            let dev_label = if unique_protos.len() > 1 {
+                format!("{} (Enigma)", clean_name)
+            } else {
+                clean_name.clone()
+            };
+            if let Some(devs) = enigma_json["devices"].as_array_mut() {
+                let mut dev_entry = json!({
+                    "name": dev_label,
+                    "protocol": "enigma",
+                    "client_private_key": dev_priv,
+                    "client_public_key": dev_pub,
+                    "ip": peer_ip_32,
+                    "mimic": mimic
+                });
+                if let Some(ref p) = psk {
+                    if !p.trim().is_empty() {
+                        dev_entry["preshared_key"] = json!(p.trim());
+                    }
+                }
+                devs.push(dev_entry);
+            }
+            if enigma_json["client_private_key"].as_str().unwrap_or("").trim().is_empty() {
+                enigma_json["client_private_key"] = json!(dev_priv);
+            }
+            if enigma_json["client_public_key"].as_str().unwrap_or("").trim().is_empty() {
+                enigma_json["client_public_key"] = json!(dev_pub);
+            }
+            enigma_dirty = true;
+
+            let server_pub = enigma_json["server_public_key"].as_str().unwrap_or("").to_string();
+            let mut enigma_prof = VpnProfile {
+                id: Uuid::new_v4().to_string(),
+                name: dev_label,
+                protocol: "enigma".to_string(),
+                server: connect_host.clone(),
+                port: ext_port,
+                password: dev_priv.clone(),
+                awg_private_key: Some(dev_priv),
+                awg_public_key: Some(server_pub),
+                awg_preshared_key: psk,
+                awg_local_address: Some(peer_ip_24),
+                awg_hop_ports: hop_opt.clone(),
+                hop_ports: hop_opt,
+                enigma_keybook: Some(kb_b64),
+                enigma_mimic: Some(mimic),
+                up_mbps: 100,
+                down_mbps: 100,
+                pinned_on_pc: Some(false),
+                container_id: Some(target.id.clone()),
+                ..Default::default()
+            };
+            enigma_prof.uri = build_profile_uri(&enigma_prof);
+            created_profiles.push(enigma_prof);
+            continue;
+        }
+
         if proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless" || proto == "awg2" {
             let is_awg2 = proto == "awg2";
             let target_tag = if is_awg2 { "awg2-in" } else { "awg-in" };
@@ -4389,7 +5068,7 @@ pub async fn create_vps_device_keys(
         multi_dirty = true;
     }
 
-    if cfg_dirty || awg_dirty || awg2_dirty || reality_dirty || multi_dirty || !extra_fw_rules.is_empty() {
+    if cfg_dirty || awg_dirty || awg2_dirty || enigma_dirty || enigma_need_daemon || reality_dirty || multi_dirty || !extra_fw_rules.is_empty() {
         let mut cmd_parts = Vec::new();
         if cfg_dirty {
             let new_cfg_str = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
@@ -4413,6 +5092,22 @@ pub async fn create_vps_device_keys(
                 cmd_parts.push(format!(
                     "cat << 'EOF_AWG2' > \"{}\"\n{}\nEOF_AWG2\nchmod 600 \"{}\"",
                     awg2_file, new_awg2_str, awg2_file
+                ));
+            }
+        }
+        if enigma_dirty {
+            if let Some(ref ej) = enigma_json_opt {
+                let kb_b64 = ej["keybook_b64"].as_str().unwrap_or("");
+                if !kb_b64.trim().is_empty() {
+                    cmd_parts.push(format!(
+                        "printf '%s' '{}' | base64 -d > \"{}/enigma.nvkey\"\nchmod 600 \"{}/enigma.nvkey\"",
+                        kb_b64, target.cdir, target.cdir
+                    ));
+                }
+                let new_enigma_str = serde_json::to_string_pretty(ej).unwrap_or_default();
+                cmd_parts.push(format!(
+                    "cat << 'EOF_ENIGMA' > \"{}\"\n{}\nEOF_ENIGMA\nchmod 600 \"{}\"",
+                    enigma_file, new_enigma_str, enigma_file
                 ));
             }
         }
@@ -4445,16 +5140,39 @@ pub async fn create_vps_device_keys(
         let update_cmd = cmd_parts.join("\n");
 
         let (restart_code, restart_out) = run_remote_cmd(&sess, &update_cmd).await?;
-        let _ = sess
-            .disconnect(russh::Disconnect::ByApplication, "done", "en")
-            .await;
-
         if needs_restart && (restart_code != 0 || !restart_out.contains("active")) {
+            let _ = sess
+                .disconnect(russh::Disconnect::ByApplication, "err", "en")
+                .await;
             return Err(format!(
                 "Ошибка перезапуска контейнера {} после добавления устройства: {}",
                 target.id, restart_out
             ));
         }
+
+        if enigma_need_daemon {
+            if let Some(ref ej) = enigma_json_opt {
+                let ext_p = ej["external_port"].as_u64().unwrap_or(creds.enigma_port as u64) as u16;
+                let wg_p = ej["wg_port"].as_u64().unwrap_or(0) as u16;
+                if ext_p > 0 && wg_p > 0 {
+                    let e_cmd = build_enigma_service_start_cmd(&target.id, &target.cdir, ext_p, wg_p);
+                    let (ec, eo) = run_remote_cmd(&sess, &e_cmd).await?;
+                    if ec != 0 || !eo.contains("ENIGMA_ACTIVE") {
+                        let _ = sess
+                            .disconnect(russh::Disconnect::ByApplication, "err", "en")
+                            .await;
+                        return Err(format!(
+                            "Ошибка запуска шлюза Enigma v1 в контейнере {}: {}",
+                            target.id, eo
+                        ));
+                    }
+                }
+            }
+        }
+
+        let _ = sess
+            .disconnect(russh::Disconnect::ByApplication, "done", "en")
+            .await;
     } else {
         let _ = sess
             .disconnect(russh::Disconnect::ByApplication, "done", "en")
@@ -4506,6 +5224,7 @@ fn parse_container_profiles(
     real_raw: &str,
     awg_raw: &str,
     awg2_raw: &str,
+    enigma_raw: &str,
     enable_port_hopping: bool,
     multi_container_host: bool,
 ) -> (Vec<VpnProfile>, Vec<String>, Vec<u16>) {
@@ -4754,11 +5473,137 @@ fn parse_container_profiles(
     if let Some(endpoints) = cfg["endpoints"].as_array() {
         let awg_json = serde_json::from_str::<serde_json::Value>(awg_raw).ok();
         let awg2_json = serde_json::from_str::<serde_json::Value>(awg2_raw).ok();
+        let enigma_json = serde_json::from_str::<serde_json::Value>(enigma_raw).ok();
 
         for ep in endpoints {
             if ep["type"].as_str() == Some("wireguard") {
                 let tag = ep["tag"].as_str().unwrap_or("");
                 let ep_port = ep["listen_port"].as_u64().unwrap_or(51820) as u16;
+                let is_enigma = tag == "enigma-in"
+                    || enigma_json
+                        .as_ref()
+                        .and_then(|j| j["wg_port"].as_u64())
+                        .map(|p| p as u16 == ep_port)
+                        .unwrap_or(false);
+                if is_enigma {
+                    let ext_port = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["external_port"].as_u64())
+                        .map(|p| p as u16)
+                        .unwrap_or(ep_port);
+                    push_label_port(&mut proto_labels, &mut ports, "Enigma v1", ext_port);
+                    let server_pub = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["server_public_key"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let client_priv = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["client_private_key"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let psk = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["preshared_key"].as_str())
+                        .map(|s| s.to_string());
+                    let kb_b64 = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["keybook_b64"].as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let default_mimic = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["mimic"].as_str())
+                        .unwrap_or("auto")
+                        .to_string();
+                    let hop_opt = enigma_json
+                        .as_ref()
+                        .and_then(|j| j["hop_ports"].as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+
+                    if let Some(devices) = enigma_json.as_ref().and_then(|j| j["devices"].as_array()) {
+                        for d in devices {
+                            let peer_name = d["name"].as_str().unwrap_or("Enigma v1");
+                            let is_base = peer_name == "default" || peer_name == "pc" || peer_name == "neuroveil-user";
+                            let prof_name = if is_base {
+                                format_base_name("Enigma v1", ext_port)
+                            } else {
+                                peer_name.to_string()
+                            };
+                            let c_priv = d["client_private_key"].as_str().unwrap_or(&client_priv).to_string();
+                            if c_priv.trim().is_empty() {
+                                continue;
+                            }
+                            let raw_addr = d["ip"].as_str().unwrap_or("10.8.7.2/24");
+                            let peer_addr = raw_addr.replace("/32", "/24");
+                            let peer_psk = d["preshared_key"].as_str().map(|s| s.to_string()).or_else(|| psk.clone());
+                            let dev_mimic = d["mimic"].as_str().unwrap_or(&default_mimic).to_string();
+                            let mut prof = VpnProfile {
+                                id: Uuid::new_v4().to_string(),
+                                name: prof_name,
+                                protocol: "enigma".to_string(),
+                                server: connect_host.to_string(),
+                                port: ext_port,
+                                password: c_priv.clone(),
+                                awg_private_key: Some(c_priv),
+                                awg_public_key: Some(server_pub.clone()),
+                                awg_preshared_key: peer_psk,
+                                awg_local_address: Some(peer_addr),
+                                awg_hop_ports: hop_opt.clone(),
+                                hop_ports: hop_opt.clone(),
+                                enigma_keybook: if kb_b64.is_empty() { None } else { Some(kb_b64.clone()) },
+                                enigma_mimic: Some(dev_mimic),
+                                up_mbps: 100,
+                                down_mbps: 100,
+                                pinned_on_pc: if is_base { Some(true) } else { Some(false) },
+                                container_id: Some(cid.to_string()),
+                                ..Default::default()
+                            };
+                            prof.uri = build_profile_uri(&prof);
+                            profiles.push(prof);
+                        }
+                    } else if let Some(peers) = ep["peers"].as_array() {
+                        if !client_priv.trim().is_empty() {
+                            for (idx, p) in peers.iter().enumerate() {
+                                let is_base = idx == 0;
+                                let prof_name = if is_base {
+                                    format_base_name("Enigma v1", ext_port)
+                                } else {
+                                    format!("Enigma v1 Устройство {}", idx + 1)
+                                };
+                                let raw_addr = p["allowed_ips"].as_array().and_then(|a| a.first()).and_then(|v| v.as_str()).unwrap_or("10.8.7.2/24");
+                                let peer_addr = raw_addr.replace("/32", "/24");
+                                let peer_psk = p["pre_shared_key"].as_str().map(|s| s.to_string()).or_else(|| psk.clone());
+                                let mut prof = VpnProfile {
+                                    id: Uuid::new_v4().to_string(),
+                                    name: prof_name,
+                                    protocol: "enigma".to_string(),
+                                    server: connect_host.to_string(),
+                                    port: ext_port,
+                                    password: client_priv.clone(),
+                                    awg_private_key: Some(client_priv.clone()),
+                                    awg_public_key: Some(server_pub.clone()),
+                                    awg_preshared_key: peer_psk,
+                                    awg_local_address: Some(peer_addr),
+                                    awg_hop_ports: hop_opt.clone(),
+                                    hop_ports: hop_opt.clone(),
+                                    enigma_keybook: if kb_b64.is_empty() { None } else { Some(kb_b64.clone()) },
+                                    enigma_mimic: Some(default_mimic.clone()),
+                                    up_mbps: 100,
+                                    down_mbps: 100,
+                                    pinned_on_pc: if is_base { Some(true) } else { Some(false) },
+                                    container_id: Some(cid.to_string()),
+                                    ..Default::default()
+                                };
+                                prof.uri = build_profile_uri(&prof);
+                                profiles.push(prof);
+                            }
+                        }
+                    }
+                    continue;
+                }
+
                 let is_awg2 = tag == "awg2-in" || (awg2_json.is_some() && tag.contains("awg2"));
                 let active_json = if is_awg2 { awg2_json.as_ref() } else { awg_json.as_ref() };
                 let proto_str = if is_awg2 { "awg2" } else { "amneziawg" };
@@ -5117,6 +5962,7 @@ pub async fn fetch_vps_admin_state(
         let (_, real_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/reality.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
         let (_, awg_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/awg.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
         let (_, awg2_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/awg2.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
+        let (_, enigma_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/enigma.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
         let (_, multi_raw) = run_remote_cmd(&sess, "cat /etc/sing-box/multi_protocols.json 2>/dev/null || true").await.unwrap_or((1, String::new()));
 
         if let Ok(cfg) = serde_json::from_str::<serde_json::Value>(&legacy_cfg_raw) {
@@ -5128,6 +5974,7 @@ pub async fn fetch_vps_admin_state(
                 &real_raw,
                 &awg_raw,
                 &awg2_raw,
+                &enigma_raw,
                 creds.enable_port_hopping,
                 multi_container_host,
             );
@@ -5167,6 +6014,9 @@ pub async fn fetch_vps_admin_state(
             .await
             .unwrap_or((1, String::new()));
         let (_, awg2_raw) = run_remote_cmd(&sess, &format!("cat \"{}/awg2.json\" 2>/dev/null || true", cdir))
+            .await
+            .unwrap_or((1, String::new()));
+        let (_, enigma_raw) = run_remote_cmd(&sess, &format!("cat \"{}/enigma.json\" 2>/dev/null || true", cdir))
             .await
             .unwrap_or((1, String::new()));
         let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}/multi_protocols.json\" 2>/dev/null || true", cdir))
@@ -5228,6 +6078,7 @@ pub async fn fetch_vps_admin_state(
             &real_raw,
             &awg_raw,
             &awg2_raw,
+            &enigma_raw,
             enable_port_hopping,
             multi_container_host,
         );
@@ -5380,35 +6231,51 @@ pub async fn manage_vps_container(
     );
     let sess = connect_ssh(app, creds).await?;
     let target = resolve_container_target(&sess, Some(container_id), None).await?;
+    let cid_clean = target.id.clone();
 
     let cmd = match action {
         "start" | "restart" => {
+            let enigma_part = format!(
+                "if [ -f \"/etc/systemd/system/neuroveil-enigma-{cid}.service\" ]; then systemctl {act} \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true; fi",
+                cid = cid_clean,
+                act = action
+            );
             if target.runtime == "docker" {
                 format!(
-                    "docker {act} \"{u}\"\nsleep 1\nif [ \"$(docker inspect -f '{{{{.State.Running}}}}' \"{u}\" 2>/dev/null)\" = \"true\" ]; then echo \"OK_RUNNING\"; else echo \"ERR_STATE\"; fi",
+                    "docker {act} \"{u}\"\n{ep}\nsleep 1\nif [ \"$(docker inspect -f '{{{{.State.Running}}}}' \"{u}\" 2>/dev/null)\" = \"true\" ]; then echo \"OK_RUNNING\"; else echo \"ERR_STATE\"; fi",
                     act = action,
-                    u = target.unit_name
+                    u = target.unit_name,
+                    ep = enigma_part
                 )
             } else {
                 format!(
-                    "systemctl {act} \"{u}\"\nsleep 1\nsystemctl is-active \"{u}\"",
+                    "systemctl {act} \"{u}\"\n{ep}\nsleep 1\nsystemctl is-active \"{u}\"",
                     act = action,
-                    u = target.unit_name
+                    u = target.unit_name,
+                    ep = enigma_part
                 )
             }
         }
         "stop" => {
+            let enigma_stop = format!(
+                "systemctl stop \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                 if [ -f \"{cdir}/enigma.pid\" ]; then kill \"$(cat \"{cdir}/enigma.pid\" 2>/dev/null)\" >/dev/null 2>&1 || true; fi",
+                cid = cid_clean,
+                cdir = target.cdir
+            );
             if target.runtime == "docker" {
-                format!("docker stop \"{u}\" >/dev/null 2>&1 || true\necho \"OK_STOPPED\"", u = target.unit_name)
+                format!("docker stop \"{u}\" >/dev/null 2>&1 || true\n{es}\necho \"OK_STOPPED\"", u = target.unit_name, es = enigma_stop)
             } else {
-                format!("systemctl stop \"{u}\" >/dev/null 2>&1 || true\necho \"OK_STOPPED\"", u = target.unit_name)
+                format!("systemctl stop \"{u}\" >/dev/null 2>&1 || true\n{es}\necho \"OK_STOPPED\"", u = target.unit_name, es = enigma_stop)
             }
         }
         "delete" => {
             if target.id == "legacy-singbox" {
                 "systemctl stop sing-box >/dev/null 2>&1 || true\n\
                  systemctl disable sing-box >/dev/null 2>&1 || true\n\
-                 rm -f /etc/systemd/system/sing-box.service\n\
+                 systemctl stop neuroveil-enigma-legacy-singbox >/dev/null 2>&1 || true\n\
+                 systemctl disable neuroveil-enigma-legacy-singbox >/dev/null 2>&1 || true\n\
+                 rm -f /etc/systemd/system/sing-box.service /etc/systemd/system/neuroveil-enigma-legacy-singbox.service\n\
                  systemctl daemon-reload >/dev/null 2>&1 || true\n\
                  rm -rf /etc/sing-box\n\
                  echo \"OK_DELETED\""
@@ -5416,13 +6283,15 @@ pub async fn manage_vps_container(
             } else {
                 format!(
                     "if command -v docker >/dev/null 2>&1; then docker rm -f \"{u}\" >/dev/null 2>&1 || true; fi\n\
-                     systemctl stop \"{u}\" >/dev/null 2>&1 || true\n\
-                     systemctl disable \"{u}\" >/dev/null 2>&1 || true\n\
-                     rm -f \"/etc/systemd/system/{u}.service\"\n\
+                     systemctl stop \"{u}\" \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                     systemctl disable \"{u}\" \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                     if [ -f \"{cdir}/enigma.pid\" ]; then kill \"$(cat \"{cdir}/enigma.pid\" 2>/dev/null)\" >/dev/null 2>&1 || true; fi\n\
+                     rm -f \"/etc/systemd/system/{u}.service\" \"/etc/systemd/system/neuroveil-enigma-{cid}.service\" \"/var/log/neuroveil-enigma-{cid}.log\"\n\
                      systemctl daemon-reload >/dev/null 2>&1 || true\n\
                      rm -rf \"{cdir}\"\n\
                      echo \"OK_DELETED\"",
                     u = target.unit_name,
+                    cid = cid_clean,
                     cdir = target.cdir
                 )
             }
@@ -5460,6 +6329,9 @@ struct RemovalState {
     awg2_json: Option<serde_json::Value>,
     awg2_dirty: bool,
     awg2_empty: bool,
+    enigma_json: Option<serde_json::Value>,
+    enigma_dirty: bool,
+    enigma_empty: bool,
 }
 
 fn remove_profile_in_memory(
@@ -5468,14 +6340,16 @@ fn remove_profile_in_memory(
     profile: &VpnProfile,
 ) {
     let proto = profile.protocol.as_str();
-    if proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless" || proto == "awg2" {
-        let is_awg2 = proto == "awg2" || profile.awg_version.as_deref() == Some("2.0");
+    if proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless" || proto == "awg2" || proto == "enigma" {
+        let is_enigma = proto == "enigma";
+        let is_awg2 = !is_enigma && (proto == "awg2" || profile.awg_version.as_deref() == Some("2.0"));
         let prof_priv = profile
             .awg_private_key
             .as_deref()
             .unwrap_or(&profile.password)
             .trim();
         let prof_ip = profile.awg_local_address.as_deref().unwrap_or("").trim();
+        let prof_ip_host = prof_ip.split('/').next().unwrap_or("").trim();
         let mut removed_pub_key: Option<String> = None;
         let mut removed_ip: Option<String> = if !prof_ip.is_empty() {
             Some(prof_ip.to_string())
@@ -5489,7 +6363,9 @@ fn remove_profile_in_memory(
             .filter(|s| !s.is_empty());
         let mut remaining_devices_count = 0usize;
 
-        let target_awg_opt = if is_awg2 {
+        let target_awg_opt = if is_enigma {
+            &mut state.enigma_json
+        } else if is_awg2 {
             &mut state.awg2_json
         } else {
             &mut state.awg_json
@@ -5500,9 +6376,10 @@ fn remove_profile_in_memory(
                 devs.retain(|d| {
                     let d_priv = d["client_private_key"].as_str().unwrap_or("").trim();
                     let d_ip = d["ip"].as_str().unwrap_or("").trim();
+                    let d_ip_host = d_ip.split('/').next().unwrap_or("").trim();
                     let d_name = d["name"].as_str().unwrap_or("").trim();
                     let is_match = (!prof_priv.is_empty() && d_priv == prof_priv)
-                        || (!prof_ip.is_empty() && d_ip == prof_ip)
+                        || (!prof_ip_host.is_empty() && d_ip_host == prof_ip_host)
                         || d_name == profile.name.trim();
                     if is_match {
                         if let Some(pk) = d["client_public_key"].as_str() {
@@ -5547,7 +6424,10 @@ fn remove_profile_in_memory(
                 }
             }
 
-            if is_awg2 {
+            if is_enigma {
+                state.enigma_dirty = true;
+                state.enigma_empty = remaining_devices_count == 0;
+            } else if is_awg2 {
                 state.awg2_dirty = true;
                 state.awg2_empty = remaining_devices_count == 0;
             } else {
@@ -5581,12 +6461,22 @@ fn remove_profile_in_memory(
                 }
                 let ep_port = ep["listen_port"].as_u64().unwrap_or(0) as u16;
                 let tag = ep["tag"].as_str().unwrap_or("").to_string();
-                let matches_ep = (profile.port > 0 && ep_port == profile.port)
-                    || (is_awg2 && tag == "awg2-in")
-                    || (!is_awg2 && tag == "awg-in");
+                let matches_ep = if is_enigma {
+                    tag == "enigma-in"
+                } else if is_awg2 {
+                    tag == "awg2-in" || (profile.port > 0 && ep_port == profile.port && tag != "enigma-in")
+                } else {
+                    tag == "awg-in" || (profile.port > 0 && ep_port == profile.port && tag != "enigma-in" && tag != "awg2-in")
+                };
                 if !matches_ep {
                     return true;
                 }
+
+                let rem_ip_host = removed_ip
+                    .as_deref()
+                    .and_then(|s| s.split('/').next())
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty());
 
                 if let Some(peers) = ep["peers"].as_array_mut() {
                     let initial_len = peers.len();
@@ -5597,9 +6487,14 @@ fn remove_profile_in_memory(
                                 return false;
                             }
                         }
-                        if let Some(ref rem_ip) = removed_ip {
+                        if let Some(rem_host) = rem_ip_host {
                             if let Some(allowed) = p["allowed_ips"].as_array() {
-                                if allowed.iter().any(|ip| ip.as_str() == Some(rem_ip.as_str())) {
+                                if allowed.iter().any(|ip| {
+                                    ip.as_str()
+                                        .and_then(|s| s.split('/').next())
+                                        .map(|h| h.trim() == rem_host)
+                                        .unwrap_or(false)
+                                }) {
                                     return false;
                                 }
                             }
@@ -5801,11 +6696,13 @@ pub async fn delete_vps_device(
 
     let awg_file = format!("{}/awg.json", target.cdir);
     let awg2_file = format!("{}/awg2.json", target.cdir);
+    let enigma_file = format!("{}/enigma.json", target.cdir);
     let multi_file = format!("{}/multi_protocols.json", target.cdir);
 
     let proto = profile.protocol.as_str();
     let needs_awg = proto == "amneziawg" || proto == "awg_quic" || proto == "awg_vless";
     let needs_awg2 = proto == "awg2";
+    let needs_enigma = proto == "enigma";
 
     let awg_json = if needs_awg {
         let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file))
@@ -5823,6 +6720,14 @@ pub async fn delete_vps_device(
     } else {
         None
     };
+    let enigma_json = if needs_enigma {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", enigma_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
     let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null || true", multi_file))
         .await
         .unwrap_or((1, String::new()));
@@ -5834,6 +6739,9 @@ pub async fn delete_vps_device(
         awg2_json,
         awg2_dirty: false,
         awg2_empty: false,
+        enigma_json,
+        enigma_dirty: false,
+        enigma_empty: false,
     };
     remove_profile_in_memory(&mut cfg, &mut rem_state, profile);
 
@@ -5855,6 +6763,25 @@ pub async fn delete_vps_device(
             let s = serde_json::to_string_pretty(j).unwrap_or_default();
             awg_update_script.push_str(&format!(
                 "cat << 'EOF_AWG2' > \"{awg2_file}\"\n{s}\nEOF_AWG2\nchmod 600 \"{awg2_file}\"\n"
+            ));
+        }
+    }
+    if rem_state.enigma_dirty {
+        if rem_state.enigma_empty {
+            awg_update_script.push_str(&format!(
+                "systemctl stop \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                 systemctl disable \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                 if [ -f \"{cdir}/enigma.pid\" ]; then kill \"$(cat \"{cdir}/enigma.pid\" 2>/dev/null)\" >/dev/null 2>&1 || true; fi\n\
+                 rm -f \"/etc/systemd/system/neuroveil-enigma-{cid}.service\" \"{enigma_file}\" \"{cdir}/enigma.nvkey\" \"{cdir}/enigma.pid\"\n\
+                 systemctl daemon-reload >/dev/null 2>&1 || true\n",
+                cid = target.id,
+                cdir = target.cdir,
+                enigma_file = enigma_file
+            ));
+        } else if let Some(ref j) = rem_state.enigma_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            awg_update_script.push_str(&format!(
+                "cat << 'EOF_ENIGMA' > \"{enigma_file}\"\n{s}\nEOF_ENIGMA\nchmod 600 \"{enigma_file}\"\n"
             ));
         }
     }
@@ -5957,12 +6884,14 @@ pub async fn delete_vps_multi_group(
 
     let awg_file = format!("{}/awg.json", target.cdir);
     let awg2_file = format!("{}/awg2.json", target.cdir);
+    let enigma_file = format!("{}/enigma.json", target.cdir);
     let multi_file = format!("{}/multi_protocols.json", target.cdir);
 
     let needs_awg = profiles.iter().any(|p| {
         p.protocol == "amneziawg" || p.protocol == "awg_quic" || p.protocol == "awg_vless"
     });
     let needs_awg2 = profiles.iter().any(|p| p.protocol == "awg2");
+    let needs_enigma = profiles.iter().any(|p| p.protocol == "enigma");
 
     let awg_json = if needs_awg {
         let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", awg_file))
@@ -5980,6 +6909,14 @@ pub async fn delete_vps_multi_group(
     } else {
         None
     };
+    let enigma_json = if needs_enigma {
+        let (_, r) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null", enigma_file))
+            .await
+            .unwrap_or((1, String::new()));
+        serde_json::from_str::<serde_json::Value>(&r).ok()
+    } else {
+        None
+    };
     let (_, multi_raw) = run_remote_cmd(&sess, &format!("cat \"{}\" 2>/dev/null || true", multi_file))
         .await
         .unwrap_or((1, String::new()));
@@ -5991,6 +6928,9 @@ pub async fn delete_vps_multi_group(
         awg2_json,
         awg2_dirty: false,
         awg2_empty: false,
+        enigma_json,
+        enigma_dirty: false,
+        enigma_empty: false,
     };
 
     for prof in profiles {
@@ -6015,6 +6955,25 @@ pub async fn delete_vps_multi_group(
             let s = serde_json::to_string_pretty(j).unwrap_or_default();
             extra_script.push_str(&format!(
                 "cat << 'EOF_AWG2' > \"{awg2_file}\"\n{s}\nEOF_AWG2\nchmod 600 \"{awg2_file}\"\n"
+            ));
+        }
+    }
+    if rem_state.enigma_dirty {
+        if rem_state.enigma_empty {
+            extra_script.push_str(&format!(
+                "systemctl stop \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                 systemctl disable \"neuroveil-enigma-{cid}\" >/dev/null 2>&1 || true\n\
+                 if [ -f \"{cdir}/enigma.pid\" ]; then kill \"$(cat \"{cdir}/enigma.pid\" 2>/dev/null)\" >/dev/null 2>&1 || true; fi\n\
+                 rm -f \"/etc/systemd/system/neuroveil-enigma-{cid}.service\" \"{enigma_file}\" \"{cdir}/enigma.nvkey\" \"{cdir}/enigma.pid\"\n\
+                 systemctl daemon-reload >/dev/null 2>&1 || true\n",
+                cid = target.id,
+                cdir = target.cdir,
+                enigma_file = enigma_file
+            ));
+        } else if let Some(ref j) = rem_state.enigma_json {
+            let s = serde_json::to_string_pretty(j).unwrap_or_default();
+            extra_script.push_str(&format!(
+                "cat << 'EOF_ENIGMA' > \"{enigma_file}\"\n{s}\nEOF_ENIGMA\nchmod 600 \"{enigma_file}\"\n"
             ));
         }
     }
@@ -6069,3 +7028,963 @@ EOF_CFG
     );
     Ok(())
 }
+
+fn rand_u32_from_uuid() -> u32 {
+    let b = *Uuid::new_v4().as_bytes();
+    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+}
+
+fn is_exit_wg_family(protocol: &str) -> bool {
+    matches!(
+        protocol.trim().to_lowercase().as_str(),
+        "amneziawg" | "awg" | "awg2" | "wireguard" | "wg" | "awg_vless"
+    )
+}
+
+/// Deploys an isolated sing-box Bridge Gateway on Server 1 (Entry VPS) that accepts a standard
+/// single-protocol client connection (WireGuard / AmneziaWG 1.0 / AmneziaWG 3.1 / VLESS Reality /
+/// Shadowsocks / Hysteria 2) from a Router, Phone, TV, or PC and transparently routes 100% of
+/// its traffic into `exit_profile` (Server 2 — Exit VPS).
+pub async fn deploy_bridge_client_gateway(
+    app: &AppHandle,
+    req: &CreateBridgeClientRequest,
+    exit_profile: &VpnProfile,
+) -> Result<BridgeClientConfig, String> {
+    let emit_gw = |msg: &str| {
+        let _ = app.emit("bridge-gateway-log", msg.to_string());
+    };
+
+    let entry_host = req.entry_host.trim().to_string();
+    let entry_port = if req.entry_ssh_port == 0 {
+        22
+    } else {
+        req.entry_ssh_port
+    };
+    let entry_user = if req.entry_username.trim().is_empty() {
+        "root".to_string()
+    } else {
+        req.entry_username.trim().to_string()
+    };
+    let proto = req.protocol.trim().to_lowercase();
+
+    if entry_host.is_empty() || req.entry_password.trim().is_empty() {
+        return Err("Укажите IP-адрес и SSH-пароль Входного моста (Сервер 1).".to_string());
+    }
+    if exit_profile.protocol == "enigma" {
+        return Err("Протокол Enigma не может быть Выходным сервером для шлюза моста.".to_string());
+    }
+    if !matches!(
+        proto.as_str(),
+        "wireguard" | "amneziawg_router" | "amneziawg" | "vless" | "shadowsocks" | "hysteria2"
+    ) {
+        return Err(format!("Неподдерживаемый протокол шлюза моста: {}", proto));
+    }
+
+    let device_name = if req.name.trim().is_empty() {
+        match proto.as_str() {
+            "wireguard" => "Роутер (WireGuard)".to_string(),
+            "amneziawg_router" => "Роутер (AmneziaWG 1.0)".to_string(),
+            "amneziawg" => "Устройство (AmneziaWG 3.1)".to_string(),
+            "vless" => "Устройство (VLESS Reality)".to_string(),
+            "shadowsocks" => "Роутер (Shadowsocks)".to_string(),
+            "hysteria2" => "Устройство (Hysteria 2)".to_string(),
+            _ => "Устройство через мост".to_string(),
+        }
+    } else {
+        req.name.trim().to_string()
+    };
+
+    emit_gw(&format!(
+        "1/5 Подключение по SSH к Входному мосту {}:{}...",
+        entry_host, entry_port
+    ));
+    let sess = connect_ssh_endpoint(
+        app,
+        &entry_host,
+        entry_port,
+        &entry_user,
+        &req.entry_password,
+        "",
+    )
+    .await?;
+
+    let gw_short = Uuid::new_v4().simple().to_string()[..8].to_string();
+    let gw_id = format!("bgw-{}", gw_short);
+    let service_name = format!("neuroveil-{}", gw_id);
+    let gw_dir = format!("/opt/neuroveil/bridge-gateways/{}", gw_id);
+
+    // Ensure sing-box is installed & detect Docker/systemd + architecture
+    emit_gw("2/5 Проверка ядра sing-box и свободных портов на Входном мосте...");
+    let (_, arch_raw) = run_remote_cmd(&sess, "uname -m").await?;
+    let sb_arch = match arch_raw.trim() {
+        "aarch64" | "arm64" => "arm64",
+        "armv7l" => "armv7",
+        _ => "amd64",
+    };
+
+    let prep_cmd = format!(
+        r#"
+set -e
+mkdir -p "{gdir}"
+if [ ! -x /usr/local/bin/sing-box ]; then
+    SB_TAG=$(curl -fsSL https://api.github.com/repos/Leadaxe/sing-box-lx/releases/latest 2>/dev/null | grep '"tag_name"' | head -n 1 | cut -d '"' -f 4 || true)
+    if [ -n "$SB_TAG" ]; then
+        SB_VER="${{SB_TAG#v}}"
+        URL="https://github.com/Leadaxe/sing-box-lx/releases/download/${{SB_TAG}}/sing-box-${{SB_VER}}-linux-{arch}.tar.gz"
+    else
+        SB_VER_UP=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | head -n 1 | cut -d '"' -f 4 | sed 's/^v//')
+        URL="https://github.com/SagerNet/sing-box/releases/download/v${{SB_VER_UP}}/sing-box-${{SB_VER_UP}}-linux-{arch}.tar.gz"
+    fi
+    rm -rf /tmp/sb-bgw-install && mkdir -p /tmp/sb-bgw-install
+    curl -fsSL "$URL" -o /tmp/sb-bgw-install/sb.tar.gz
+    tar -xzf /tmp/sb-bgw-install/sb.tar.gz -C /tmp/sb-bgw-install
+    mv -f /tmp/sb-bgw-install/sing-box-*/sing-box /usr/local/bin/sing-box.tmp
+    chmod +x /usr/local/bin/sing-box.tmp
+    mv -f /usr/local/bin/sing-box.tmp /usr/local/bin/sing-box
+    rm -rf /tmp/sb-bgw-install
+fi
+DOCKER_OK=0
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if docker image inspect debian:bookworm-slim >/dev/null 2>&1; then
+        DOCKER_OK=1
+    fi
+fi
+echo "DOCKER_OK=$DOCKER_OK"
+echo "===PORTS==="
+ss -tulnH 2>/dev/null | awk '{{print $5}}' | rev | cut -d: -f1 | rev | sort -un || true
+grep -hoE '"(listen_port|external_port|wg_port)"\s*:\s*[0-9]+' /etc/sing-box/config.json /opt/neuroveil/containers/*/config.json /opt/neuroveil/bridge-gateways/*/config.json 2>/dev/null | grep -oE '[0-9]+' || true
+echo "===SUBNETS99==="
+grep -hoE '10\.99\.[0-9]+' /opt/neuroveil/bridge-gateways/*/config.json 2>/dev/null | sort -u || true
+"#,
+        gdir = gw_dir,
+        arch = sb_arch
+    );
+
+    let (prep_code, prep_out) = run_remote_cmd(&sess, &prep_cmd).await?;
+    if prep_code != 0 {
+        let _ = sess
+            .disconnect(russh::Disconnect::ByApplication, "prep failed", "en")
+            .await;
+        return Err(format!(
+            "Ошибка подготовки Входного моста ({}): {}",
+            entry_host, prep_out
+        ));
+    }
+
+    let use_docker = prep_out.lines().any(|l| l.trim() == "DOCKER_OK=1");
+    let mut used_ports: HashSet<u16> = HashSet::new();
+    let mut used_octets: HashSet<u8> = HashSet::new();
+    let mut sec = "";
+    for line in prep_out.lines() {
+        let t = line.trim();
+        if t == "===PORTS===" {
+            sec = "ports";
+            continue;
+        }
+        if t == "===SUBNETS99===" {
+            sec = "subnets";
+            continue;
+        }
+        if sec == "ports" {
+            if let Ok(p) = t.parse::<u16>() {
+                if p > 0 {
+                    used_ports.insert(p);
+                }
+            }
+        } else if sec == "subnets" {
+            if let Some(oct) = t.strip_prefix("10.99.").and_then(|s| s.parse::<u8>().ok()) {
+                used_octets.insert(oct);
+            }
+        }
+    }
+
+    // Choose listen port
+    let listen_port: u16 = if req.custom_port > 0 {
+        if used_ports.contains(&req.custom_port) {
+            let _ = sess
+                .disconnect(russh::Disconnect::ByApplication, "port busy", "en")
+                .await;
+            return Err(format!(
+                "Порт {} уже занят на Входном мосте {}. Укажите другой порт или оставьте 0 для автоподбора.",
+                req.custom_port, entry_host
+            ));
+        }
+        req.custom_port
+    } else {
+        let candidates: Vec<u16> = match proto.as_str() {
+            "wireguard" => (51830..=52999).collect(),
+            "amneziawg_router" => (52100..=53999).collect(),
+            "amneziawg" => (53100..=54999).collect(),
+            "vless" => {
+                let mut v = vec![8443, 9443, 2053, 2083, 2087, 2096];
+                v.extend(10443..=19999);
+                v
+            }
+            "shadowsocks" => {
+                let mut v = vec![8388, 9388, 10388];
+                v.extend(18388..=28388);
+                v
+            }
+            "hysteria2" => {
+                let mut v = vec![18443, 19443, 24443];
+                v.extend(25000..=35000);
+                v
+            }
+            _ => (20000..=30000).collect(),
+        };
+        candidates
+            .into_iter()
+            .find(|p| !used_ports.contains(p))
+            .ok_or_else(|| "Не удалось найти свободный порт на Входном мосте.".to_string())?
+    };
+
+    let subnet_octet: u8 = (1u8..=250u8)
+        .find(|o| !used_octets.contains(o))
+        .unwrap_or(1);
+
+    let is_wg_client = matches!(proto.as_str(), "wireguard" | "amneziawg_router" | "amneziawg");
+    let exit_is_wg = is_exit_wg_family(&exit_profile.protocol);
+    let wg_mtu: u16 = if exit_is_wg { 1220 } else { 1280 };
+    let nested_exit_mtu: Option<u16> = if is_wg_client && exit_is_wg {
+        Some(1220)
+    } else if exit_is_wg {
+        Some(1280)
+    } else {
+        None
+    };
+
+    // Build Exit outbound/endpoint ("bridge-exit") pointing from Server 1 -> Server 2
+    let (mut endpoints, mut outbounds) = build_bridge_exit_nodes(exit_profile, nested_exit_mtu);
+    outbounds.push(json!({
+        "type": "direct",
+        "tag": "direct"
+    }));
+
+    let mut inbounds: Vec<serde_json::Value> = Vec::new();
+    let mut route_rules: Vec<serde_json::Value> = Vec::new();
+    let mut fw_rules = String::new();
+    let mut extra_pre_cmd = String::new();
+
+    let cfg_cert_path = if use_docker {
+        "/etc/sing-box/cert.pem".to_string()
+    } else {
+        format!("{}/cert.pem", gw_dir)
+    };
+    let cfg_key_path = if use_docker {
+        "/etc/sing-box/key.pem".to_string()
+    } else {
+        format!("{}/key.pem", gw_dir)
+    };
+
+    emit_gw(&format!(
+        "3/5 Генерация ключей для {} на порту {} (выход: {} → {})...",
+        proto.to_uppercase(),
+        listen_port,
+        exit_profile.name,
+        exit_profile.server
+    ));
+
+    let config_format: String;
+    let config_text: String;
+    let uri: String;
+
+    match proto.as_str() {
+        "wireguard" => {
+            let (s_priv, s_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (c_priv, c_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (_, psk_raw) = run_remote_cmd(&sess, "openssl rand -base64 32").await?;
+            let psk = psk_raw.trim().lines().last().unwrap_or("").trim().to_string();
+
+            let srv_ip = format!("10.99.{}.1/24", subnet_octet);
+            let cli_ip = format!("10.99.{}.2/32", subnet_octet);
+            let cidr = format!("10.99.{}.0/24", subnet_octet);
+
+            let mut peer = json!({
+                "public_key": c_pub,
+                "allowed_ips": [cli_ip]
+            });
+            if !psk.is_empty() {
+                peer["pre_shared_key"] = json!(psk);
+            }
+
+            endpoints.push(json!({
+                "type": "wireguard",
+                "tag": "gw-in",
+                "listen_port": listen_port,
+                "address": [srv_ip],
+                "private_key": s_priv,
+                "mtu": wg_mtu,
+                "peers": [peer]
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+            route_rules.push(json!({
+                "source_ip_cidr": [cidr],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let mut conf = String::new();
+            conf.push_str("[Interface]\n");
+            conf.push_str(&format!("PrivateKey = {}\n", c_priv));
+            conf.push_str(&format!("Address = {}\n", cli_ip));
+            conf.push_str("DNS = 1.1.1.1, 1.0.0.1\n");
+            conf.push_str(&format!("MTU = {}\n", wg_mtu));
+            conf.push_str("\n[Peer]\n");
+            conf.push_str(&format!("PublicKey = {}\n", s_pub));
+            if !psk.is_empty() {
+                conf.push_str(&format!("PresharedKey = {}\n", psk));
+            }
+            conf.push_str("AllowedIPs = 0.0.0.0/0, ::/0\n");
+            conf.push_str(&format!("Endpoint = {}:{}\n", entry_host, listen_port));
+            conf.push_str("PersistentKeepalive = 25\n");
+
+            config_format = "conf".to_string();
+            config_text = conf.clone();
+            uri = conf;
+        }
+        "amneziawg_router" => {
+            let (s_priv, s_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (c_priv, c_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (_, psk_raw) = run_remote_cmd(&sess, "openssl rand -base64 32").await?;
+            let psk = psk_raw.trim().lines().last().unwrap_or("").trim().to_string();
+
+            let srv_ip = format!("10.99.{}.1/24", subnet_octet);
+            let cli_ip = format!("10.99.{}.2/32", subnet_octet);
+            let cidr = format!("10.99.{}.0/24", subnet_octet);
+
+            let jc = 4 + (rand_u32_from_uuid() % 3);
+            let jmin = 40u32;
+            let jmax = 70u32;
+            let s1 = 15 + (rand_u32_from_uuid() % 65);
+            let mut s2 = 15 + (rand_u32_from_uuid() % 65);
+            if s1 + 56 == s2 {
+                s2 = (s2 + 7) % 100 + 15;
+            }
+            let h1 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000);
+            let h2 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x1111;
+            let h3 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x2222;
+            let h4 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x3333;
+
+            let mut peer = json!({
+                "public_key": c_pub,
+                "allowed_ips": [cli_ip]
+            });
+            if !psk.is_empty() {
+                peer["pre_shared_key"] = json!(psk);
+            }
+
+            endpoints.push(json!({
+                "type": "wireguard",
+                "tag": "gw-in",
+                "listen_port": listen_port,
+                "address": [srv_ip],
+                "private_key": s_priv,
+                "mtu": wg_mtu,
+                "jc": jc,
+                "jmin": jmin,
+                "jmax": jmax,
+                "s1": s1,
+                "s2": s2,
+                "h1": h1,
+                "h2": h2,
+                "h3": h3,
+                "h4": h4,
+                "peers": [peer]
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+            route_rules.push(json!({
+                "source_ip_cidr": [cidr],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let mut conf = String::new();
+            conf.push_str("[Interface]\n");
+            conf.push_str(&format!("PrivateKey = {}\n", c_priv));
+            conf.push_str(&format!("Address = {}\n", cli_ip));
+            conf.push_str("DNS = 1.1.1.1, 1.0.0.1\n");
+            conf.push_str(&format!("MTU = {}\n", wg_mtu));
+            conf.push_str(&format!("Jc = {}\n", jc));
+            conf.push_str(&format!("Jmin = {}\n", jmin));
+            conf.push_str(&format!("Jmax = {}\n", jmax));
+            conf.push_str(&format!("S1 = {}\n", s1));
+            conf.push_str(&format!("S2 = {}\n", s2));
+            conf.push_str(&format!("H1 = {}\n", h1));
+            conf.push_str(&format!("H2 = {}\n", h2));
+            conf.push_str(&format!("H3 = {}\n", h3));
+            conf.push_str(&format!("H4 = {}\n", h4));
+            conf.push_str("\n[Peer]\n");
+            conf.push_str(&format!("PublicKey = {}\n", s_pub));
+            if !psk.is_empty() {
+                conf.push_str(&format!("PresharedKey = {}\n", psk));
+            }
+            conf.push_str("AllowedIPs = 0.0.0.0/0, ::/0\n");
+            conf.push_str(&format!("Endpoint = {}:{}\n", entry_host, listen_port));
+            conf.push_str("PersistentKeepalive = 25\n");
+
+            config_format = "conf".to_string();
+            config_text = conf.clone();
+            uri = conf;
+        }
+        "amneziawg" => {
+            let (s_priv, s_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (c_priv, c_pub) = generate_wg_keypair_remote(&sess).await?;
+            let (_, psk_raw) = run_remote_cmd(&sess, "openssl rand -base64 32").await?;
+            let psk = psk_raw.trim().lines().last().unwrap_or("").trim().to_string();
+            let (_, hpk_raw) = run_remote_cmd(&sess, "openssl rand -base64 32").await?;
+            let hpk = hpk_raw.trim().lines().last().unwrap_or("").trim().to_string();
+
+            let srv_ip = format!("10.99.{}.1/24", subnet_octet);
+            let cli_ip = format!("10.99.{}.2/32", subnet_octet);
+            let cidr = format!("10.99.{}.0/24", subnet_octet);
+
+            let jc = 4 + (rand_u32_from_uuid() % 3);
+            let jmin = 40u32;
+            let jmax = 70u32;
+            let s1 = 15 + (rand_u32_from_uuid() % 65);
+            let mut s2 = 15 + (rand_u32_from_uuid() % 65);
+            if s1 + 56 == s2 {
+                s2 = (s2 + 7) % 100 + 15;
+            }
+            let s3 = 12 + (rand_u32_from_uuid() % 30);
+            let s4 = 12 + (rand_u32_from_uuid() % 30);
+            let h1 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000);
+            let h2 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x1111;
+            let h3 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x2222;
+            let h4 = 100_000 + (rand_u32_from_uuid() % 1_900_000_000) ^ 0x3333;
+
+            let mut peer = json!({
+                "public_key": c_pub,
+                "allowed_ips": [cli_ip]
+            });
+            if !psk.is_empty() {
+                peer["pre_shared_key"] = json!(psk);
+            }
+
+            endpoints.push(json!({
+                "type": "wireguard",
+                "tag": "gw-in",
+                "listen_port": listen_port,
+                "address": [srv_ip],
+                "private_key": s_priv,
+                "mtu": wg_mtu,
+                "header_protection_key": hpk,
+                "random_trailers": true,
+                "disable_cookies": true,
+                "rekey_after_time": "100-120",
+                "rekey_timeout": "3-7",
+                "reject_after_time": "150-180",
+                "keepalive_timeout": "5-15",
+                "max_handshake_attempts": "15-20",
+                "jc": jc,
+                "jmin": jmin,
+                "jmax": jmax,
+                "s1": s1,
+                "s2": s2,
+                "s3": s3,
+                "s4": s4,
+                "h1": h1,
+                "h2": h2,
+                "h3": h3,
+                "h4": h4,
+                "peers": [peer]
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+            route_rules.push(json!({
+                "source_ip_cidr": [cidr],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let mut temp_prof = VpnProfile::default();
+            temp_prof.id = gw_id.clone();
+            temp_prof.name = device_name.clone();
+            temp_prof.protocol = "amneziawg".to_string();
+            temp_prof.server = entry_host.clone();
+            temp_prof.port = listen_port;
+            temp_prof.awg_version = Some("3.1".to_string());
+            temp_prof.awg_private_key = Some(c_priv);
+            temp_prof.awg_public_key = Some(s_pub);
+            temp_prof.awg_preshared_key = if psk.is_empty() { None } else { Some(psk) };
+            temp_prof.awg_local_address = Some(cli_ip);
+            temp_prof.awg_jc = Some(jc as u16);
+            temp_prof.awg_jmin = Some(jmin as u16);
+            temp_prof.awg_jmax = Some(jmax as u16);
+            temp_prof.awg_s1 = Some(s1 as u16);
+            temp_prof.awg_s2 = Some(s2 as u16);
+            temp_prof.awg_s3 = Some(s3 as u16);
+            temp_prof.awg_s4 = Some(s4 as u16);
+            temp_prof.awg_h1 = Some(h1.to_string());
+            temp_prof.awg_h2 = Some(h2.to_string());
+            temp_prof.awg_h3 = Some(h3.to_string());
+            temp_prof.awg_h4 = Some(h4.to_string());
+            temp_prof.awg_header_protection_key = Some(hpk);
+            temp_prof.awg_random_trailers = Some(true);
+            temp_prof.awg_disable_cookies = Some(true);
+            temp_prof.awg_persistent_keepalive = Some("25".to_string());
+
+            let conf = build_awg_conf(&temp_prof);
+            let awg_uri = build_profile_uri(&temp_prof);
+            config_format = "conf".to_string();
+            config_text = conf;
+            uri = awg_uri;
+        }
+        "vless" => {
+            let (r_priv, r_pub, r_sid) = generate_reality_keypair_remote(&sess).await?;
+            let client_uuid = Uuid::new_v4().to_string();
+            let sni = if req.reality_sni.trim().is_empty() {
+                "www.microsoft.com".to_string()
+            } else {
+                req.reality_sni.trim().to_string()
+            };
+
+            inbounds.push(json!({
+                "type": "vless",
+                "tag": "gw-in",
+                "listen": "::",
+                "listen_port": listen_port,
+                "users": [
+                    {
+                        "name": device_name,
+                        "uuid": client_uuid,
+                        "flow": "xtls-rprx-vision"
+                    }
+                ],
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "reality": {
+                        "enabled": true,
+                        "handshake": {
+                            "server": sni,
+                            "server_port": 443
+                        },
+                        "private_key": r_priv,
+                        "short_id": [r_sid]
+                    }
+                }
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; fi\n\
+                 iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let built_uri = format!(
+                "vless://{}@{}:{}?encryption=none&flow=xtls-rprx-vision&security=reality&sni={}&fp=chrome&pbk={}&sid={}&type=tcp#{}",
+                urlencoding::encode(&client_uuid),
+                entry_host,
+                listen_port,
+                urlencoding::encode(&sni),
+                urlencoding::encode(&r_pub),
+                urlencoding::encode(&r_sid),
+                urlencoding::encode(&device_name),
+            );
+            config_format = "uri".to_string();
+            config_text = built_uri.clone();
+            uri = built_uri;
+        }
+        "shadowsocks" => {
+            use base64::Engine;
+            let ss_method = "aes-256-gcm";
+            let ss_pass = Uuid::new_v4().simple().to_string()[..24].to_string();
+
+            inbounds.push(json!({
+                "type": "shadowsocks",
+                "tag": "gw-in",
+                "listen": "::",
+                "listen_port": listen_port,
+                "method": ss_method,
+                "password": ss_pass
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/tcp >/dev/null 2>&1 || true; ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/tcp >/dev/null 2>&1 || true; firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p tcp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p tcp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p tcp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let userinfo = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(format!("{}:{}", ss_method, ss_pass));
+            let built_uri = format!(
+                "ss://{}@{}:{}#{}",
+                userinfo,
+                entry_host,
+                listen_port,
+                urlencoding::encode(&device_name),
+            );
+            config_format = "uri".to_string();
+            config_text = built_uri.clone();
+            uri = built_uri;
+        }
+        "hysteria2" => {
+            let hy2_pass = Uuid::new_v4().simple().to_string()[..24].to_string();
+            let sni = if req.reality_sni.trim().is_empty() {
+                "www.bing.com".to_string()
+            } else {
+                req.reality_sni.trim().to_string()
+            };
+
+            extra_pre_cmd.push_str(&format!(
+                r#"
+openssl ecparam -genkey -name prime256v1 -out "{gdir}/key.pem" >/dev/null 2>&1
+openssl req -new -x509 -key "{gdir}/key.pem" -out "{gdir}/cert.pem" -subj "/CN={sni}" -days 3650 >/dev/null 2>&1
+chmod 600 "{gdir}/key.pem"
+"#,
+                gdir = gw_dir,
+                sni = sni
+            ));
+
+            inbounds.push(json!({
+                "type": "hysteria2",
+                "tag": "gw-in",
+                "listen": "::",
+                "listen_port": listen_port,
+                "users": [
+                    {
+                        "name": device_name,
+                        "password": hy2_pass
+                    }
+                ],
+                "masquerade": format!("https://{}", sni),
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "alpn": ["h3"],
+                    "certificate_path": cfg_cert_path,
+                    "key_path": cfg_key_path
+                }
+            }));
+
+            route_rules.push(json!({
+                "inbound": ["gw-in"],
+                "outbound": "bridge-exit"
+            }));
+
+            fw_rules.push_str(&format!(
+                "if command -v ufw >/dev/null 2>&1; then ufw allow {p}/udp >/dev/null 2>&1 || true; fi\n\
+                 if command -v firewall-cmd >/dev/null 2>&1; then firewall-cmd --permanent --add-port={p}/udp >/dev/null 2>&1 || true; fi\n\
+                 iptables -t nat -C PREROUTING -p udp --dport {p} -j RETURN 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport {p} -j RETURN >/dev/null 2>&1 || true\n\
+                 iptables -C INPUT -p udp --dport {p} -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p udp --dport {p} -j ACCEPT >/dev/null 2>&1 || true\n\
+                 iptables -C OUTPUT -p udp --sport {p} -j ACCEPT 2>/dev/null || iptables -I OUTPUT 1 -p udp --sport {p} -j ACCEPT >/dev/null 2>&1 || true\n",
+                p = listen_port
+            ));
+
+            let built_uri = format!(
+                "hysteria2://{}@{}:{}/?sni={}&insecure=1#{}",
+                urlencoding::encode(&hy2_pass),
+                entry_host,
+                listen_port,
+                urlencoding::encode(&sni),
+                urlencoding::encode(&device_name),
+            );
+            config_format = "uri".to_string();
+            config_text = built_uri.clone();
+            uri = built_uri;
+        }
+        _ => unreachable!(),
+    }
+
+    let mut gw_config = json!({
+        "log": {
+            "level": "info",
+            "timestamp": true
+        },
+        "dns": {
+            "servers": [
+                {
+                    "type": "udp",
+                    "tag": "dns-direct",
+                    "server": "1.1.1.1"
+                }
+            ],
+            "final": "dns-direct",
+            "strategy": "ipv4_only"
+        },
+        "inbounds": inbounds,
+        "outbounds": outbounds,
+        "route": {
+            "rules": route_rules,
+            "final": "bridge-exit",
+            "default_domain_resolver": "dns-direct"
+        }
+    });
+    if !endpoints.is_empty() {
+        gw_config["endpoints"] = json!(endpoints);
+    }
+
+    let gw_config_str = serde_json::to_string_pretty(&gw_config).map_err(|e| e.to_string())?;
+    let runtime_name = if use_docker { "docker" } else { "systemd" };
+    let created_at = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
+
+    let meta_json = json!({
+        "id": gw_id,
+        "name": device_name,
+        "protocol": proto,
+        "listen_port": listen_port,
+        "exit_server": exit_profile.server,
+        "exit_protocol": exit_profile.protocol,
+        "runtime": runtime_name,
+        "service_name": service_name,
+        "created_at": created_at
+    });
+    let meta_str = serde_json::to_string_pretty(&meta_json).unwrap_or_default();
+
+    let start_cmd = if use_docker {
+        format!(
+            r#"
+docker rm -f "{svc}" >/dev/null 2>&1 || true
+TUN_FLAG=""
+if [ -e /dev/net/tun ]; then TUN_FLAG="--device=/dev/net/tun"; fi
+docker run -d \
+  --name "{svc}" \
+  --restart=always \
+  --network=host \
+  --cap-add=NET_ADMIN \
+  $TUN_FLAG \
+  -e ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true \
+  -v /usr/local/bin/sing-box:/usr/local/bin/sing-box:ro \
+  -v "{gdir}":/etc/sing-box \
+  debian:bookworm-slim \
+  /usr/local/bin/sing-box run -c /etc/sing-box/config.json
+sleep 1
+STATE=$(docker inspect -f '{{{{.State.Running}}}}' "{svc}" 2>/dev/null || echo false)
+if [ "$STATE" != "true" ]; then
+    echo "ERR_START_FAILED"
+    docker logs --tail 25 "{svc}" 2>&1 || true
+    exit 1
+fi
+"#,
+            svc = service_name,
+            gdir = gw_dir
+        )
+    } else {
+        format!(
+            r#"
+cat << 'EOF_BGW_SVC' > "/etc/systemd/system/{svc}.service"
+[Unit]
+Description=NeuroVeil Bridge Gateway {gid} ({dname})
+After=network.target nss-lookup.target
+
+[Service]
+Type=simple
+Environment=ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true
+ExecStart=/usr/local/bin/sing-box run -c {gdir}/config.json
+Restart=on-failure
+RestartSec=3
+OOMScoreAdjust=-800
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF_BGW_SVC
+systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl enable "{svc}" >/dev/null 2>&1 || true
+systemctl restart "{svc}"
+sleep 1
+if ! systemctl is-active --quiet "{svc}"; then
+    echo "ERR_START_FAILED"
+    journalctl -u "{svc}" -n 25 --no-pager 2>&1 || true
+    exit 1
+fi
+"#,
+            svc = service_name,
+            gid = gw_id,
+            dname = device_name,
+            gdir = gw_dir
+        )
+    };
+
+    // For config check: if use_docker, test with host paths or inside docker run --rm check
+    let check_cmd = if use_docker {
+        format!(
+            r#"docker run --rm -e ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true -v /usr/local/bin/sing-box:/usr/local/bin/sing-box:ro -v "{gdir}":/etc/sing-box debian:bookworm-slim /usr/local/bin/sing-box check -c /etc/sing-box/config.json"#,
+            gdir = gw_dir
+        )
+    } else {
+        format!(
+            r#"ENABLE_DEPRECATED_LEGACY_DOMAIN_STRATEGY_OPTIONS=true /usr/local/bin/sing-box check -c "{gdir}/config.json""#,
+            gdir = gw_dir
+        )
+    };
+
+    emit_gw("4/5 Загрузка конфигурации шлюза моста и проверка sing-box check...");
+    let deploy_script = format!(
+        r#"
+set -e
+mkdir -p "{gdir}"
+{extra_pre}
+cat << 'EOF_BGW_CFG' > "{gdir}/config.json"
+{cfg_str}
+EOF_BGW_CFG
+cat << 'EOF_BGW_META' > "{gdir}/meta.json"
+{meta_str}
+EOF_BGW_META
+{check_cmd}
+{fw_rules}
+{start_cmd}
+echo "BGW_OK"
+"#,
+        gdir = gw_dir,
+        extra_pre = extra_pre_cmd,
+        cfg_str = gw_config_str,
+        meta_str = meta_str,
+        check_cmd = check_cmd,
+        fw_rules = fw_rules,
+        start_cmd = start_cmd
+    );
+
+    let (dep_code, dep_out) = run_remote_cmd(&sess, &deploy_script).await?;
+    let _ = sess
+        .disconnect(russh::Disconnect::ByApplication, "done", "en")
+        .await;
+
+    if dep_code != 0 || !dep_out.contains("BGW_OK") {
+        return Err(format!(
+            "Ошибка запуска шлюза моста на {}: {}",
+            entry_host, dep_out
+        ));
+    }
+
+    emit_gw(&format!(
+        "5/5 Готово! Шлюз «{}» запущен на {}:{} → {} ({})",
+        device_name,
+        entry_host,
+        listen_port,
+        exit_profile.server,
+        exit_profile.protocol.to_uppercase()
+    ));
+
+    Ok(BridgeClientConfig {
+        id: gw_id,
+        name: device_name,
+        protocol: proto,
+        entry_host,
+        entry_ssh_port: entry_port,
+        entry_username: entry_user,
+        listen_port,
+        exit_profile_id: exit_profile.id.clone(),
+        exit_profile_name: exit_profile.name.clone(),
+        exit_server: exit_profile.server.clone(),
+        exit_protocol: exit_profile.protocol.clone(),
+        config_format,
+        config_text,
+        uri,
+        service_name,
+        runtime: runtime_name.to_string(),
+        created_at,
+    })
+}
+
+/// Stops and removes a Bridge Gateway container/service from Entry VPS via SSH.
+pub async fn remove_bridge_client_gateway(
+    app: &AppHandle,
+    cfg: &BridgeClientConfig,
+    password: &str,
+) -> Result<String, String> {
+    let sess = connect_ssh_endpoint(
+        app,
+        &cfg.entry_host,
+        if cfg.entry_ssh_port == 0 {
+            22
+        } else {
+            cfg.entry_ssh_port
+        },
+        if cfg.entry_username.trim().is_empty() {
+            "root"
+        } else {
+            &cfg.entry_username
+        },
+        password,
+        "",
+    )
+    .await?;
+
+    let gw_dir = format!("/opt/neuroveil/bridge-gateways/{}", cfg.id);
+    let svc = cfg.service_name.trim();
+    let rm_cmd = format!(
+        r#"
+if command -v docker >/dev/null 2>&1; then
+    docker rm -f "{svc}" >/dev/null 2>&1 || true
+fi
+if [ -f "/etc/systemd/system/{svc}.service" ]; then
+    systemctl disable --now "{svc}" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/{svc}.service"
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+rm -rf "{gdir}"
+echo "BGW_REMOVED"
+"#,
+        svc = svc,
+        gdir = gw_dir
+    );
+
+    let (code, out) = run_remote_cmd(&sess, &rm_cmd).await?;
+    let _ = sess
+        .disconnect(russh::Disconnect::ByApplication, "removed", "en")
+        .await;
+
+    if code != 0 && !out.contains("BGW_REMOVED") {
+        return Err(format!("Ошибка удаления шлюза с {}: {}", cfg.entry_host, out));
+    }
+
+    Ok(format!(
+        "Шлюз «{}» остановлен и удалён с Входного моста {}",
+        cfg.name, cfg.entry_host
+    ))
+}
+
