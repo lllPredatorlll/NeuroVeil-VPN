@@ -492,14 +492,47 @@ pub fn get_rules_direct_proc_path() -> PathBuf {
     get_app_data_dir().join("rules_direct_proc.json")
 }
 
+pub fn get_rules_proxy_proc_ip_path() -> PathBuf {
+    get_app_data_dir().join("rules_proxy_proc_ip.json")
+}
+
+pub fn get_rules_proxy_ip_path() -> PathBuf {
+    get_app_data_dir().join("rules_proxy_ip.json")
+}
+
+pub fn get_rules_direct_ip_path() -> PathBuf {
+    get_app_data_dir().join("rules_direct_ip.json")
+}
+
 pub fn build_process_ruleset_content(processes: &[String], is_proxy: bool) -> Value {
+    let mut rules: Vec<Value> = Vec::new();
+    let outbound_tag = if is_proxy { "proxy" } else { "direct" };
+    // Use the DNS-safe rule list (process matchers + Telegram/Discord domain_suffix, strictly NO ip_cidr).
+    // In sing-box 1.14+, any ip_cidr inside a rule_set referenced by dns.rules activates legacy address
+    // filtering, causing every unrelated DNS query to be rejected (`dns: rejected A ...`) and leaked to dns-direct.
+    let (_, proc_dns) = build_process_rules(processes, outbound_tag);
+    for mut r in proc_dns {
+        if let Some(obj) = r.as_object_mut() {
+            obj.remove("server");
+            rules.push(r);
+        }
+    }
+    json!({
+        "version": 1,
+        "rules": rules
+    })
+}
+
+pub fn build_process_ip_ruleset_content(processes: &[String], is_proxy: bool) -> Value {
     let mut rules: Vec<Value> = Vec::new();
     let outbound_tag = if is_proxy { "proxy" } else { "direct" };
     let (proc_routes, _) = build_process_rules(processes, outbound_tag);
     for mut r in proc_routes {
         if let Some(obj) = r.as_object_mut() {
-            obj.remove("outbound");
-            rules.push(r);
+            if obj.contains_key("ip_cidr") {
+                obj.remove("outbound");
+                rules.push(r);
+            }
         }
     }
     json!({
@@ -570,6 +603,9 @@ pub fn build_ruleset_content(
         .as_array()
         .cloned()
         .unwrap_or_default();
+    if let Some(ip_rules) = build_process_ip_ruleset_content(processes, is_proxy)["rules"].as_array() {
+        rules.extend(ip_rules.iter().cloned());
+    }
     if let Some(dom_rules) = build_domain_ip_ruleset_content(domains, ips)["rules"].as_array() {
         rules.extend(dom_rules.iter().cloned());
     }
@@ -584,6 +620,9 @@ pub fn write_routing_rulesets(routing: &RoutingConfig) -> Result<(), String> {
     let direct_path = get_rules_direct_path();
     let proxy_proc_path = get_rules_proxy_proc_path();
     let direct_proc_path = get_rules_direct_proc_path();
+    let proxy_proc_ip_path = get_rules_proxy_proc_ip_path();
+    let proxy_ip_path = get_rules_proxy_ip_path();
+    let direct_ip_path = get_rules_direct_ip_path();
 
     let empty_ruleset = || json!({ "version": 1, "rules": [] });
 
@@ -599,14 +638,33 @@ pub fn write_routing_rulesets(routing: &RoutingConfig) -> Result<(), String> {
         empty_ruleset()
     };
 
+    let proxy_proc_ip_content = if routing.split_tunneling {
+        build_process_ip_ruleset_content(&routing.proxy_processes, true)
+    } else {
+        empty_ruleset()
+    };
+
+    // Keep domain rulesets strictly free of ip_cidr so they can be safely shared with dns.rules
     let proxy_content = if routing.split_tunneling {
-        build_domain_ip_ruleset_content(&routing.proxy_domains, &routing.proxy_ips)
+        build_domain_ip_ruleset_content(&routing.proxy_domains, &[])
     } else {
         empty_ruleset()
     };
 
     let direct_content = if routing.split_tunneling {
-        build_domain_ip_ruleset_content(&routing.direct_domains, &routing.direct_ips)
+        build_domain_ip_ruleset_content(&routing.direct_domains, &[])
+    } else {
+        empty_ruleset()
+    };
+
+    let proxy_ip_content = if routing.split_tunneling {
+        build_domain_ip_ruleset_content(&[], &routing.proxy_ips)
+    } else {
+        empty_ruleset()
+    };
+
+    let direct_ip_content = if routing.split_tunneling {
+        build_domain_ip_ruleset_content(&[], &routing.direct_ips)
     } else {
         empty_ruleset()
     };
@@ -628,8 +686,11 @@ pub fn write_routing_rulesets(routing: &RoutingConfig) -> Result<(), String> {
 
     write_and_sync(&proxy_proc_path, &proxy_proc_content, "rules_proxy_proc.json")?;
     write_and_sync(&direct_proc_path, &direct_proc_content, "rules_direct_proc.json")?;
+    write_and_sync(&proxy_proc_ip_path, &proxy_proc_ip_content, "rules_proxy_proc_ip.json")?;
     write_and_sync(&proxy_path, &proxy_content, "rules_proxy.json")?;
     write_and_sync(&direct_path, &direct_content, "rules_direct.json")?;
+    write_and_sync(&proxy_ip_path, &proxy_ip_content, "rules_proxy_ip.json")?;
+    write_and_sync(&direct_ip_path, &direct_ip_content, "rules_direct_ip.json")?;
 
     Ok(())
 }
@@ -911,6 +972,47 @@ fn random_u16_in_range(min: u16, max: u16) -> u16 {
     (min as u32 + (n % ((max - min) as u32 + 1))) as u16
 }
 
+pub fn parse_hop_port_ranges(
+    hop_a: Option<&str>,
+    hop_b: Option<&str>,
+) -> (Vec<(u16, u16)>, Vec<u16>) {
+    let mut ranges: Vec<(u16, u16)> = Vec::new();
+    let mut singles: Vec<u16> = Vec::new();
+    for hop_opt in [hop_a, hop_b] {
+        if let Some(hop) = hop_opt {
+            for part in hop.split(',') {
+                let p = part.trim();
+                if p.is_empty() {
+                    continue;
+                }
+                if let Some((start_s, end_s)) = p.split_once(':').or_else(|| p.split_once('-')) {
+                    if let (Ok(s), Ok(e)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
+                        let (min_p, max_p) = if s <= e { (s, e) } else { (e, s) };
+                        if min_p > 0 && max_p > 0 && !ranges.contains(&(min_p, max_p)) {
+                            ranges.push((min_p, max_p));
+                        }
+                    }
+                } else if let Ok(port_num) = p.parse::<u16>() {
+                    if port_num > 0 && !singles.contains(&port_num) {
+                        singles.push(port_num);
+                    }
+                }
+            }
+        }
+    }
+    (ranges, singles)
+}
+
+pub fn port_matches_hop_spec(port: u16, ranges: &[(u16, u16)], singles: &[u16]) -> bool {
+    if port == 0 {
+        return false;
+    }
+    if singles.contains(&port) {
+        return true;
+    }
+    ranges.iter().any(|&(lo, hi)| port >= lo && port <= hi)
+}
+
 pub fn get_profile_candidate_ports(
     profile: &VpnProfile,
     custom_ports: Option<Vec<u16>>,
@@ -931,40 +1033,34 @@ pub fn get_profile_candidate_ports(
         }
     }
 
-    let is_udp = is_awg_protocol(&profile.protocol) || profile.protocol == "hysteria2" || profile.protocol == "tuic";
+    let is_udp = is_awg_protocol(&profile.protocol)
+        || profile.protocol == "hysteria2"
+        || profile.protocol == "tuic";
 
-    // 1. If primary/original port or profile port is not yet excluded and not in list, add it first
+    // 1. Collect any explicitly specified hop ranges / single hop ports first
+    let (mut ranges, explicit_singles) =
+        parse_hop_port_ranges(profile.awg_hop_ports.as_deref(), profile.hop_ports.as_deref());
+    let has_explicit_hops = !ranges.is_empty() || !explicit_singles.is_empty();
+
+    // 2. If primary/original port or valid profile port is not yet excluded, add it first
     let primary_port = profile.original_port.unwrap_or(profile.port);
     if primary_port > 0 && !excluded.contains(&primary_port) && !ports.contains(&primary_port) {
         ports.push(primary_port);
     }
-    if profile.port > 0 && profile.port != primary_port && !excluded.contains(&profile.port) && !ports.contains(&profile.port) {
+    let current_port_valid = !has_explicit_hops
+        || profile.port == primary_port
+        || port_matches_hop_spec(profile.port, &ranges, &explicit_singles);
+    if current_port_valid
+        && profile.port > 0
+        && profile.port != primary_port
+        && !excluded.contains(&profile.port)
+        && !ports.contains(&profile.port)
+    {
         ports.push(profile.port);
     }
-
-    // 2. Collect any explicitly specified hop ranges
-    let mut ranges: Vec<(u16, u16)> = Vec::new();
-    let hop_candidates = [profile.awg_hop_ports.as_deref(), profile.hop_ports.as_deref()];
-    for hop_opt in hop_candidates {
-        if let Some(hop) = hop_opt {
-            for part in hop.split(',') {
-                let p = part.trim();
-                if p.is_empty() {
-                    continue;
-                }
-                if let Some((start_s, end_s)) = p.split_once(':').or_else(|| p.split_once('-')) {
-                    if let (Ok(s), Ok(e)) = (start_s.trim().parse::<u16>(), end_s.trim().parse::<u16>()) {
-                        let (min_p, max_p) = if s <= e { (s, e) } else { (e, s) };
-                        if min_p > 0 && max_p > 0 {
-                            ranges.push((min_p, max_p));
-                        }
-                    }
-                } else if let Ok(port_num) = p.parse::<u16>() {
-                    if port_num > 0 && !ports.contains(&port_num) && !excluded.contains(&port_num) {
-                        ports.push(port_num);
-                    }
-                }
-            }
+    for &port_num in &explicit_singles {
+        if port_num > 0 && !ports.contains(&port_num) && !excluded.contains(&port_num) {
+            ports.push(port_num);
         }
     }
 
@@ -973,7 +1069,10 @@ pub fn get_profile_candidate_ports(
         ranges.push((20000, 65000));
     }
 
-    // 3. Pool of well-known standard ports
+    // 3. Pool of well-known standard ports.
+    // CRITICAL: When explicit hop ranges are configured (e.g. "20000:65000" for Enigma/AWG/Hy2),
+    // ONLY include default ports that actually fall inside those hop ranges — never inject
+    // closed low ports like 53/443/500/4500 that are outside server iptables PREROUTING rules!
     let defaults: &[u16] = if is_udp {
         &[
             53, 443, 8443, 1194, 51820, 123, 500, 4500, 5060, 5061, 8080, 993, 995, 3478, 3479,
@@ -988,10 +1087,13 @@ pub fn get_profile_candidate_ports(
         ]
     };
 
-    // Add unvisited standard ports
+    // Add unvisited standard ports (filtered by explicit hop spec when present)
     for &cp in defaults {
         if ports.len() >= target_count {
             break;
+        }
+        if has_explicit_hops && !port_matches_hop_spec(cp, &ranges, &explicit_singles) {
+            continue;
         }
         if cp > 0 && !ports.contains(&cp) && !excluded.contains(&cp) {
             ports.push(cp);
@@ -1580,8 +1682,11 @@ pub fn generate_singbox_config_with_bridge(
         let _ = write_routing_rulesets(routing);
         let direct_proc_path_str = get_rules_direct_proc_path().to_string_lossy().to_string();
         let proxy_proc_path_str = get_rules_proxy_proc_path().to_string_lossy().to_string();
+        let proxy_proc_ip_path_str = get_rules_proxy_proc_ip_path().to_string_lossy().to_string();
         let direct_path_str = get_rules_direct_path().to_string_lossy().to_string();
+        let direct_ip_path_str = get_rules_direct_ip_path().to_string_lossy().to_string();
         let proxy_path_str = get_rules_proxy_path().to_string_lossy().to_string();
+        let proxy_ip_path_str = get_rules_proxy_ip_path().to_string_lossy().to_string();
 
         route_rules.push(json!({
             "rule_set": "direct-proc-rules",
@@ -1592,14 +1697,28 @@ pub fn generate_singbox_config_with_bridge(
             "outbound": "proxy"
         }));
         route_rules.push(json!({
+            "rule_set": "proxy-proc-ip-rules",
+            "outbound": "proxy"
+        }));
+        route_rules.push(json!({
             "rule_set": "direct-rules",
+            "outbound": "direct"
+        }));
+        route_rules.push(json!({
+            "rule_set": "direct-ip-rules",
             "outbound": "direct"
         }));
         route_rules.push(json!({
             "rule_set": "proxy-rules",
             "outbound": "proxy"
         }));
+        route_rules.push(json!({
+            "rule_set": "proxy-ip-rules",
+            "outbound": "proxy"
+        }));
 
+        // DNS rules reference ONLY the IP-free rulesets (never *-ip-rules), preventing sing-box 1.14
+        // from activating legacy address filtering and rejecting unrelated DNS responses.
         dns_rules.push(json!({
             "rule_set": "direct-proc-rules",
             "server": "dns-direct"
@@ -1640,16 +1759,34 @@ pub fn generate_singbox_config_with_bridge(
                     "path": proxy_proc_path_str
                 },
                 {
+                    "tag": "proxy-proc-ip-rules",
+                    "type": "local",
+                    "format": "source",
+                    "path": proxy_proc_ip_path_str
+                },
+                {
                     "tag": "direct-rules",
                     "type": "local",
                     "format": "source",
                     "path": direct_path_str
                 },
                 {
+                    "tag": "direct-ip-rules",
+                    "type": "local",
+                    "format": "source",
+                    "path": direct_ip_path_str
+                },
+                {
                     "tag": "proxy-rules",
                     "type": "local",
                     "format": "source",
                     "path": proxy_path_str
+                },
+                {
+                    "tag": "proxy-ip-rules",
+                    "type": "local",
+                    "format": "source",
+                    "path": proxy_ip_path_str
                 }
             ]),
         );
@@ -5650,8 +5787,11 @@ PersistentKeepalive = 25
         }
     }
 
+    static RULESET_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_desktop_process_ruleset_precedence_and_awg_mtu() {
+        let _guard = RULESET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut routing = RoutingConfig::default();
         routing.mode = "tun".to_string();
         routing.split_tunneling = true;
@@ -6074,5 +6214,161 @@ PersistentKeepalive = 25
         assert!(excl5.iter().any(|v| v.as_str() == Some("5.129.227.242/32")));
         check_cfg("enigma_to_awg", &cfg5);
     }
+
+    #[test]
+    fn test_enigma_candidate_ports_respect_explicit_hop_ranges() {
+        let enigma_prof = VpnProfile {
+            id: "test-enigma".to_string(),
+            name: "Enigma v1".to_string(),
+            protocol: "enigma".to_string(),
+            server: "185.221.163.69".to_string(),
+            port: 4500,
+            original_port: Some(43897),
+            hop_ports: Some("20000:65000".to_string()),
+            ..Default::default()
+        };
+
+        let (ranges, singles) = parse_hop_port_ranges(None, enigma_prof.hop_ports.as_deref());
+        assert!(port_matches_hop_spec(43897, &ranges, &singles));
+        assert!(!port_matches_hop_spec(4500, &ranges, &singles));
+
+        let candidates = get_profile_candidate_ports(&enigma_prof, None, Some(vec![4500]), 24);
+        assert!(
+            !candidates.is_empty(),
+            "Candidate list for Enigma with hop_ports 20000:65000 must not be empty"
+        );
+        assert!(
+            candidates.contains(&43897),
+            "Original Enigma port 43897 must be included in candidates: {:?}",
+            candidates
+        );
+        for &p in &candidates {
+            assert!(
+                (20000..=65000).contains(&p),
+                "Enigma candidate port {} is outside explicit hop_ports 20000:65000 (all: {:?})",
+                p,
+                candidates
+            );
+            assert_ne!(p, 4500, "Corrupted excluded port 4500 must not be returned");
+        }
+    }
+
+    #[test]
+    fn test_desktop_dns_rulesets_contain_no_ip_cidr_and_no_legacy_warning() {
+        let _guard = RULESET_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut routing = RoutingConfig::default();
+        routing.mode = "tun".to_string();
+        routing.split_tunneling = true;
+        routing.default_outbound = "direct".to_string();
+        routing.proxy_processes = vec![
+            "Telegram.exe".to_string(),
+            "Discord.exe".to_string(),
+            "destiny2.exe".to_string(),
+        ];
+        routing.direct_processes = vec!["yandex.exe".to_string()];
+        routing.proxy_domains = vec!["bungie.net".to_string(), "deadorbit.net".to_string()];
+        routing.direct_domains = vec![".ru".to_string()];
+        routing.proxy_ips = vec!["1.2.3.4".to_string(), "5.6.7.0/24".to_string()];
+        routing.direct_ips = vec!["9.8.7.6".to_string()];
+
+        let prof = VpnProfile {
+            id: "enigma-dns-test".to_string(),
+            name: "Enigma DNS Test".to_string(),
+            protocol: "enigma".to_string(),
+            server: "185.221.163.69".to_string(),
+            port: 43897,
+            password: "WD1HjbUyguB9cfZ43v/oYavzFhaW/obLY0BlTyaOdEo=".to_string(),
+            awg_private_key: Some("WD1HjbUyguB9cfZ43v/oYavzFhaW/obLY0BlTyaOdEo=".to_string()),
+            awg_public_key: Some("DRRsYgL85ZNKPjyVKOKnGdT76CcZpEyTDAulvxZtumc=".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = generate_singbox_config(&prof, &routing);
+
+        // 1. None of the rulesets referenced in dns.rules may contain ip_cidr
+        let dns_rules = cfg["dns"]["rules"].as_array().unwrap();
+        let all_rulesets = cfg["route"]["rule_set"].as_array().unwrap();
+        for dr in dns_rules {
+            if let Some(rs_tag) = dr.get("rule_set").and_then(|v| v.as_str()) {
+                assert!(
+                    !rs_tag.ends_with("-ip-rules"),
+                    "Route-only IP ruleset {} must not be used in dns.rules",
+                    rs_tag
+                );
+                let rs_entry = all_rulesets
+                    .iter()
+                    .find(|e| e.get("tag").and_then(|v| v.as_str()) == Some(rs_tag))
+                    .expect("DNS rule_set tag must be declared in route.rule_set");
+                let path = rs_entry["path"].as_str().unwrap();
+                let raw = std::fs::read_to_string(path).unwrap();
+                assert!(
+                    !raw.contains("\"ip_cidr\""),
+                    "DNS-referenced ruleset {} ({}) must not contain ip_cidr:\n{}",
+                    rs_tag,
+                    path,
+                    raw
+                );
+            }
+        }
+
+        // 2. Telegram/Discord CIDRs and custom IPs must be in route-only IP rulesets in proper order
+        let route_rules = cfg["route"]["rules"].as_array().unwrap();
+        let pos_tag = |tag: &str| {
+            route_rules
+                .iter()
+                .position(|r| r.get("rule_set").and_then(|v| v.as_str()) == Some(tag))
+                .expect("rule_set must exist in route.rules")
+        };
+        assert!(pos_tag("direct-proc-rules") < pos_tag("proxy-proc-rules"));
+        assert!(pos_tag("proxy-proc-rules") < pos_tag("proxy-proc-ip-rules"));
+        assert!(pos_tag("proxy-proc-ip-rules") < pos_tag("direct-rules"));
+        assert!(pos_tag("direct-rules") < pos_tag("direct-ip-rules"));
+        assert!(pos_tag("direct-ip-rules") < pos_tag("proxy-rules"));
+        assert!(pos_tag("proxy-rules") < pos_tag("proxy-ip-rules"));
+
+        let proc_ip_raw = std::fs::read_to_string(get_rules_proxy_proc_ip_path()).unwrap();
+        assert!(proc_ip_raw.contains("149.154.160.0/20"));
+        assert!(proc_ip_raw.contains("162.159.128.0/21"));
+        let proxy_ip_raw = std::fs::read_to_string(get_rules_proxy_ip_path()).unwrap();
+        assert!(proxy_ip_raw.contains("1.2.3.4/32"));
+        assert!(proxy_ip_raw.contains("5.6.7.0/24"));
+        let direct_ip_raw = std::fs::read_to_string(get_rules_direct_ip_path()).unwrap();
+        assert!(direct_ip_raw.contains("9.8.7.6/32"));
+
+        // 3. Validate with real sing-box binary and ensure Legacy Address Filter warning is gone
+        let singbox_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("data")
+            .join("bin")
+            .join("sing-box.exe");
+        if singbox_bin.exists() {
+            let temp_cfg = std::env::temp_dir().join("test_desktop_dns_no_ip_cidr.json");
+            std::fs::write(&temp_cfg, serde_json::to_string_pretty(&cfg).unwrap()).unwrap();
+            let out = std::process::Command::new(&singbox_bin)
+                .args(["check", "-c", temp_cfg.to_str().unwrap()])
+                .output()
+                .expect("Failed to run sing-box check");
+            let _ = std::fs::remove_file(&temp_cfg);
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.status.success(),
+                "sing-box check failed:\n{}",
+                combined
+            );
+            assert!(
+                !combined.contains("Legacy Address Filter Fields"),
+                "sing-box check must not emit Legacy Address Filter warning:\n{}",
+                combined
+            );
+        }
+    }
 }
+
+
+
 

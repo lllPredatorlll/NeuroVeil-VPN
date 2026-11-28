@@ -1827,6 +1827,7 @@ systemctl reload ssh >/dev/null 2>&1 || systemctl reload sshd >/dev/null 2>&1 ||
             "listen_port": creds.awg_port,
             "address": [awg1_server_ip],
             "private_key": awg_server_priv,
+            "mtu": 1280,
             "header_protection_key": awg_hpk,
             "random_trailers": awg_random_trailers,
             "disable_cookies": awg_disable_cookies,

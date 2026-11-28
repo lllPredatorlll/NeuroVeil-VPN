@@ -21,10 +21,11 @@ use singbox::{
     generate_android_runtime_singbox_config_with_bridge, generate_mobile_singbox_config,
     generate_multi_singbox_config, generate_router_2hop_singbox_json, generate_singbox_config,
     generate_singbox_config_with_bridge, generate_singbox_config_with_port, get_app_data_dir,
-    get_profile_candidate_ports, get_singbox_bin_path, parse_multi_profiles_input,
-    parse_multi_zip_bytes, parse_profile_uri, reset_stale_app_sockets, set_app_data_dir,
-    set_windows_system_proxy, write_routing_rulesets,
+    get_profile_candidate_ports, get_singbox_bin_path, parse_hop_port_ranges,
+    parse_multi_profiles_input, parse_multi_zip_bytes, parse_profile_uri, port_matches_hop_spec,
+    reset_stale_app_sockets, set_app_data_dir, set_windows_system_proxy, write_routing_rulesets,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -75,6 +76,7 @@ struct RuntimeState {
     bridge_exit_name: Option<String>,
     bridge_entry_protocol: Option<String>,
     bridge_exit_protocol: Option<String>,
+    failed_handshake_profiles: HashSet<String>,
 }
 
 fn is_vpn_running(rt: &RuntimeState) -> bool {
@@ -710,13 +712,15 @@ fn strip_ansi(input: &str) -> String {
     out
 }
 
+const MAX_UI_LOG_LINES: usize = 2000;
+
 fn push_log(logs: &mut Vec<String>, line: String) {
     let clean = strip_ansi(&line);
     let ts = chrono::Local::now().format("%H:%M:%S").to_string();
     let formatted = format!("[{}] {}", ts, clean);
     logs.push(formatted.clone());
-    if logs.len() > 250 {
-        let excess = logs.len() - 250;
+    if logs.len() > MAX_UI_LOG_LINES {
+        let excess = logs.len() - MAX_UI_LOG_LINES;
         logs.drain(0..excess);
     }
     let log_file = get_app_data_dir().join("singbox.log");
@@ -726,15 +730,86 @@ fn push_log(logs: &mut Vec<String>, line: String) {
     }
 }
 
+fn is_tunneled_clash_connection(conn: &serde_json::Value) -> bool {
+    let Some(arr) = conn.get("chains").and_then(|v| v.as_array()) else {
+        return false;
+    };
+    if arr.is_empty() {
+        return false;
+    }
+    !arr.iter().any(|x| {
+        matches!(
+            x.as_str(),
+            Some("direct") | Some("block") | Some("dns-out") | Some("DIRECT") | Some("REJECT")
+        )
+    })
+}
+
+struct TunnelTrafficSnapshot {
+    proxy_conn_count: usize,
+    active_proxy_up: u64,
+    active_proxy_down: u64,
+    delta_up: u64,
+    delta_down: u64,
+}
+
+fn sample_tunneled_traffic(
+    val: &serde_json::Value,
+    tracked_conns: &mut std::collections::HashMap<String, (u64, u64)>,
+) -> TunnelTrafficSnapshot {
+    let mut next_tracked: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+    let mut proxy_conn_count = 0usize;
+    let mut active_proxy_up = 0u64;
+    let mut active_proxy_down = 0u64;
+    let mut delta_up = 0u64;
+    let mut delta_down = 0u64;
+
+    if let Some(conns) = val.get("connections").and_then(|v| v.as_array()) {
+        for c in conns {
+            if !is_tunneled_clash_connection(c) {
+                continue;
+            }
+            proxy_conn_count += 1;
+            let c_up = c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+            let c_down = c.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
+            active_proxy_up = active_proxy_up.saturating_add(c_up);
+            active_proxy_down = active_proxy_down.saturating_add(c_down);
+
+            if let Some(id) = c.get("id").and_then(|v| v.as_str()) {
+                let (prev_up, prev_down) = tracked_conns.get(id).copied().unwrap_or((0, 0));
+                delta_up = delta_up.saturating_add(c_up.saturating_sub(prev_up));
+                delta_down = delta_down.saturating_add(c_down.saturating_sub(prev_down));
+                next_tracked.insert(id.to_string(), (c_up, c_down));
+            }
+        }
+    }
+
+    *tracked_conns = next_tracked;
+    TunnelTrafficSnapshot {
+        proxy_conn_count,
+        active_proxy_up,
+        active_proxy_down,
+        delta_up,
+        delta_down,
+    }
+}
+
+fn is_udp_port_free(port: u16) -> bool {
+    port > 0 && std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok()
+}
+
 fn pick_random_free_udp_port(exclude: &[u16]) -> u16 {
-    for _ in 0..64 {
+    // Keep WireGuard/AWG listen_port inside 10000..47999 so it never collides with
+    // Windows dynamic ephemeral ports (49152..65535) grabbed by background services.
+    for _ in 0..96 {
         let raw = Uuid::new_v4().as_u128();
         let mixed = ((raw >> 64) ^ raw) as u32;
-        let candidate = 10000 + (mixed % 55000) as u16;
+        let candidate = 10000 + (mixed % 38000) as u16;
         if exclude.contains(&candidate) {
             continue;
         }
-        if std::net::UdpSocket::bind(("0.0.0.0", candidate)).is_ok() {
+        if is_udp_port_free(candidate) {
             return candidate;
         }
     }
@@ -747,12 +822,63 @@ fn pick_random_free_udp_port(exclude: &[u16]) -> u16 {
         }
     }
     let fallback_raw = (Uuid::new_v4().as_u128() & 0xFFFF_FFFF) as u32;
-    10000 + (fallback_raw % 55000) as u16
+    10000 + (fallback_raw % 38000) as u16
+}
+
+fn heal_corrupted_hop_port(profile: &mut VpnProfile) -> Option<(u16, u16)> {
+    let is_hop_proto = profile.protocol == "enigma"
+        || profile.protocol == "hysteria2"
+        || is_awg_protocol(&profile.protocol);
+    if !is_hop_proto {
+        return None;
+    }
+    let (ranges, singles) =
+        parse_hop_port_ranges(profile.awg_hop_ports.as_deref(), profile.hop_ports.as_deref());
+    if ranges.is_empty() && singles.is_empty() {
+        return None;
+    }
+    let primary = profile.original_port.filter(|&p| p > 0);
+    if Some(profile.port) == primary || port_matches_hop_spec(profile.port, &ranges, &singles) {
+        return None;
+    }
+    let old_port = profile.port;
+    let new_port = primary.or_else(|| {
+        get_profile_candidate_ports(profile, None, Some(vec![old_port]), 8)
+            .into_iter()
+            .find(|&p| p > 0 && p != old_port)
+    })?;
+    if new_port == 0 || new_port == old_port {
+        return None;
+    }
+    profile.port = new_port;
+    profile.uri = build_profile_uri(profile);
+    Some((old_port, new_port))
+}
+
+fn mark_active_handshake_succeeded(rt: &mut RuntimeState) {
+    if let Some(pid) = rt.active_profile_id.as_deref() {
+        rt.failed_handshake_profiles.remove(pid);
+    }
+    if let Some(eid) = rt.bridge_entry_profile_id.as_deref() {
+        rt.failed_handshake_profiles.remove(eid);
+    }
+}
+
+fn mark_active_handshake_failed_if_pending(rt: &mut RuntimeState) {
+    if rt.is_handshaking {
+        if let Some(pid) = rt.active_profile_id.clone() {
+            rt.failed_handshake_profiles.insert(pid);
+        }
+        if let Some(eid) = rt.bridge_entry_profile_id.clone() {
+            rt.failed_handshake_profiles.insert(eid);
+        }
+    }
 }
 
 fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
     #[cfg(target_os = "android")]
     {
+        mark_active_handshake_failed_if_pending(rt);
         finalize_active_telemetry(rt, "user");
         if let Some(et) = rt.enigma_tunnel.take() {
             et.stop();
@@ -787,6 +913,7 @@ fn stop_singbox_in_memory(rt: &mut RuntimeState) -> Option<AppHandle> {
     }
     #[cfg(not(target_os = "android"))]
     {
+        mark_active_handshake_failed_if_pending(rt);
         finalize_active_telemetry(rt, "user");
         if let Some(et) = rt.enigma_tunnel.take() {
             et.stop();
@@ -853,8 +980,8 @@ fn apply_mobile_vpn_status_in_memory(
                 rt.logs.push(line.clone());
             }
         }
-        if rt.logs.len() > 250 {
-            let excess = rt.logs.len() - 250;
+        if rt.logs.len() > MAX_UI_LOG_LINES {
+            let excess = rt.logs.len() - MAX_UI_LOG_LINES;
             rt.logs.drain(0..excess);
         }
     }
@@ -942,6 +1069,7 @@ fn apply_mobile_vpn_status_in_memory(
         if rt.is_handshaking && mob.tunnel_rx_confirmed {
             rt.is_handshaking = false;
             rt.handshake_status = None;
+            mark_active_handshake_succeeded(rt);
         }
         rt.android_connected = true;
     } else if mob.connecting {
@@ -998,6 +1126,7 @@ fn apply_mobile_vpn_status_in_memory(
         }
     } else {
         if rt.android_connected || rt.android_connecting || rt.active_profile_id.is_some() {
+            mark_active_handshake_failed_if_pending(rt);
             rt.android_connected = false;
             rt.android_connecting = false;
             rt.android_socks_port = None;
@@ -1072,6 +1201,7 @@ fn build_vpn_status_snapshot(rt: &mut RuntimeState) -> VpnStatus {
                     format!("Процесс sing-box завершился (код: {}).", code),
                 );
                 let _ = set_windows_system_proxy(false, rt.persistent.routing.local_mixed_port);
+                mark_active_handshake_failed_if_pending(rt);
                 finalize_active_telemetry(rt, &format!("unexpected_exit_{}", code));
                 if let Some(et) = rt.enigma_tunnel.take() {
                     et.stop();
@@ -1529,8 +1659,8 @@ fn spawn_and_monitor_singbox(
                         rt.logs.push(line.clone());
                     }
                 }
-                if rt.logs.len() > 250 {
-                    let excess = rt.logs.len() - 250;
+                if rt.logs.len() > MAX_UI_LOG_LINES {
+                    let excess = rt.logs.len() - MAX_UI_LOG_LINES;
                     rt.logs.drain(0..excess);
                 }
             }
@@ -1726,6 +1856,7 @@ fn spawn_and_monitor_singbox(
                             if let Some(ref mut tel) = g.active_telemetry {
                                 tel.mark_handshake_ok();
                             }
+                            mark_active_handshake_succeeded(&mut g);
                             if g.is_handshaking {
                                 g.is_handshaking = false;
                                 g.handshake_status = None;
@@ -1886,6 +2017,7 @@ fn spawn_and_monitor_singbox(
     let state_for_traffic = state_clone.clone();
     let clash_port = routing_snapshot.clash_api_port;
     let is_awg = is_awg_protocol(&profile.protocol);
+    let is_awg_vless = profile.protocol == "awg_vless";
     let is_enigma_proto = profile.protocol == "enigma";
     let enigma_logs_for_loop = if is_enigma_proto {
         Some(enigma_logs_buf)
@@ -1909,13 +2041,18 @@ fn spawn_and_monitor_singbox(
     }
 
     thread::spawn(move || {
+        use std::collections::{HashMap, VecDeque};
         use std::sync::atomic::{AtomicBool, Ordering};
         thread::sleep(Duration::from_millis(400));
         let url = format!("http://127.0.0.1:{}/connections", clash_port);
-        let mut prev_up = 0u64;
-        let mut prev_down = 0u64;
+        let mut tracked_tunnel_conns: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut tunnel_total_up = 0u64;
+        let mut tunnel_total_down = 0u64;
+        let mut speed_window: VecDeque<(Instant, f64, u64, u64)> = VecDeque::new();
         let mut initialized = false;
         let mut consecutive_rx_zero = 0u32;
+        let mut stall_ticks_after_handshake = 0u32;
+        let mut warned_16kb_stall = false;
         let mut save_tick_counter = 0u32;
         let start_time = Instant::now();
         let mut last_tick_at = Instant::now();
@@ -1943,69 +2080,72 @@ fn spawn_and_monitor_singbox(
                 }
             }
 
-            if let Ok(resp) = ureq::get(&url).timeout(Duration::from_millis(700)).call() {
+            if let Ok(resp) = ureq::get(&url).timeout(Duration::from_millis(600)).call() {
                 if let Ok(val) = resp.into_json::<serde_json::Value>() {
-                    let total_up = val["uploadTotal"].as_u64().unwrap_or(0);
-                    let total_down = val["downloadTotal"].as_u64().unwrap_or(0);
+                    // Count ONLY tunneled connections (exclude direct / block / dns-out bypasses).
+                    let snap = sample_tunneled_traffic(&val, &mut tracked_tunnel_conns);
+                    let proxy_conn_count = snap.proxy_conn_count;
+                    let proxy_up = snap.active_proxy_up;
+                    let proxy_down = snap.active_proxy_down;
+                    let delta_up = snap.delta_up;
+                    let delta_down = snap.delta_down;
+                    tunnel_total_up = tunnel_total_up.saturating_add(delta_up);
+                    tunnel_total_down = tunnel_total_down.saturating_add(delta_down);
+                    let has_tunnel_rx = tunnel_total_down > 0 || proxy_down > 0;
 
-                    let mut proxy_conn_count = 0usize;
-                    let mut proxy_up = 0u64;
-                    let mut proxy_down = 0u64;
-                    if let Some(conns) = val.get("connections").and_then(|v| v.as_array()) {
-                        for c in conns {
-                            let uses_proxy = c
-                                .get("chains")
-                                .and_then(|v| v.as_array())
-                                .map(|arr| arr.iter().any(|x| x.as_str() == Some("proxy")))
-                                .unwrap_or(false);
-                            if uses_proxy {
-                                proxy_conn_count += 1;
-                                proxy_up = proxy_up.saturating_add(
-                                    c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0),
-                                );
-                                proxy_down = proxy_down.saturating_add(
-                                    c.get("download").and_then(|v| v.as_u64()).unwrap_or(0),
-                                );
-                            }
-                        }
+                    let now = Instant::now();
+                    let dt_secs = last_tick_at.elapsed().as_secs_f64().clamp(0.1, 5.0);
+                    last_tick_at = now;
+                    speed_window.push_back((now, dt_secs, delta_up, delta_down));
+                    while speed_window.len() > 2
+                        || (speed_window.len() > 1
+                            && speed_window
+                                .front()
+                                .is_some_and(|(t, _, _, _)| now.duration_since(*t) > Duration::from_millis(1100)))
+                    {
+                        speed_window.pop_front();
                     }
+                    let (win_dt, win_up, win_down) = speed_window.iter().fold(
+                        (0.0f64, 0u64, 0u64),
+                        |(acc_dt, acc_u, acc_d), &(_, dt, u, d)| {
+                            (acc_dt + dt, acc_u.saturating_add(u), acc_d.saturating_add(d))
+                        },
+                    );
+                    let effective_dt = win_dt.max(0.5);
+                    let up_bps = ((win_up as f64) / effective_dt).round() as u64;
+                    let down_bps = ((win_down as f64) / effective_dt).round() as u64;
 
-                    let dt_secs = last_tick_at.elapsed().as_secs_f64().max(0.25);
-                    last_tick_at = Instant::now();
                     let mut checkpoint_rec: Option<TelemetrySessionRecord> = None;
                     let mut should_spawn_probe = false;
 
                     if let Ok(mut guard) = state_for_traffic.lock() {
-                        if initialized {
-                            let delta_up = total_up.saturating_sub(prev_up);
-                            let delta_down = total_down.saturating_sub(prev_down);
-                            guard.up_speed = delta_up;
-                            guard.down_speed = delta_down;
-                            let up_bps = ((delta_up as f64) / dt_secs).round() as u64;
-                            let down_bps = ((delta_down as f64) / dt_secs).round() as u64;
-
-                            if delta_up > 0 || delta_down > 0 {
-                                if let Some(active_id) = guard.active_profile_id.clone() {
-                                    if let Some(prof) = guard
-                                        .persistent
-                                        .profiles
-                                        .iter_mut()
-                                        .find(|p| p.id == active_id)
-                                    {
-                                        prof.total_up_bytes =
-                                            prof.total_up_bytes.saturating_add(delta_up);
-                                        prof.total_down_bytes =
-                                            prof.total_down_bytes.saturating_add(delta_down);
-                                    }
-                                }
-                                save_tick_counter += 1;
-                                if save_tick_counter >= 10 {
-                                    save_tick_counter = 0;
-                                    save_persistent_state(&guard.persistent);
+                        if delta_up > 0 || delta_down > 0 {
+                            if let Some(active_id) = guard.active_profile_id.clone() {
+                                if let Some(prof) = guard
+                                    .persistent
+                                    .profiles
+                                    .iter_mut()
+                                    .find(|p| p.id == active_id)
+                                {
+                                    prof.total_up_bytes =
+                                        prof.total_up_bytes.saturating_add(delta_up);
+                                    prof.total_down_bytes =
+                                        prof.total_down_bytes.saturating_add(delta_down);
                                 }
                             }
+                            save_tick_counter += 1;
+                            if save_tick_counter >= 16 {
+                                save_tick_counter = 0;
+                                save_persistent_state(&guard.persistent);
+                            }
+                        }
 
-                            if proxy_down > 0 {
+                        if initialized {
+                            guard.up_speed = up_bps;
+                            guard.down_speed = down_bps;
+
+                            if has_tunnel_rx {
+                                mark_active_handshake_succeeded(&mut guard);
                                 if let Some(ref mut tel) = guard.active_telemetry {
                                     if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
                                         tel.mark_handshake_ok();
@@ -2014,7 +2154,7 @@ fn spawn_and_monitor_singbox(
                             }
 
                             if is_awg {
-                                if proxy_down > 0 {
+                                if has_tunnel_rx {
                                     consecutive_rx_zero = 0;
                                     if guard.is_handshaking {
                                         guard.is_handshaking = false;
@@ -2028,6 +2168,23 @@ fn spawn_and_monitor_singbox(
                                             },
                                         );
                                     }
+                                    if is_awg_vless && !warned_16kb_stall {
+                                        if delta_down > 0 {
+                                            stall_ticks_after_handshake = 0;
+                                        } else if proxy_conn_count > 0
+                                            && (delta_up > 0 || proxy_up > 0)
+                                            && tunnel_total_down < 32_768
+                                        {
+                                            stall_ticks_after_handshake += 1;
+                                            if stall_ticks_after_handshake >= 24 {
+                                                warned_16kb_stall = true;
+                                                push_log(
+                                                    &mut guard.logs,
+                                                    "[AWG+Reality] Внимание: рукопожатие прошло, но трафик остановился после ~16 КБ (вероятно 16KB-блокировка ТСПУ на TCP/443 этого сервера). Попробуйте Enigma v1, другой порт/SNI Reality или Мост 2-Hop через РФ VPS.".to_string(),
+                                                );
+                                            }
+                                        }
+                                    }
                                 } else if guard.is_handshaking {
                                     let elapsed = start_time.elapsed().as_secs();
                                     if (proxy_up > 0 || proxy_conn_count > 0) && elapsed >= 4 && !warned_handshake_cooldown {
@@ -2040,8 +2197,9 @@ fn spawn_and_monitor_singbox(
                                     }
                                     if proxy_up > 0 || proxy_conn_count > 0 {
                                         consecutive_rx_zero += 1;
-                                        if consecutive_rx_zero >= 15 && !warned_no_udp_reply {
+                                        if consecutive_rx_zero >= 24 && !warned_no_udp_reply {
                                             warned_no_udp_reply = true;
+                                            mark_active_handshake_failed_if_pending(&mut guard);
                                             guard.handshake_status = Some("Нет ответа по UDP от сервера (проверьте доступность VPS, порт или блокировку WireGuard)".to_string());
                                             push_log(
                                                 &mut guard.logs,
@@ -2051,7 +2209,7 @@ fn spawn_and_monitor_singbox(
                                     }
                                 } else if proxy_conn_count > 0 && proxy_up > 0 && proxy_down == 0 {
                                     consecutive_rx_zero += 1;
-                                    if consecutive_rx_zero == 25 {
+                                    if consecutive_rx_zero == 40 {
                                         push_log(
                                             &mut guard.logs,
                                             "[AmneziaWG] Внимание: трафик отправляется через proxy, но входящие пакеты не возвращаются (проверьте порт подключения или блокировку UDP).".to_string(),
@@ -2064,7 +2222,12 @@ fn spawn_and_monitor_singbox(
                             let tel_enabled = guard.persistent.passive_telemetry_enabled;
                             if let Some(ref mut tel) = guard.active_telemetry {
                                 if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
-                                    tel.record_traffic_tick(total_up, total_down, up_bps, down_bps);
+                                    tel.record_traffic_tick(
+                                        tunnel_total_up,
+                                        tunnel_total_down,
+                                        up_bps,
+                                        down_bps,
+                                    );
                                     if let Some(snap) = enigma_snap {
                                         tel.enigma_handshakes = Some(snap.handshakes_sent);
                                         tel.enigma_decoys = Some(snap.decoys_sent);
@@ -2082,7 +2245,7 @@ fn spawn_and_monitor_singbox(
                                         && last_checkpoint_at.elapsed() >= Duration::from_secs(60)
                                         && (tel.started_instant.elapsed().as_secs() >= 5
                                             || tel.handshake_ok
-                                            || total_down > 0)
+                                            || tunnel_total_down > 0)
                                     {
                                         checkpoint_rec = Some(tel.to_record(None, "active"));
                                         last_checkpoint_at = Instant::now();
@@ -2093,14 +2256,15 @@ fn spawn_and_monitor_singbox(
                             guard.up_speed = 0;
                             guard.down_speed = 0;
                             initialized = true;
-                            if proxy_down > 0 {
+                            if has_tunnel_rx {
+                                mark_active_handshake_succeeded(&mut guard);
                                 if let Some(ref mut tel) = guard.active_telemetry {
                                     if telemetry_session_id.as_deref() == Some(tel.id.as_str()) {
                                         tel.mark_handshake_ok();
                                     }
                                 }
                             }
-                            if is_awg && proxy_down > 0 && guard.is_handshaking {
+                            if is_awg && has_tunnel_rx && guard.is_handshaking {
                                 guard.is_handshaking = false;
                                 guard.handshake_status = None;
                                 push_log(
@@ -2113,10 +2277,8 @@ fn spawn_and_monitor_singbox(
                                 );
                             }
                         }
-                        guard.up_bytes = total_up;
-                        guard.down_bytes = total_down;
-                        prev_up = total_up;
-                        prev_down = total_down;
+                        guard.up_bytes = tunnel_total_up;
+                        guard.down_bytes = tunnel_total_down;
                     }
 
                     if should_spawn_probe {
@@ -2166,7 +2328,7 @@ fn spawn_and_monitor_singbox(
                     }
                 }
             }
-            thread::sleep(Duration::from_millis(800));
+            thread::sleep(Duration::from_millis(500));
         }
     });
 
@@ -2638,60 +2800,117 @@ async fn connect_vpn_internal(
             }
         }
 
-        // 1.5. Amnezia-style automatic UDP listen_port rotation on connect/reconnect
-        if is_awg_protocol(&profile.protocol)
-            && profile.protocol != "awg_vless"
-            && profile.protocol != "enigma"
-            && (!preserve_listen_port
-                || (profile.auto_rotate_listen_port.unwrap_or(true)
-                    && profile.listen_port.unwrap_or(0) == 0))
-        {
-            let old_listen_port = profile.listen_port;
-            let mut exclude = vec![
-                profile.port,
-                routing_snapshot.local_mixed_port,
-                routing_snapshot.clash_api_port,
-                2081,
-            ];
-            if let Some(old_lp) = old_listen_port {
-                if old_lp > 0 {
-                    exclude.push(old_lp);
-                }
-            }
-            let new_lp = pick_random_free_udp_port(&exclude);
-            profile.listen_port = Some(new_lp);
-            profile.uri = build_profile_uri(&profile);
-
+        // 1.4. Auto-heal any corrupted server port that fell outside explicit hop_ports
+        if let Some((old_port, healed_port)) = heal_corrupted_hop_port(&mut profile) {
+            let proto_label = if profile.protocol == "enigma" {
+                "Enigma"
+            } else if profile.protocol == "hysteria2" {
+                "Hysteria2"
+            } else {
+                "AmneziaWG"
+            };
             if let Ok(mut rt) = state_clone.lock() {
                 if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile.id) {
-                    p.listen_port = Some(new_lp);
+                    p.port = healed_port;
                     p.uri = profile.uri.clone();
                 }
                 save_persistent_state(&rt.persistent);
+                push_log(
+                    &mut rt.logs,
+                    format!(
+                        "[{}] Восстановлен корректный порт из диапазона hop_ports: {} → {}",
+                        proto_label, old_port, healed_port
+                    ),
+                );
+            }
+        }
 
-                let proto_tag = if profile.protocol == "wireguard" || profile.protocol == "wg" {
-                    "WireGuard"
-                } else if profile.protocol == "awg_quic" {
-                    "AWG + QUIC Pre-Warm"
-                } else {
-                    "AmneziaWG"
-                };
-                if let Some(old_lp) = old_listen_port.filter(|&p| p > 0) {
-                    push_log(
-                        &mut rt.logs,
-                        format!(
-                            "[{}] Порт прослушивания (ListenPort) изменен при переподключении: {} → {}",
-                            proto_tag, old_lp, new_lp
-                        ),
-                    );
-                } else {
-                    push_log(
-                        &mut rt.logs,
-                        format!(
-                            "[{}] Назначен случайный порт прослушивания (ListenPort): {}",
-                            proto_tag, new_lp
-                        ),
-                    );
+        let prev_handshake_failed = state_clone
+            .lock()
+            .map(|rt| rt.failed_handshake_profiles.contains(&profile.id))
+            .unwrap_or(false);
+
+        // 1.5. Amnezia-style automatic UDP listen_port rotation on connect/reconnect,
+        // busy socket conflict (prevents sing-box IPC error -98), Windows ephemeral range collision,
+        // or previous handshake failure (defeats TSPU 5-tuple blackholes).
+        if is_awg_protocol(&profile.protocol)
+            && profile.protocol != "awg_vless"
+            && profile.protocol != "enigma"
+        {
+            let auto_rotate = profile.auto_rotate_listen_port.unwrap_or(true);
+            let current_lp = profile.listen_port.unwrap_or(0);
+            let lp_busy = current_lp > 0 && !is_udp_port_free(current_lp);
+            let lp_ephemeral = auto_rotate && current_lp >= 49152;
+            let lp_failed_prev = auto_rotate && prev_handshake_failed;
+            let should_rotate_lp = !preserve_listen_port
+                || (auto_rotate && current_lp == 0)
+                || lp_busy
+                || lp_ephemeral
+                || lp_failed_prev;
+
+            if should_rotate_lp {
+                let old_listen_port = profile.listen_port;
+                let mut exclude = vec![
+                    profile.port,
+                    routing_snapshot.local_mixed_port,
+                    routing_snapshot.clash_api_port,
+                    2081,
+                ];
+                if let Some(old_lp) = old_listen_port {
+                    if old_lp > 0 {
+                        exclude.push(old_lp);
+                    }
+                }
+                let new_lp = pick_random_free_udp_port(&exclude);
+                profile.listen_port = Some(new_lp);
+                profile.uri = build_profile_uri(&profile);
+
+                if let Ok(mut rt) = state_clone.lock() {
+                    if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == profile.id) {
+                        p.listen_port = Some(new_lp);
+                        p.uri = profile.uri.clone();
+                    }
+                    save_persistent_state(&rt.persistent);
+
+                    let proto_tag = if profile.protocol == "wireguard" || profile.protocol == "wg" {
+                        "WireGuard"
+                    } else if profile.protocol == "awg_quic" {
+                        "AWG + QUIC Pre-Warm"
+                    } else {
+                        "AmneziaWG"
+                    };
+                    if let Some(old_lp) = old_listen_port.filter(|&p| p > 0) {
+                        let reason_msg = if lp_busy {
+                            format!(
+                                "[{}] Порт прослушивания (ListenPort) {} занят другим приложением — выбран свободный порт: {}",
+                                proto_tag, old_lp, new_lp
+                            )
+                        } else if lp_failed_prev {
+                            format!(
+                                "[{}] Автосмена ListenPort после неудачного рукопожатия (обход блокировки 5-tuple): {} → {}",
+                                proto_tag, old_lp, new_lp
+                            )
+                        } else if lp_ephemeral && preserve_listen_port {
+                            format!(
+                                "[{}] ListenPort перенесен из динамического диапазона Windows (49152-65535): {} → {}",
+                                proto_tag, old_lp, new_lp
+                            )
+                        } else {
+                            format!(
+                                "[{}] Порт прослушивания (ListenPort) изменен при переподключении: {} → {}",
+                                proto_tag, old_lp, new_lp
+                            )
+                        };
+                        push_log(&mut rt.logs, reason_msg);
+                    } else {
+                        push_log(
+                            &mut rt.logs,
+                            format!(
+                                "[{}] Назначен случайный порт прослушивания (ListenPort): {}",
+                                proto_tag, new_lp
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -2716,7 +2935,7 @@ async fn connect_vpn_internal(
             }
         }
 
-        // 1.9. Hysteria2 / Enigma automatic UDP server port rotation across hop_ports on reconnect/auto-hunt
+        // 1.9. Hysteria2 / Enigma automatic UDP server port rotation across hop_ports on reconnect or failed handshake
         let has_enigma_hops = profile.protocol == "enigma"
             && profile
                 .hop_ports
@@ -2724,7 +2943,9 @@ async fn connect_vpn_internal(
                 .or(profile.awg_hop_ports.as_deref())
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
-        if !preserve_listen_port && (profile.protocol == "hysteria2" || has_enigma_hops) {
+        if (!preserve_listen_port || prev_handshake_failed)
+            && (profile.protocol == "hysteria2" || has_enigma_hops)
+        {
             let candidates = get_profile_candidate_ports(&profile, None, Some(vec![profile.port]), 24);
             if !candidates.is_empty() {
                 let idx = (Uuid::new_v4().as_u128() as usize) % candidates.len();
@@ -2746,11 +2967,16 @@ async fn connect_vpn_internal(
                             p.uri = profile.uri.clone();
                         }
                         save_persistent_state(&rt.persistent);
+                        let reason_label = if prev_handshake_failed && preserve_listen_port {
+                            "после неудачного рукопожатия"
+                        } else {
+                            "при переподключении"
+                        };
                         push_log(
                             &mut rt.logs,
                             format!(
-                                "[{}] Порт подключения изменен при переподключении: {} → {}",
-                                proto_label, old_port, new_port
+                                "[{}] Порт подключения изменен {}: {} → {}",
+                                proto_label, reason_label, old_port, new_port
                             ),
                         );
                     }
@@ -2934,52 +3160,112 @@ async fn connect_bridge_internal(
             }
         }
 
+        // 1.4. Auto-heal any corrupted hop ports on entry/exit profiles
+        for (label, prof_ref) in [
+            ("Входной мост", &mut entry_profile),
+            ("Выходной сервер", &mut exit_profile),
+        ] {
+            if let Some((old_port, healed_port)) = heal_corrupted_hop_port(prof_ref) {
+                if let Ok(mut rt) = state_clone.lock() {
+                    if let Some(p) = rt.persistent.profiles.iter_mut().find(|p| p.id == prof_ref.id) {
+                        p.port = healed_port;
+                        p.uri = prof_ref.uri.clone();
+                    }
+                    save_persistent_state(&rt.persistent);
+                    push_log(
+                        &mut rt.logs,
+                        format!(
+                            "[Мост 2-Hop / {}] Восстановлен корректный порт из диапазона hop_ports: {} → {}",
+                            label, old_port, healed_port
+                        ),
+                    );
+                }
+            }
+        }
+
+        let (entry_prev_failed, exit_prev_failed) = state_clone
+            .lock()
+            .map(|rt| {
+                (
+                    rt.failed_handshake_profiles.contains(&entry_profile.id),
+                    rt.failed_handshake_profiles.contains(&exit_profile.id),
+                )
+            })
+            .unwrap_or((false, false));
+
         // 1.5. Rotate / assign free UDP listen_port for Entry WG/AWG if needed
         if is_awg_protocol(&entry_profile.protocol)
             && entry_profile.protocol != "awg_vless"
             && entry_profile.protocol != "enigma"
-            && (!preserve_listen_port
-                || (entry_profile.auto_rotate_listen_port.unwrap_or(true)
-                    && entry_profile.listen_port.unwrap_or(0) == 0))
         {
-            let mut exclude = vec![
-                entry_profile.port,
-                exit_profile.port,
-                routing_snapshot.local_mixed_port,
-                routing_snapshot.clash_api_port,
-                2081,
-            ];
-            if let Some(old_lp) = entry_profile.listen_port.filter(|&p| p > 0) {
-                exclude.push(old_lp);
-            }
-            if let Some(exit_lp) = exit_profile.listen_port.filter(|&p| p > 0) {
-                exclude.push(exit_lp);
-            }
-            let new_lp = pick_random_free_udp_port(&exclude);
-            entry_profile.listen_port = Some(new_lp);
-            entry_profile.uri = build_profile_uri(&entry_profile);
-            if let Ok(mut rt) = state_clone.lock() {
-                if let Some(p) = rt
-                    .persistent
-                    .profiles
-                    .iter_mut()
-                    .find(|p| p.id == entry_profile.id)
-                {
-                    p.listen_port = Some(new_lp);
-                    p.uri = entry_profile.uri.clone();
+            let auto_rotate = entry_profile.auto_rotate_listen_port.unwrap_or(true);
+            let current_lp = entry_profile.listen_port.unwrap_or(0);
+            let lp_busy = current_lp > 0 && !is_udp_port_free(current_lp);
+            let lp_ephemeral = auto_rotate && current_lp >= 49152;
+            let lp_failed_prev = auto_rotate && entry_prev_failed;
+            if !preserve_listen_port
+                || (auto_rotate && current_lp == 0)
+                || lp_busy
+                || lp_ephemeral
+                || lp_failed_prev
+            {
+                let mut exclude = vec![
+                    entry_profile.port,
+                    exit_profile.port,
+                    routing_snapshot.local_mixed_port,
+                    routing_snapshot.clash_api_port,
+                    2081,
+                ];
+                if current_lp > 0 {
+                    exclude.push(current_lp);
                 }
-                save_persistent_state(&rt.persistent);
+                if let Some(exit_lp) = exit_profile.listen_port.filter(|&p| p > 0) {
+                    exclude.push(exit_lp);
+                }
+                let new_lp = pick_random_free_udp_port(&exclude);
+                entry_profile.listen_port = Some(new_lp);
+                entry_profile.uri = build_profile_uri(&entry_profile);
+                if let Ok(mut rt) = state_clone.lock() {
+                    if let Some(p) = rt
+                        .persistent
+                        .profiles
+                        .iter_mut()
+                        .find(|p| p.id == entry_profile.id)
+                    {
+                        p.listen_port = Some(new_lp);
+                        p.uri = entry_profile.uri.clone();
+                    }
+                    save_persistent_state(&rt.persistent);
+                    if lp_busy {
+                        push_log(
+                            &mut rt.logs,
+                            format!(
+                                "[Мост 2-Hop / Вход] ListenPort {} занят — выбран свободный порт: {}",
+                                current_lp, new_lp
+                            ),
+                        );
+                    }
+                }
             }
         }
 
-        // 1.6. Prevent local WG listen_port collision between Entry and Exit if both are WG/AWG
+        // 1.6. Prevent local WG listen_port collision / busy socket on Exit if both are WG/AWG
         if is_awg_protocol(&exit_profile.protocol)
             && exit_profile.protocol != "awg_vless"
             && exit_profile.protocol != "enigma"
         {
             let entry_lp = entry_profile.listen_port.unwrap_or(0);
             let exit_lp = exit_profile.listen_port.unwrap_or(0);
-            if (entry_lp > 0 && exit_lp == entry_lp) || (!preserve_listen_port && exit_lp > 0) {
+            let exit_auto = exit_profile.auto_rotate_listen_port.unwrap_or(true);
+            let exit_busy = exit_lp > 0 && !is_udp_port_free(exit_lp);
+            let exit_ephemeral = exit_auto && exit_lp >= 49152;
+            let exit_failed = exit_auto && exit_prev_failed;
+            if (entry_lp > 0 && exit_lp == entry_lp)
+                || (!preserve_listen_port && exit_lp > 0)
+                || exit_busy
+                || exit_ephemeral
+                || exit_failed
+            {
                 let mut exclude = vec![
                     entry_profile.port,
                     exit_profile.port,
@@ -3007,6 +3293,15 @@ async fn connect_bridge_internal(
                         p.uri = exit_profile.uri.clone();
                     }
                     save_persistent_state(&rt.persistent);
+                    if exit_busy {
+                        push_log(
+                            &mut rt.logs,
+                            format!(
+                                "[Мост 2-Hop / Выход] ListenPort {} занят — выбран свободный порт: {}",
+                                exit_lp, new_exit_lp
+                            ),
+                        );
+                    }
                 }
             }
         }
@@ -4304,7 +4599,7 @@ async fn pick_and_import_enigma_keybook(
     #[cfg(target_os = "android")]
     {
         let _ = (app, profile_id, state);
-        return Err("Импорт отдельного .nvkey поддерживается в ПК-версии (2.2.1).".to_string());
+        return Err("Импорт отдельного .nvkey поддерживается в ПК-версии (2.2.2).".to_string());
     }
 
     #[cfg(not(target_os = "android"))]
@@ -9105,7 +9400,22 @@ pub fn run() {
             app.handle().plugin(crate::android_vpn::init())?;
         }
 
-        let persistent = load_persistent_state();
+        let mut persistent = load_persistent_state();
+        let mut initial_logs =
+            vec!["[NeuroVeil VPN] Клиент инициализирован. Готов к работе.".to_string()];
+        let mut healed_any = false;
+        for prof in &mut persistent.profiles {
+            if let Some((old_p, new_p)) = heal_corrupted_hop_port(prof) {
+                healed_any = true;
+                initial_logs.push(format!(
+                    "[Автоисправление] Профиль '{}': порт {} вне диапазона hop_ports восстановлен → {}",
+                    prof.name, old_p, new_p
+                ));
+            }
+        }
+        if healed_any {
+            save_persistent_state(&persistent);
+        }
         let initial_installed = if cfg!(target_os = "android") {
             true
         } else {
@@ -9135,7 +9445,7 @@ pub fn run() {
             } else {
                 "Не установлен".to_string()
             },
-            logs: vec!["[NeuroVeil VPN] Клиент инициализирован. Готов к работе.".to_string()],
+            logs: initial_logs,
             up_bytes: 0,
             down_bytes: 0,
             up_speed: 0,
@@ -9148,6 +9458,7 @@ pub fn run() {
             bridge_exit_name: None,
             bridge_entry_protocol: None,
             bridge_exit_protocol: None,
+            failed_handshake_profiles: HashSet::new(),
         }));
         app.manage(shared_state.clone());
 
@@ -9178,7 +9489,7 @@ pub fn run() {
             let tray_cleanup = shared_state.clone();
             let _tray = TrayIconBuilder::with_id("main-tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("NeuroVeil VPN v2.2.1")
+                .tooltip("NeuroVeil VPN v2.2.2")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| {
@@ -9240,7 +9551,7 @@ pub fn run() {
 
                 if should_start_minimized {
                     let _ = window.hide();
-                    println!("[NeuroVeil VPN 2.2.1] Window started minimized to system tray.");
+                    println!("[NeuroVeil VPN 2.2.2] Window started minimized to system tray.");
                 } else {
                     let _ = window.show();
                     apply_frameless_dark_border(&window);
@@ -9248,7 +9559,7 @@ pub fn run() {
                         let _ = window.unminimize();
                     }
                     let _ = window.set_focus();
-                    println!("[NeuroVeil VPN 2.2.1] Main window shown and focused.");
+                    println!("[NeuroVeil VPN 2.2.2] Main window shown and focused.");
                 }
             }
         }
@@ -9499,3 +9810,91 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("Ошибка запуска Tauri-приложения NeuroVeil VPN");
 }
+
+#[cfg(test)]
+mod traffic_and_log_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_tunneled_clash_connection_filtering() {
+        assert!(!is_tunneled_clash_connection(&json!({ "chains": ["direct"] })));
+        assert!(!is_tunneled_clash_connection(&json!({ "chains": ["direct", "default-outbound"] })));
+        assert!(!is_tunneled_clash_connection(&json!({ "chains": ["block"] })));
+        assert!(!is_tunneled_clash_connection(&json!({ "chains": ["dns-out"] })));
+        assert!(!is_tunneled_clash_connection(&json!({ "chains": [] })));
+
+        assert!(is_tunneled_clash_connection(&json!({ "chains": ["proxy"] })));
+        assert!(is_tunneled_clash_connection(&json!({ "chains": ["proxy", "default-outbound"] })));
+        assert!(is_tunneled_clash_connection(&json!({ "chains": ["vless-reality-detour", "proxy"] })));
+        assert!(is_tunneled_clash_connection(&json!({ "chains": ["bridge-entry", "proxy"] })));
+        assert!(is_tunneled_clash_connection(&json!({ "chains": ["NL - VLESS", "auto", "proxy"] })));
+    }
+
+    #[test]
+    fn test_sample_tunneled_traffic_excludes_direct_and_tracks_deltas() {
+        let mut tracked: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut total_up = 0u64;
+        let mut total_down = 0u64;
+
+        // Tick 1: one direct connection (huge) + one proxy connection
+        let tick1 = json!({
+            "uploadTotal": 999_999,
+            "downloadTotal": 9_999_999,
+            "connections": [
+                { "id": "direct-1", "chains": ["direct", "default-outbound"], "upload": 500_000, "download": 8_000_000 },
+                { "id": "proxy-1", "chains": ["proxy"], "upload": 1_000, "download": 5_000 }
+            ]
+        });
+        let s1 = sample_tunneled_traffic(&tick1, &mut tracked);
+        assert_eq!(s1.proxy_conn_count, 1);
+        assert_eq!(s1.delta_up, 1_000);
+        assert_eq!(s1.delta_down, 5_000);
+        total_up += s1.delta_up;
+        total_down += s1.delta_down;
+
+        // Tick 2: direct grows massively, proxy-1 grows by +200/+1500, proxy-2 appears
+        let tick2 = json!({
+            "uploadTotal": 2_000_000,
+            "downloadTotal": 20_000_000,
+            "connections": [
+                { "id": "direct-1", "chains": ["direct", "default-outbound"], "upload": 1_500_000, "download": 18_000_000 },
+                { "id": "proxy-1", "chains": ["proxy"], "upload": 1_200, "download": 6_500 },
+                { "id": "proxy-2", "chains": ["vless-reality-detour", "proxy"], "upload": 300, "download": 400 }
+            ]
+        });
+        let s2 = sample_tunneled_traffic(&tick2, &mut tracked);
+        assert_eq!(s2.proxy_conn_count, 2);
+        assert_eq!(s2.delta_up, 500);
+        assert_eq!(s2.delta_down, 1_900);
+        total_up += s2.delta_up;
+        total_down += s2.delta_down;
+
+        // Tick 3: proxy-1 closes, proxy-2 grows by +100/+600 -> total stays monotonic
+        let tick3 = json!({
+            "uploadTotal": 3_000_000,
+            "downloadTotal": 30_000_000,
+            "connections": [
+                { "id": "proxy-2", "chains": ["vless-reality-detour", "proxy"], "upload": 400, "download": 1_000 }
+            ]
+        });
+        let s3 = sample_tunneled_traffic(&tick3, &mut tracked);
+        assert_eq!(s3.proxy_conn_count, 1);
+        assert_eq!(s3.delta_up, 100);
+        assert_eq!(s3.delta_down, 600);
+        total_up += s3.delta_up;
+        total_down += s3.delta_down;
+
+        assert_eq!(total_up, 1_600);
+        assert_eq!(total_down, 7_500);
+        assert!(!tracked.contains_key("proxy-1"));
+        assert_eq!(tracked.get("proxy-2"), Some(&(400, 1_000)));
+    }
+
+    #[test]
+    fn test_log_buffer_limit_exceeds_250() {
+        assert!(MAX_UI_LOG_LINES >= 2000);
+    }
+}
+

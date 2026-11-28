@@ -104,7 +104,7 @@ import {
 import pkg from "../package.json";
 
 const APP_VERSION = pkg.version;
-const APP_BUILD = "2210";
+const APP_BUILD = "2220";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 Б";
@@ -7506,6 +7506,9 @@ export default function App() {
                     {status.connected ? "Активно" : "Остановлено"}
                   </b>{" "}
                   {status.singbox_version ? `(${status.singbox_version})` : ""}
+                  <span className="ml-2 text-[11px] text-slate-400">
+                    • {status.logs.length} записей
+                  </span>
                 </span>
               </div>
               <div className="flex items-center gap-2">
